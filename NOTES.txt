@@ -1,0 +1,40 @@
+Chrome Web Store Publication Notes - ClinSpark Extension
+
+Single purpose
+The extension packages three existing ClinSpark automation scripts into one Chrome extension. Each script runs only on its assigned ClinSpark environment and supports authorized workflow automation inside ClinSpark.
+
+Host permission justification
+The extension needs host access for:
+- https://cenexel.clinspark.com/*
+- https://cenexeltest.clinspark.com/*
+- https://cenexel-val.clinspark.com/*
+
+These permissions are required so Chrome can inject the appropriate automator content script into each ClinSpark environment. The extension does not request access to unrelated websites or broad URL patterns.
+
+Remote code justification
+The extension does not load remote code. The JavaScript files are packaged with the extension. Updates should be distributed by uploading a new extension package to the existing Chrome Web Store listing with an increased manifest version.
+
+Data usage disclosure
+The extension does not collect, sell, transmit, or share user data with the developer or third parties. The content scripts interact with ClinSpark pages in the user's browser and may use local browser storage for automation state and UI preferences.
+
+Permissions used
+Host permissions only. No tabs, storage, scripting, downloads, identity, cookies, or other Chrome extension API permissions are requested in manifest.json.
+
+Automatic updates for users
+Users who install the extension from Chrome Web Store will receive updates automatically after a new version is approved and published to the same listing. To trigger Chrome Web Store updates, increment manifest.json version before uploading each new package.
+
+Recommended update workflow
+1. Update the relevant userscript file.
+2. Test locally with chrome://extensions using Load unpacked.
+3. Increase the version in manifest.json.
+4. Zip the extension files.
+5. Upload the ZIP to the same Chrome Web Store listing.
+6. Submit for review and publish after approval.
+
+Current extension version
+4.3.0
+
+Content script mapping
+- ClinSpark Automator.js -> https://cenexel.clinspark.com/*
+- ClinSpark Test Automator.js -> https://cenexeltest.clinspark.com/*
+- ClinSpark Val Automator.js -> https://cenexel-val.clinspark.com/*

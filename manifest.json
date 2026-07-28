@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "ClinSpark Extension",
+  "version": "4.3.0",
+  "description": "Runs the matching ClinSpark automator on production, test, and validation ClinSpark environments.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "ClinSpark Extension",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://cenexel.clinspark.com/*"
+      ],
+      "js": [
+        "ClinSpark Automator.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://cenexeltest.clinspark.com/*"
+      ],
+      "js": [
+        "ClinSpark Test Automator.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://cenexel-val.clinspark.com/*"
+      ],
+      "js": [
+        "ClinSpark Val Automator.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "https://cenexel.clinspark.com/*",
+    "https://cenexeltest.clinspark.com/*",
+    "https://cenexel-val.clinspark.com/*"
+  ]
+}
