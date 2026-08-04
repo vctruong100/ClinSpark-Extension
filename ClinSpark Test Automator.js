@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.0
+// @version 4.3.2
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -18297,14 +18297,9 @@
         } catch (e) {}
         log("BPL: hideExisting initial state = " + bplHideExisting);
 
-        var bplShowUpdatedOnly = false;
         try {
-            var savedShowUpdated = localStorage.getItem(STORAGE_BPL_SHOW_UPDATED_ONLY);
-            if (savedShowUpdated === "true") {
-                bplShowUpdatedOnly = true;
-            }
+            localStorage.removeItem(STORAGE_BPL_SHOW_UPDATED_ONLY);
         } catch (e) {}
-        log("BPL: showUpdatedOnly initial state = " + bplShowUpdatedOnly);
 
         var bplShowDuplicatesOnly = false;
 
@@ -19548,11 +19543,100 @@
             }
         }
 
+        var bplFilterStatusDiv = null;
+
+        function bplGetFilterStats(filter, duplicateKeys) {
+            var stats = {
+                total: 0,
+                visible: 0,
+                userAdded: 0,
+                updated: 0,
+                existing: 0
+            };
+            var filterLower = (filter || "").toLowerCase();
+            for (var bsi = 0; bsi < segments.length; bsi++) {
+                var bseg = segments[bsi];
+                var bsegNameMatches = !filterLower || bseg.text.toLowerCase().indexOf(filterLower) !== -1;
+                var bforms = segmentFormMap[bseg.value] || [];
+                for (var bfi = 0; bfi < bforms.length; bfi++) {
+                    var bentry = bforms[bfi];
+                    var bkey = getFormDataKey(bseg.value, bentry.value, bentry.index);
+                    var bdata = formDataStore[bkey] || getDefaultFormData();
+                    var bisAuto = bentry.autoPopulated || bdata.autoPopulated || false;
+                    var bisUpdated = bisAuto && bdata.modified;
+                    stats.total++;
+                    if (bisAuto) {
+                        stats.existing++;
+                    } else {
+                        stats.userAdded++;
+                    }
+                    if (bisUpdated) {
+                        stats.updated++;
+                    }
+                    if (bisAuto && bplHideExisting) {
+                        continue;
+                    }
+                    if (bplShowDuplicatesOnly && !(duplicateKeys && duplicateKeys[bkey])) {
+                        continue;
+                    }
+                    if (filterLower && !bsegNameMatches) {
+                        var bsearchable = (bentry.text || "").toLowerCase();
+                        var bevents = bdata.studyEvents || [];
+                        for (var bei = 0; bei < bevents.length; bei++) {
+                            bsearchable += " " + (bevents[bei].text || "").toLowerCase();
+                        }
+                        if (bdata.timepointDisplay) {
+                            bsearchable += " " + bdata.timepointDisplay.toLowerCase();
+                        }
+                        bsearchable += " " + bplFormatTimePoint(bdata.days || 0, bdata.hours || 0, bdata.minutes || 0, bdata.seconds || 0, bdata.preReference || false).toLowerCase();
+                        if (bdata.exampleTime && bdata.exampleTime !== "N/A") {
+                            bsearchable += " " + bdata.exampleTime.toLowerCase();
+                        }
+                        if (bsearchable.indexOf(filterLower) === -1) {
+                            continue;
+                        }
+                    }
+                    stats.visible++;
+                }
+            }
+            return stats;
+        }
+
+        function bplUpdateFilterControls(hideBtn) {
+            if (hideBtn) {
+                hideBtn.textContent = bplHideExisting ? "Existing: Hidden" : "Existing: Visible";
+                hideBtn.title = bplHideExisting ? "Existing auto-populated forms are hidden. Click to show them." : "Existing auto-populated forms are visible. Click to hide them.";
+                hideBtn.style.borderColor = bplHideExisting ? "#f39c12" : "#2980b9";
+                hideBtn.style.background = bplHideExisting ? "#3a2a12" : "#1a2a3a";
+                hideBtn.style.color = bplHideExisting ? "#ffd166" : "#5dade2";
+            }
+        }
+
+        function bplUpdateFilterStatus(stats, filter) {
+            if (!bplFilterStatusDiv) return;
+            var existingText = bplHideExisting ? "existing hidden" : "existing visible";
+            var dupText = bplShowDuplicatesOnly ? ", duplicates only" : "";
+            var searchText = (filter || "").trim() ? ", search: \"" + (filter || "").trim() + "\"" : "";
+            bplFilterStatusDiv.textContent = "Currently showing " + stats.visible + " of " + stats.total + " forms (" + existingText + dupText + searchText + "). User-added: " + stats.userAdded + "; updated existing: " + stats.updated + "; existing total: " + stats.existing + ".";
+            if (stats.visible === 0 && stats.total > 0) {
+                bplFilterStatusDiv.style.borderColor = "#f39c12";
+                bplFilterStatusDiv.style.background = "#2f2512";
+                bplFilterStatusDiv.style.color = "#ffd166";
+                bplFilterStatusDiv.textContent += " The list is empty because the active filters are hiding the available forms.";
+            } else {
+                bplFilterStatusDiv.style.borderColor = "#34495e";
+                bplFilterStatusDiv.style.background = "#17212b";
+                bplFilterStatusDiv.style.color = "#d6eaff";
+            }
+        }
+
         function renderCenterPanel(filter) {
             saveFormDataFromPanel(selectedFormKey);
             var scrollTop = centerBody.scrollTop;
             centerBody.innerHTML = "";
             var bplDuplicateKeys = bplFindDuplicates(segments, segmentFormMap, formDataStore, segmentCheckboxStates);
+            var bplFilterStats = bplGetFilterStats(filter, bplDuplicateKeys);
+            bplUpdateFilterStatus(bplFilterStats, filter);
             var filterLower = (filter || "").toLowerCase();
             for (var si2 = 0; si2 < segments.length; si2++) {
                 var seg = segments[si2];
@@ -19568,9 +19652,6 @@
                         var fcEvents = fcData.studyEvents || [];
                         var fcIsAuto = fcEntry.autoPopulated || fcData.autoPopulated || false;
                         if (fcIsAuto && bplHideExisting) {
-                            continue;
-                        }
-                        if (bplShowUpdatedOnly && !((!fcIsAuto) || (fcIsAuto && fcData.modified))) {
                             continue;
                         }
                         var searchableText = (fcEntry.text || "").toLowerCase();
@@ -19589,23 +19670,6 @@
                         }
                     }
                     if (matchingFormIndices.length === 0) {
-                        continue;
-                    }
-                }
-                if (bplShowUpdatedOnly) {
-                    var segFormsForFilter = segmentFormMap[seg.value] || [];
-                    var hasVisibleForm = false;
-                    for (var sufi = 0; sufi < segFormsForFilter.length; sufi++) {
-                        var sufEntry = segFormsForFilter[sufi];
-                        var sufKey = getFormDataKey(seg.value, sufEntry.value, sufEntry.index);
-                        var sufData = formDataStore[sufKey] || getDefaultFormData();
-                        var sufIsAuto = sufEntry.autoPopulated || sufData.autoPopulated || false;
-                        if (!sufIsAuto || (sufIsAuto && sufData.modified)) {
-                            hasVisibleForm = true;
-                            break;
-                        }
-                    }
-                    if (!hasVisibleForm) {
                         continue;
                     }
                 }
@@ -19980,9 +20044,6 @@
                         var fEvents = fData2.studyEvents || [];
                         var isAutoPopulated = fEntry.autoPopulated || fData2.autoPopulated || false;
                         if (isAutoPopulated && bplHideExisting) {
-                            continue;
-                        }
-                        if (bplShowUpdatedOnly && !((!isAutoPopulated) || (isAutoPopulated && fData2.modified))) {
                             continue;
                         }
                         if (matchingFormIndices !== null && matchingFormIndices.indexOf(fi) === -1) {
@@ -20418,6 +20479,12 @@
                 segBlock.appendChild(formDropArea);
                 centerBody.appendChild(segBlock);
             }
+            if (bplFilterStats.visible === 0) {
+                var bplEmptyState = document.createElement("div");
+                bplEmptyState.style.cssText = "margin:16px;padding:18px;border:1px solid " + (bplFilterStats.total > 0 ? "#f39c12" : "#444") + ";border-radius:6px;background:" + (bplFilterStats.total > 0 ? "#2f2512" : "#1f1f1f") + ";color:" + (bplFilterStats.total > 0 ? "#ffd166" : "#aaa") + ";font-size:13px;line-height:1.45;text-align:center;";
+                bplEmptyState.textContent = bplFilterStats.total > 0 ? "No forms match the current PLAP filters. Check the status bar below: Existing may be hidden, Duplicate filter may be on, or the search may be narrowing the list." : "No forms have been added to the PLAP Builder yet.";
+                centerBody.appendChild(bplEmptyState);
+            }
             centerBody.scrollTop = scrollTop;
             saveSession();
         }
@@ -20425,6 +20492,9 @@
         centerSearch.addEventListener("input", function() {
             renderCenterPanel(this.value);
         });
+
+        bplFilterStatusDiv = document.createElement("div");
+        bplFilterStatusDiv.style.cssText = "padding:8px 12px;border:1px solid #34495e;border-radius:6px;background:#17212b;color:#d6eaff;font-size:12px;font-weight:600;line-height:1.35;";
 
         var legendRow = document.createElement("div");
         legendRow.style.cssText = "display:flex;gap:16px;padding:8px 12px;border:1px solid #333;border-radius:6px;background:#1a1a1a;font-size:11px;color:#aaa;flex-wrap:wrap;";
@@ -20461,42 +20531,18 @@
         legendRow.appendChild(collapseAllBtn);
 
         var hideExistingBtn = document.createElement("button");
-        hideExistingBtn.textContent = bplHideExisting ? "\u{1F441} Show Existing" : "\u{1F6AB} Hide Existing";
-        hideExistingBtn.title = bplHideExisting ? "Show auto-populated items from SA table" : "Hide auto-populated items from SA table";
-        hideExistingBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid " + (bplHideExisting ? "#2980b9" : "#555") + ";background:" + (bplHideExisting ? "#1a2a3a" : "#2a2a2a") + ";color:" + (bplHideExisting ? "#5dade2" : "#aaa") + ";font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;";
+        hideExistingBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#aaa;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;";
         hideExistingBtn.addEventListener("click", function() {
             bplHideExisting = !bplHideExisting;
             try {
                 localStorage.setItem(STORAGE_BPL_HIDE_EXISTING, bplHideExisting ? "true" : "false");
             } catch (e) {}
-            this.textContent = bplHideExisting ? "\u{1F441} Show Existing" : "\u{1F6AB} Hide Existing";
-            this.title = bplHideExisting ? "Show auto-populated items from SA table" : "Hide auto-populated items from SA table";
-            this.style.borderColor = bplHideExisting ? "#2980b9" : "#555";
-            this.style.background = bplHideExisting ? "#1a2a3a" : "#2a2a2a";
-            this.style.color = bplHideExisting ? "#5dade2" : "#aaa";
+            bplUpdateFilterControls(hideExistingBtn);
             log("BPL: hideExisting toggled to " + bplHideExisting);
             renderCenterPanel(centerSearch.value);
         });
+        bplUpdateFilterControls(hideExistingBtn);
         legendRow.appendChild(hideExistingBtn);
-
-        var showUpdatedBtn = document.createElement("button");
-        showUpdatedBtn.textContent = bplShowUpdatedOnly ? "\u{1F441} Show All" : "\u{270F}\u{FE0F} Show Updated Only";
-        showUpdatedBtn.title = bplShowUpdatedOnly ? "Show all forms including unmodified auto-populated" : "Only show user-added forms and modified auto-populated forms";
-        showUpdatedBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid " + (bplShowUpdatedOnly ? "#27ae60" : "#555") + ";background:" + (bplShowUpdatedOnly ? "#1a2a1a" : "#2a2a2a") + ";color:" + (bplShowUpdatedOnly ? "#58d68d" : "#aaa") + ";font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;";
-        showUpdatedBtn.addEventListener("click", function() {
-            bplShowUpdatedOnly = !bplShowUpdatedOnly;
-            try {
-                localStorage.setItem(STORAGE_BPL_SHOW_UPDATED_ONLY, bplShowUpdatedOnly ? "true" : "false");
-            } catch (e) {}
-            this.textContent = bplShowUpdatedOnly ? "\u{1F441} Show All" : "\u{270F}\u{FE0F} Show Updated Only";
-            this.title = bplShowUpdatedOnly ? "Show all forms including unmodified auto-populated" : "Only show user-added forms and modified auto-populated forms";
-            this.style.borderColor = bplShowUpdatedOnly ? "#27ae60" : "#555";
-            this.style.background = bplShowUpdatedOnly ? "#1a2a1a" : "#2a2a2a";
-            this.style.color = bplShowUpdatedOnly ? "#58d68d" : "#aaa";
-            log("BPL: showUpdatedOnly toggled to " + bplShowUpdatedOnly);
-            renderCenterPanel(centerSearch.value);
-        });
-        legendRow.appendChild(showUpdatedBtn);
 
         var clearAllBtn = document.createElement("button");
         clearAllBtn.textContent = "\uD83D\uDDD1 Clear All";
@@ -20902,7 +20948,12 @@
         var bottomRow = document.createElement("div");
         bottomRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:12px;";
 
-        bottomRow.appendChild(legendRow);
+        var bottomLeftArea = document.createElement("div");
+        bottomLeftArea.style.cssText = "display:flex;flex-direction:column;gap:8px;flex:1;min-width:0;";
+        bottomLeftArea.appendChild(bplFilterStatusDiv);
+        bottomLeftArea.appendChild(legendRow);
+
+        bottomRow.appendChild(bottomLeftArea);
 
         var confirmArea = document.createElement("div");
         confirmArea.style.cssText = "display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;";
