@@ -32,7 +32,7 @@ Recommended update workflow
 6. Submit for review and publish after approval.
 
 Current extension version
-4.3.2
+4.3.3
 
 Content script mapping
 - ClinSpark Automator.js -> https://cenexel.clinspark.com/*

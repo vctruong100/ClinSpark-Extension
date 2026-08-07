@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Val Automator
 // @namespace vinh.activity.plan.state
-// @version 4.1.9
+// @version 4.2.0
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexel-val.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Val%20Val%20Automator.js
@@ -479,6 +479,7 @@
     var IFL_INTER_ITEM_DELAY = 800;
     var IFL_CANCELED = false;
     var IFL_STORAGE_IMPORT_STATE = "ifl.importState";
+    var IFL_STORAGE_CANCEL_REQUESTED = "ifl.cancelRequested";
     var IFL_STORAGE_STUDIES_CACHE = "ifl.studiesCache";
     var IFL_STORAGE_FULLSCREEN = "ifl.fullscreen";
     var IFL_STORAGE_DIVIDERS = "ifl.dividerWidths";
@@ -2766,6 +2767,23 @@
         try {localStorage.setItem(IFL_STORAGE_IMPORT_STATE, JSON.stringify(obj)); } catch(e) {}
     }
 
+    function ifl_isCancelRequested() {
+        try { return localStorage.getItem(IFL_STORAGE_CANCEL_REQUESTED) === "1"; } catch (e) {}
+        return false;
+    }
+
+    function ifl_requestCancel() {
+        IFL_CANCELED = true;
+        try { localStorage.setItem(IFL_STORAGE_CANCEL_REQUESTED, "1"); } catch (e) {}
+        ifl_clearImportState();
+        ifl_closeBgTab();
+        ifl_closeImportModal();
+    }
+
+    function ifl_clearCancelRequest() {
+        try { localStorage.removeItem(IFL_STORAGE_CANCEL_REQUESTED); } catch (e) {}
+    }
+
     function ifl_loadImportState() {
         try {
             var raw = localStorage.getItem(IFL_STORAGE_IMPORT_STATE);
@@ -4175,18 +4193,18 @@
         cancelBtn.textContent = "Cancel";
         cancelBtn.style.cssText = "background:rgba(239,68,68,0.3);border:1px solid rgba(239,68,68,0.5);color:#ff8a8a;padding:3px 12px;border-radius:6px;cursor:pointer;font-size:11px;";
         cancelBtn.onclick = function() {
-            IFL_CANCELED = true;
+            ifl_requestCancel();
             cancelBtn.disabled = true;
             cancelBtn.textContent = "Canceling\u2026";
         };
 
         var closeBtn = document.createElement("button");
         closeBtn.innerHTML = "\u2715";
-        closeBtn.title = "Close panel";
+        closeBtn.title = "Cancel import and close panel";
         closeBtn.style.cssText = "background:rgba(255,255,255,0.1);border:none;color:white;width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;";
         closeBtn.onmouseover = function() { closeBtn.style.background = "rgba(255,67,54,0.8)"; };
         closeBtn.onmouseout = function() { closeBtn.style.background = "rgba(255,255,255,0.1)"; };
-        closeBtn.onclick = function() { close(); };
+        closeBtn.onclick = function() { ifl_requestCancel(); close(); };
 
         hBtnGroup.appendChild(cancelBtn);
         hBtnGroup.appendChild(closeBtn);
@@ -4342,11 +4360,13 @@
     // ---- Persist/restore helpers for import state ----
 
     function ifl_persistProgress(progress, selectedItems, startIdx) {
+        if (IFL_CANCELED || ifl_isCancelRequested()) return;
         var statuses = [];
         for (var i = 0; i < progress.state.length; i++) {
             statuses.push({ status: progress.state[i].status, error: progress.state[i].error });
         }
         ifl_saveImportState({
+            resumeVersion: 2,
             items: selectedItems,
             statuses: statuses,
             currentIndex: startIdx,
@@ -4358,6 +4378,12 @@
     // ---- Import processing loop ----
 
     async function ifl_processImports(selectedItems, resumeIndex, existingStatuses) {
+        if (ifl_isCancelRequested()) {
+            IFL_CANCELED = true;
+            ifl_clearImportState();
+            log("IFL: import start blocked because cancellation was requested");
+            return;
+        }
         IFL_CANCELED = false;
         var startIdx = resumeIndex || 0;
         log("IFL: starting import of " + selectedItems.length + " forms from index " + startIdx);
@@ -4368,7 +4394,8 @@
         ifl_persistProgress(progress, selectedItems, startIdx);
 
         for (var idx = startIdx; idx < selectedItems.length; idx++) {
-            if (IFL_CANCELED) {
+            if (IFL_CANCELED || ifl_isCancelRequested()) {
+                IFL_CANCELED = true;
                 log("IFL: import canceled by user at index " + idx);
                 for (var ci = idx; ci < selectedItems.length; ci++) {
                     progress.setStatus(ci, progress.STATUS_FAILED, "Canceled");
@@ -4383,6 +4410,7 @@
             log("IFL: processing " + (idx + 1) + "/" + selectedItems.length + ": " + item.studyName + " / " + item.originalName);
 
             try {
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                 // Check if modal is open; if not, reopen it
                 var modalBody = document.querySelector(".modal-body");
                 var studySel = document.getElementById(IFL_STUDY_SELECT_ID);
@@ -4395,12 +4423,14 @@
                 // Select study
                 var ss = document.getElementById(IFL_STUDY_SELECT_ID);
                 if (!ss) throw new Error("Study select not found");
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                 ss.value = item.studyValue;
                 ifl_triggerChange(ss);
                 await sleep(300);
 
                 // Wait for form dropdown
                 var populated = await ifl_waitForFormOptions(IFL_FORM_POPULATE_TIMEOUT);
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                 if (!populated) throw new Error("Form dropdown did not populate");
 
                 // Select form
@@ -4418,9 +4448,11 @@
                 if (!formFound) throw new Error("Form option not found: " + item.formValue);
                 ifl_triggerChange(fs);
                 await sleep(500);
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
 
                 // Wait for itemGroupsDiv to populate so we can apply changes
                 var igDiv = await ifl_waitForItemGroupsDiv(IFL_ITEMGROUPS_TIMEOUT);
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
 
                 // Handle Lock on Save checkbox
                 var lockCb = document.getElementById(IFL_LOCK_CHECKBOX_ID);
@@ -4471,6 +4503,7 @@
                 var saveFailed = false;
 
                 while (saveAttempts < maxSaveAttempts) {
+                    if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                     saveAttempts++;
                     saveBtn = document.getElementById(IFL_SAVE_BUTTON_ID);
                     if (!saveBtn) throw new Error("Save button not found");
@@ -4482,6 +4515,7 @@
                     var closed = false;
                     var errorDetected = false;
                     while (Date.now() - start < IFL_MODAL_CLOSE_TIMEOUT) {
+                        if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                         // Check for error alert in modal
                         var alertEl = document.querySelector(".modal-body .alert-danger, .modal .alert-danger");
                         if (alertEl) {
@@ -4551,6 +4585,7 @@
                 }
 
                 // Save succeeded — mark as completed
+                if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
                 progress.setStatus(idx, progress.STATUS_COMPLETED);
                 ifl_persistProgress(progress, selectedItems, idx + 1);
 
@@ -4563,11 +4598,23 @@
                 }
 
                 await sleep(IFL_INTER_ITEM_DELAY);
+                if (IFL_CANCELED || ifl_isCancelRequested()) {
+                    IFL_CANCELED = true;
+                    break;
+                }
 
                 log("IFL: completed " + item.studyName + " / " + item.originalName);
 
             } catch (err) {
                 var errMsg = err && err.message ? err.message : String(err);
+                if (IFL_CANCELED || ifl_isCancelRequested() || errMsg === "Canceled") {
+                    IFL_CANCELED = true;
+                    log("IFL: import canceled by user at index " + idx);
+                    progress.setStatus(idx, progress.STATUS_FAILED, "Canceled");
+                    ifl_clearImportState();
+                    await ifl_closeImportModal();
+                    break;
+                }
                 log("IFL: FAILED " + item.studyName + " / " + item.originalName + " \u2014 " + errMsg);
                 progress.setStatus(idx, progress.STATUS_FAILED, errMsg);
                 ifl_persistProgress(progress, selectedItems, idx + 1);
@@ -4584,8 +4631,19 @@
     // ---- Resume after page refresh ----
 
     function ifl_resumeImport() {
+        if (ifl_isCancelRequested()) {
+            IFL_CANCELED = true;
+            ifl_clearImportState();
+            log("IFL: resume blocked because cancellation was requested");
+            return;
+        }
         var saved = ifl_loadImportState();
         if (!saved || !saved.active || !saved.items || saved.items.length === 0) return;
+        if (saved.resumeVersion !== 2) {
+            ifl_clearImportState();
+            log("IFL: cleared legacy import resume state");
+            return;
+        }
 
         // If we're on a form show page (redirect after save), go back to list page
         if (!isOnImportFromLibraryPage()) {
@@ -4689,6 +4747,7 @@
     async function runImportFromLibrary() {
         log("IFL: Import from Library started");
         IFL_CANCELED = false;
+        ifl_clearCancelRequest();
 
         // Page check
         if (!isOnImportFromLibraryPage()) {
