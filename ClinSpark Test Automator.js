@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.3
+// @version 4.3.10
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -509,7 +509,6 @@
         "https://cenexel.clinspark.com/secure/crfdesign/activityplans/show/",
         "https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/"
     ];
-    var STORAGE_SVC_REFERENCES = "activityPlanState.svc.references";
     var STORAGE_SVC_FULLSCREEN = "activityPlanState.svc.fullscreen";
 
     function isOnSVCPage() {
@@ -520,19 +519,6 @@
         return false;
     }
 
-    function svcLoadReferences() {
-        try {
-            var raw = localStorage.getItem(STORAGE_SVC_REFERENCES);
-            if (raw) return JSON.parse(raw);
-        } catch (e) {}
-        return {};
-    }
-
-    function svcSaveReferences(refs) {
-        try {
-            localStorage.setItem(STORAGE_SVC_REFERENCES, JSON.stringify(refs));
-        } catch (e) {}
-    }
 
     // Open a background iframe pointing to the current Activity Plan page
     function svcOpenBgIframe() {
@@ -837,7 +823,6 @@
     // Build the SVC selection GUI
     function createSVCSelectionGUI(saTableData) {
         var saItems = (saTableData && saTableData.saTableItems) ? saTableData.saTableItems : [];
-        var svcReferences = svcLoadReferences();
         var dropboxMappings = {}; // keyed by saItem index -> { segment, studyEvent, form, formName }
         var selectedDropboxIdx = null;
         var currentItems = []; // [{value, text}] for the Item dropdown
@@ -848,6 +833,7 @@
         var svcSegCollapsed = {};
         var svcSearchKeywords = [];
         var svcShowCompleted = false;
+        var svcAttrLoadSeq = 0;
 
         var container = document.createElement("div");
         container.style.cssText = "display:flex;flex-direction:column;gap:10px;height:100%;min-height:500px;";
@@ -1325,14 +1311,6 @@
                                         prefillReason: "Add visibility condition"
                                     };
                                     log("SVC: mapped form " + srcItem.form + " to dropbox idx=" + gIdx);
-                                    // Auto-prefill from reference if exists
-                                    var ref = svcReferences[srcItem.form];
-                                    if (ref) {
-                                        dropboxMappings[String(gIdx)].prefillItem = ref.item;
-                                        dropboxMappings[String(gIdx)].prefillItemValue = ref.itemValue;
-                                        dropboxMappings[String(gIdx)].prefillReason = ref.reason || "Add visibility condition";
-                                        log("SVC: auto-prefilled from reference for " + srcItem.form);
-                                    }
                                     renderPrimaryPanel();
                                     renderSegNavPanel();
                                     updateConfirmState();
@@ -1371,7 +1349,7 @@
 
         // Top half: Attributes
         var attrSection = document.createElement("div");
-        attrSection.style.cssText = "flex:1;display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #333;";
+        attrSection.style.cssText = "flex:1;display:flex;flex-direction:column;gap:8px;padding-bottom:8px;";
 
         var attrPlaceholder = document.createElement("div");
         attrPlaceholder.textContent = "Click a form inside a dropbox to configure its visibility condition";
@@ -1414,7 +1392,6 @@
             if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
                 dropboxMappings[String(selectedDropboxIdx)].prefillItemValue = selectedText || null;
                 log("SVC: item value persisted: " + selectedText);
-                saveCurrentReference();
                 renderPrimaryPanel();
                 renderSegNavPanel();
             }
@@ -1436,28 +1413,6 @@
             }
         });
 
-        // Save Reference button
-        var saveRefBtn = document.createElement("button");
-        saveRefBtn.textContent = "Save Reference";
-        saveRefBtn.style.cssText = "padding:6px 14px;border-radius:4px;border:none;background:#28a745;color:#fff;font-size:11px;font-weight:600;cursor:pointer;align-self:flex-end;";
-        saveRefBtn.addEventListener("mouseenter", function() { this.style.background = "#218838"; });
-        saveRefBtn.addEventListener("mouseleave", function() { this.style.background = "#28a745"; });
-        function saveCurrentReference() {
-            if (selectedDropboxIdx === null) return;
-            var mapping = dropboxMappings[String(selectedDropboxIdx)];
-            if (!mapping) return;
-            var sourceFormName = mapping.form;
-            var selItem = itemSelect.options[itemSelect.selectedIndex] ? itemSelect.options[itemSelect.selectedIndex].text : "";
-            var selItemVal = itemValSelect.options[itemValSelect.selectedIndex] ? itemValSelect.options[itemValSelect.selectedIndex].text : "";
-            var reason = reasonInput.value.trim() || "Add visibility condition";
-            svcReferences[sourceFormName] = { item: selItem, itemValue: selItemVal, itemValues: currentItemValues.slice(), reason: reason };
-            svcSaveReferences(svcReferences);
-            log("SVC: saved reference for source form '" + sourceFormName + "' (" + currentItemValues.length + " item values)");
-            renderReferencesPanel();
-        }
-        saveRefBtn.addEventListener("click", function() {
-            saveCurrentReference();
-        });
 
         function renderItemDropdown(items, prefillItem) {
             itemSelect.innerHTML = "";
@@ -1503,7 +1458,9 @@
             }
         }
 
-        async function loadFormAttributesForDropbox(gIdx) {
+        async function loadFormAttributesForDropbox(gIdx, forceRefresh) {
+            var loadSeq = svcAttrLoadSeq + 1;
+            svcAttrLoadSeq = loadSeq;
             var mapping = dropboxMappings[String(gIdx)];
             if (!mapping) {
                 renderConfigPanel();
@@ -1518,6 +1475,13 @@
                 return;
             }
 
+            if (forceRefresh) {
+                delete mapping._cachedItems;
+                delete mapping._cachedItemValues;
+                currentItems = [];
+                currentItemValues = [];
+            }
+
             var prefill = mapping.prefillItem || null;
             var prefillVal = mapping.prefillItemValue || null;
             var prefillReason = mapping.prefillReason || "Add visibility condition";
@@ -1528,35 +1492,67 @@
             // Determine if this mapping already has cached items from a previous load
             var hasCachedItems = !!(mapping._cachedItems && mapping._cachedItems.length > 0);
             var hasCachedItemValues = !!(mapping._cachedItemValues && mapping._cachedItemValues.length > 0);
-            // Reference fast path: saved reference provides values but no cached items yet
-            var refForForm = svcReferences[mapping.form] || null;
-            var useRefFastPath = !!(refForForm && prefill && prefillVal && !hasCachedItems);
 
             if (hasCachedItems) {
                 // Restore from per-mapping cache — no bg iframe needed
                 currentItems = mapping._cachedItems;
                 currentItemValues = hasCachedItemValues ? mapping._cachedItemValues : [];
                 log("SVC: restored cached items for idx=" + gIdx + " (" + currentItems.length + " items, " + currentItemValues.length + " values)");
-            } else if (useRefFastPath) {
-                // Reference fast path: restore saved item values if available,
-                // otherwise create a synthetic entry from the saved item value.
-                currentItems = prefill ? [{ text: prefill, value: prefill }] : [];
-                if (refForForm.itemValues && refForForm.itemValues.length > 0) {
-                    currentItemValues = refForForm.itemValues.slice();
-                } else {
-                    currentItemValues = prefillVal ? [{ text: prefillVal, value: prefillVal }] : [];
-                }
-                log("SVC: ref fast path for idx=" + gIdx + " (form=" + mapping.form + ", " + currentItemValues.length + " values)");
             } else {
                 // Full load via bg iframe
                 attrSection.innerHTML = "";
+                var loadingWrap = document.createElement("div");
+                loadingWrap.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:10px;color:#d8ecff;font-size:12px;text-align:center;padding:14px;border:1px solid #2f4f73;border-radius:6px;background:#151f2b;";
+                var spinner = document.createElement("div");
+                spinner.style.cssText = "width:24px;height:24px;border:3px solid #2f4f73;border-top-color:#7cc7ff;border-radius:50%;box-sizing:border-box;";
                 var loadingMsg = document.createElement("div");
-                loadingMsg.textContent = "Loading visibility for " + targetItem.form + " (source: " + mapping.form + ")...";
-                loadingMsg.style.cssText = "color:#9df;font-size:12px;text-align:center;padding:12px;";
-                attrSection.appendChild(loadingMsg);
+                loadingMsg.style.cssText = "font-weight:600;line-height:1.35;max-width:100%;word-break:break-word;";
+                var loadingDetail = document.createElement("div");
+                loadingDetail.style.cssText = "color:#9bbbd8;font-size:11px;line-height:1.3;";
+                var loadingStartedAt = Date.now();
+                var loadingFrame = 0;
+                var loadingBaseText = "Loading visibility for " + targetItem.form + " (source: " + mapping.form + ")";
+                function updateVisibilityLoadingAnimation() {
+                    loadingFrame = loadingFrame + 1;
+                    spinner.style.transform = "rotate(" + String(loadingFrame * 30) + "deg)";
+                    var dots = new Array((loadingFrame % 4) + 1).join(".");
+                    var elapsed = Math.max(1, Math.floor((Date.now() - loadingStartedAt) / 1000));
+                    loadingMsg.textContent = loadingBaseText + dots;
+                    loadingDetail.textContent = "Still working - " + String(elapsed) + "s elapsed. Use Refresh if this appears stuck.";
+                }
+                updateVisibilityLoadingAnimation();
+                var loadingAnimTimer = setInterval(function() {
+                    if (!loadingWrap.isConnected || loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) {
+                        clearInterval(loadingAnimTimer);
+                        return;
+                    }
+                    updateVisibilityLoadingAnimation();
+                }, 350);
+                var refreshLoadBtn = document.createElement("button");
+                refreshLoadBtn.textContent = "Refresh";
+                refreshLoadBtn.title = "Retry loading visibility for this mapped form";
+                refreshLoadBtn.style.cssText = "padding:6px 12px;border-radius:4px;border:1px solid #4a6fa5;background:#26364d;color:#d8ecff;font-size:11px;font-weight:600;cursor:pointer;";
+                refreshLoadBtn.addEventListener("mouseenter", function() { this.style.background = "#314b70"; });
+                refreshLoadBtn.addEventListener("mouseleave", function() { this.style.background = "#26364d"; });
+                refreshLoadBtn.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!dropboxMappings[String(gIdx)]) return;
+                    selectedDropboxIdx = gIdx;
+                    log("SVC: refresh requested for visibility load idx=" + gIdx);
+                    loadFormAttributesForDropbox(gIdx, true);
+                });
+                loadingWrap.appendChild(spinner);
+                loadingWrap.appendChild(loadingMsg);
+                loadingWrap.appendChild(loadingDetail);
+                loadingWrap.appendChild(refreshLoadBtn);
+                attrSection.appendChild(loadingWrap);
 
                 // Cache key combines target + source since items depend on which source SA is selected
                 var cacheKey = targetItem.form + "||" + mapping.form;
+                if (forceRefresh) {
+                    delete SVC_ITEM_CACHE[cacheKey];
+                }
                 var items = [];
 
                 // Check global cache
@@ -1566,11 +1562,15 @@
                 } else {
                     // Use bg iframe - open visibility modal for the TARGET row
                     await svcCloseBgModal();
+                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                     await sleep(300);
+                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                     var opened = await svcOpenVisibilityModalInBg(targetItem.segment, targetItem.studyEvent, targetItem.form);
+                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                     if (opened) {
                         // Fill modal dropdowns with the SOURCE form's info
                         var saOk = await svcSelectActivityAndSA(mapping.studyEvent, mapping.form);
+                        if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                         if (saOk) {
                             items = svcCollectItems();
                             SVC_ITEM_CACHE[cacheKey] = items;
@@ -1579,6 +1579,7 @@
                     }
                 }
 
+                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                 currentItems = items;
                 currentItemValues = [];
                 // Store on the mapping so switching back won't need bg iframe again
@@ -1610,92 +1611,14 @@
             attrSection.appendChild(reasonLbl);
             reasonInput.value = prefillReason;
             attrSection.appendChild(reasonInput);
-            attrSection.appendChild(saveRefBtn);
 
             // If prefill item is set but we did a full bg iframe load (no cached values yet), trigger item value loading
-            if (!hasCachedItems && !useRefFastPath && prefill && itemSelect.selectedIndex > 0) {
+            if (!hasCachedItems && prefill && itemSelect.selectedIndex > 0) {
                 currentItemValues = await svcSelectItemAndCollectValues(prefill);
+                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
                 // Cache the loaded item values on the mapping
                 mapping._cachedItemValues = currentItemValues.slice();
                 renderItemValueDropdown(prefillVal);
-            }
-        }
-
-        // Bottom half: Saved References
-        var refSection = document.createElement("div");
-        refSection.style.cssText = "flex:1;display:flex;flex-direction:column;gap:6px;padding-top:8px;";
-
-        var refHeader = document.createElement("div");
-        refHeader.style.cssText = "display:flex;justify-content:space-between;align-items:center;";
-        var refTitle = document.createElement("span");
-        refTitle.textContent = "Saved References";
-        refTitle.style.cssText = "font-size:12px;font-weight:600;color:#ccc;";
-        var clearAllRefBtn = document.createElement("button");
-        clearAllRefBtn.textContent = "Clear All";
-        clearAllRefBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #c0392b;background:#2a1a1a;color:#ff6b6b;font-size:10px;cursor:pointer;";
-        clearAllRefBtn.addEventListener("click", function() {
-            createPopup({
-                title: "Clear All References",
-                content: '<div style="text-align:center;padding:16px;"><p>This will remove all saved visibility references.</p><p style="margin-top:12px;"><button id="svcClearAllConfirm" style="padding:8px 16px;border-radius:4px;border:none;background:#dc3545;color:#fff;cursor:pointer;margin-right:8px;">Confirm</button><button id="svcClearAllCancel" style="padding:8px 16px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;">Cancel</button></p></div>',
-                width: "350px",
-                height: "auto"
-            });
-            setTimeout(function() {
-                var confirmEl = document.getElementById("svcClearAllConfirm");
-                var cancelEl = document.getElementById("svcClearAllCancel");
-                if (confirmEl) confirmEl.addEventListener("click", function() {
-                    svcReferences = {};
-                    svcSaveReferences(svcReferences);
-                    renderReferencesPanel();
-                    log("SVC: all references cleared");
-                    var popup = this.closest("[id^='clinsparkPopup_']");
-                    if (popup) popup.remove();
-                });
-                if (cancelEl) cancelEl.addEventListener("click", function() {
-                    var popup = this.closest("[id^='clinsparkPopup_']");
-                    if (popup) popup.remove();
-                });
-            }, 50);
-        });
-        refHeader.appendChild(refTitle);
-        refHeader.appendChild(clearAllRefBtn);
-
-        var refList = document.createElement("div");
-        refList.style.cssText = "flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#1e1e1e;max-height:200px;";
-
-        function renderReferencesPanel() {
-            refList.innerHTML = "";
-            var keys = Object.keys(svcReferences);
-            if (keys.length === 0) {
-                var emptyMsg = document.createElement("div");
-                emptyMsg.textContent = "No saved references";
-                emptyMsg.style.cssText = "color:#666;font-size:11px;text-align:center;padding:12px;";
-                refList.appendChild(emptyMsg);
-                return;
-            }
-            for (var i = 0; i < keys.length; i++) {
-                var formName = keys[i];
-                var ref = svcReferences[formName];
-                var refRow = document.createElement("div");
-                refRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:4px 6px;margin-bottom:2px;border-radius:3px;background:#2a2a2a;font-size:10px;";
-                var refText = document.createElement("span");
-                var valuesCount = (ref.itemValues && ref.itemValues.length) || 1;
-                refText.textContent = formName + ": " + ref.item + " = " + ref.itemValue + " (" + valuesCount + " values saved)";
-                refText.title = "Form: " + formName + "\nItem: " + ref.item + "\nItem Value: " + ref.itemValue + "\nValues Saved: " + valuesCount + "\nReason: " + ref.reason;
-                refText.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;cursor:default;";
-                var refDelBtn = document.createElement("span");
-                refDelBtn.textContent = "\u2715";
-                refDelBtn.style.cssText = "cursor:pointer;color:#ff6b6b;font-weight:bold;margin-left:4px;flex-shrink:0;";
-                refDelBtn.dataset.formName = formName;
-                refDelBtn.addEventListener("click", function() {
-                    delete svcReferences[this.dataset.formName];
-                    svcSaveReferences(svcReferences);
-                    log("SVC: deleted reference for " + this.dataset.formName);
-                    renderReferencesPanel();
-                });
-                refRow.appendChild(refText);
-                refRow.appendChild(refDelBtn);
-                refList.appendChild(refRow);
             }
         }
 
@@ -1710,9 +1633,6 @@
         configPanel.appendChild(configHeader);
         attrSection.appendChild(attrPlaceholder);
         configBody.appendChild(attrSection);
-        refSection.appendChild(refHeader);
-        refSection.appendChild(refList);
-        configBody.appendChild(refSection);
         configPanel.appendChild(configBody);
 
         contentRow.appendChild(segNavPanel);
@@ -2201,7 +2121,6 @@
         // Initial render
         renderPrimaryPanel();
         renderSegNavPanel();
-        renderReferencesPanel();
 
         setTimeout(function() {
             if (svcIsFullscreen) applySVCFullscreen();
@@ -2797,6 +2716,13 @@
                 if (opts2[oi2].value && opts2[oi2].value !== "") return true;
             }
         }
+        return false;
+    }
+
+    function ifl_detectSaveSuccess() {
+        if (IFL_SHOW_FORM_URL_PATTERN.test(location.href)) return true;
+        var successEl = document.querySelector(".alert-success, .modal .alert-success, .bootbox .alert-success");
+        if (successEl) return true;
         return false;
     }
 
@@ -3435,6 +3361,7 @@
         var isFullscreen = false;
         var savedContainerStyle = "";
         var iflSyncBusy = false;
+        var iflRowClickTimer = null;
 
         // Color palette
         var tc = {
@@ -3877,6 +3804,7 @@
                         var isActive = activeFormItem === fItem;
                         row.className = "ifl-row";
                         row.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 10px 5px 20px;border-radius:4px;cursor:pointer;margin:1px 0;font-size:12px;background:" + (isRenamed ? tc.renamed : (isActive ? tc.surfaceHover : "transparent")) + ";transition:background 0.1s;";
+                        row.title = "Click to view details. Double-click to select or unselect.";
                         row.onmouseover = function() { if (!isActive) row.style.background = tc.surfaceHover; };
                         row.onmouseout = function() { row.style.background = isRenamed ? tc.renamed : (isActive ? tc.surfaceHover : "transparent"); };
 
@@ -3893,6 +3821,7 @@
                         lockIcon.textContent = fItem.lockOnSave ? "\uD83D\uDD12" : "\uD83D\uDD13";
                         lockIcon.style.cssText = "font-size:11px;flex-shrink:0;width:20px;text-align:center;cursor:pointer;user-select:none;" + (fItem.lockOnSave ? "opacity:1;" : "opacity:0.4;");
                         lockIcon.title = fItem.lockOnSave ? "Locked — double-click to unlock" : "Unlocked — double-click to lock";
+                        lockIcon.onclick = function(e) { e.stopPropagation(); };
                         lockIcon.addEventListener("dblclick", (function(fi2, iconEl) {
                             return function(e) {
                                 e.stopPropagation();
@@ -3916,27 +3845,43 @@
                             updateConfirmState();
                         };
 
-                        row.onclick = function() {
-                            activeFormItem = fItem;
-                            renderMidPanel();
-                            renderRightPanel();
-                            // Auto-load item groups if not yet loaded
-                            if (fItem.itemGroups === null && !iflSyncBusy) {
-                                iflSyncBusy = true;
-                                log("IFL: auto-loading item groups for " + fItem.studyName + " / " + fItem.originalName);
-                                renderRightPanel();
-                                ifl_syncModalToFormViaBgTab(fItem).then(function(groups) {
-                                    iflSyncBusy = false;
-                                    fItem.itemGroups = (groups !== null) ? groups : [];
-                                    log("IFL: collected " + fItem.itemGroups.length + " item groups for " + fItem.originalName);
-                                    if (activeFormItem === fItem) renderRightPanel();
-                                }).catch(function(err) {
-                                    iflSyncBusy = false;
-                                    log("IFL: sync error — " + String(err));
-                                    fItem.itemGroups = [];
-                                    if (activeFormItem === fItem) renderRightPanel();
-                                });
+                        row.onclick = function(e) {
+                            if (e && e.detail > 1) {
+                                if (iflRowClickTimer) {
+                                    clearTimeout(iflRowClickTimer);
+                                    iflRowClickTimer = null;
+                                }
+                                fItem.selected = !fItem.selected;
+                                cb.checked = fItem.selected;
+                                ifl_saveSelections(formItems);
+                                updateConfirmState();
+                                log("IFL: form row double-click toggled selection to " + fItem.selected + " for " + fItem.formName);
+                                return;
                             }
+                            if (iflRowClickTimer) clearTimeout(iflRowClickTimer);
+                            iflRowClickTimer = setTimeout(function() {
+                                iflRowClickTimer = null;
+                                activeFormItem = fItem;
+                                renderMidPanel();
+                                renderRightPanel();
+                                // Auto-load item groups if not yet loaded
+                                if (fItem.itemGroups === null && !iflSyncBusy) {
+                                    iflSyncBusy = true;
+                                    log("IFL: auto-loading item groups for " + fItem.studyName + " / " + fItem.originalName);
+                                    renderRightPanel();
+                                    ifl_syncModalToFormViaBgTab(fItem).then(function(groups) {
+                                        iflSyncBusy = false;
+                                        fItem.itemGroups = (groups !== null) ? groups : [];
+                                        log("IFL: collected " + fItem.itemGroups.length + " item groups for " + fItem.originalName);
+                                        if (activeFormItem === fItem) renderRightPanel();
+                                    }).catch(function(err) {
+                                        iflSyncBusy = false;
+                                        log("IFL: sync error - " + String(err));
+                                        fItem.itemGroups = [];
+                                        if (activeFormItem === fItem) renderRightPanel();
+                                    });
+                                }
+                            }, 220);
                         };
 
                         row.appendChild(nameSpan);
@@ -4129,6 +4074,10 @@
                 if (formItems[i].selected) selected.push(formItems[i]);
             }
             if (selected.length === 0) return;
+            if (!confirm("Import from Library will import " + selected.length + " selected form" + (selected.length === 1 ? "" : "s") + ".\n\nClick OK to start importing, or Cancel to return to the selection screen.")) {
+                log("IFL: confirm warning canceled by user for " + selected.length + " selected forms");
+                return;
+            }
             ifl_closeBgTab();
             document.removeEventListener("mousemove", onDragMove);
             document.removeEventListener("mouseup", onDragEnd);
@@ -4565,8 +4514,14 @@
                     var start = Date.now();
                     var closed = false;
                     var errorDetected = false;
+                    var successDetected = false;
                     while (Date.now() - start < IFL_MODAL_CLOSE_TIMEOUT) {
                         if (IFL_CANCELED || ifl_isCancelRequested()) throw new Error("Canceled");
+                        if (ifl_detectSaveSuccess()) {
+                            successDetected = true;
+                            log("IFL: save success detected after click");
+                            break;
+                        }
                         // Check for error alert in modal
                         var alertEl = document.querySelector(".modal-body .alert-danger, .modal .alert-danger");
                         if (alertEl) {
@@ -4585,7 +4540,7 @@
                         await sleep(150);
                     }
 
-                    if (closed) break; // Save succeeded
+                    if (closed || successDetected) break; // Save succeeded
 
                     if (errorDetected && saveAttempts < maxSaveAttempts) {
                         log("IFL: retrying — re-selecting study/form before next save attempt");
@@ -4626,8 +4581,12 @@
                         continue; // Retry save
                     }
 
-                    // Error on last attempt or timeout
-                    saveFailed = true;
+                    if (errorDetected) {
+                        saveFailed = true;
+                        break;
+                    }
+                    // Timeout without an error usually means ClinSpark accepted the save but did not close the modal.
+                    log("IFL: save confirmation timed out without an error; treating as submitted");
                     break;
                 }
 
@@ -33073,6 +33032,11 @@
                 return { success: true, message: "Already locked" };
             }
 
+            if (lockCheckbox.disabled || lockCheckbox.hasAttribute("disabled")) {
+                log("Sample Path lock checkbox disabled; skipping: " + samplePathName);
+                return { success: false, skipped: true, message: "Skipped - lock checkbox disabled" };
+            }
+
             var formElement = updateDoc.querySelector('form');
             if (!formElement) {
                 log("Form not found for: " + samplePathName);
@@ -33080,6 +33044,13 @@
             }
 
             var formData = "";
+            function addFormParam(paramName, paramValue) {
+                if (formData.length > 0) {
+                    formData += "&";
+                }
+                formData += encodeURIComponent(paramName) + "=" + encodeURIComponent(paramValue || "");
+            }
+
             var inputs = formElement.querySelectorAll('input, textarea, select');
             var i = 0;
             while (i < inputs.length) {
@@ -33089,6 +33060,10 @@
                 var value = "";
 
                 if (name) {
+                    if (input.disabled || input.hasAttribute("disabled")) {
+                        i = i + 1;
+                        continue;
+                    }
                     if (name === "locked") {
                         value = "on";
                     } else if (name === "reasonForChange") {
@@ -33101,20 +33076,28 @@
                             continue;
                         }
                     } else if (input.tagName.toLowerCase() === "select") {
-                        var selectedOption = input.querySelector("option[selected]");
-                        if (selectedOption) {
-                            value = selectedOption.value || "";
+                        if (input.multiple || input.hasAttribute("multiple")) {
+                            var selectedOptions = input.querySelectorAll("option:checked, option[selected]");
+                            var si = 0;
+                            while (si < selectedOptions.length) {
+                                addFormParam(name, selectedOptions[si].value || "");
+                                si = si + 1;
+                            }
+                            i = i + 1;
+                            continue;
                         } else {
-                            value = input.value || "";
+                            var selectedOption = input.querySelector("option:checked, option[selected]");
+                            if (selectedOption) {
+                                value = selectedOption.value || "";
+                            } else {
+                                value = input.value || "";
+                            }
                         }
                     } else {
                         value = input.value || "";
                     }
 
-                    if (formData.length > 0) {
-                        formData += "&";
-                    }
-                    formData += encodeURIComponent(name) + "=" + encodeURIComponent(value);
+                    addFormParam(name, value);
                 }
                 i = i + 1;
             }
@@ -33305,6 +33288,7 @@
         }, 500);
 
         var successCount = 0;
+        var skippedCount = 0;
         var failCount = 0;
         var j = 0;
         while (j < unlockedPaths.length) {
@@ -33316,14 +33300,16 @@
             }
 
             var result = await fetchAndLockSamplePath(path.url, path.name);
-            if (result.success) {
+            if (result.skipped) {
+                skippedCount = skippedCount + 1;
+            } else if (result.success) {
                 successCount = successCount + 1;
             } else {
                 failCount = failCount + 1;
             }
 
             if (countsDiv) {
-                countsDiv.innerHTML = "<span style='color:#9f9'>Success: " + String(successCount) + "</span> | <span style='color:#f99'>Failed: " + String(failCount) + "</span>";
+                countsDiv.innerHTML = "<span style='color:#9f9'>Success: " + String(successCount) + "</span> | <span style='color:#ffd166'>Skipped: " + String(skippedCount) + "</span> | <span style='color:#f99'>Failed: " + String(failCount) + "</span>";
             }
 
             await sleep(500);
@@ -33332,7 +33318,7 @@
 
         clearInterval(loadingInterval);
 
-        log("processLockSamplePathsPage: completed. Success=" + String(successCount) + " Failed=" + String(failCount));
+        log("processLockSamplePathsPage: completed. Success=" + String(successCount) + " Skipped=" + String(skippedCount) + " Failed=" + String(failCount));
 
         if (statusDiv) {
             statusDiv.textContent = "Completed";
