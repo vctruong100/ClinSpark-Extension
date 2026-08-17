@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.22
+// @version 4.3.36
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -16,13 +16,21 @@
 (function () {
     var STORAGE_PANEL_WIDTH = "activityPlanState.panel.width";
     var STORAGE_PANEL_HEIGHT = "activityPlanState.panel.height";
+    var STORAGE_PANEL_DOCK = "activityPlanState.panel.dock";
     // UI Scale Constants
     var UI_SCALE = 1.0; // Master scale factor (will be initialized after function definitions)
-    var PANEL_DEFAULT_WIDTH = 340;
-    var PANEL_DEFAULT_HEIGHT = "480px";
+    var PANEL_DEFAULT_WIDTH = 360;
+    var PANEL_DEFAULT_HEIGHT = "100vh";
     var PANEL_HEADER_HEIGHT_PX = 50;
     var PANEL_HEADER_GAP_PX = 8;
-    var PANEL_MAX_WIDTH_PX = 60;
+    var PANEL_MAX_WIDTH_PX = 620;
+    var PANEL_BOTTOM_HEIGHT_PX = 360;
+    var PANEL_Z_INDEX = 29999;
+    var SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT = null;
+    var SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = null;
+    var SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = null;
+    var SIDE_PANEL_ORIGINAL_BODY_WIDTH = null;
+    var SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM = null;
     var PANEL_PADDING_PX = 12;
     var PANEL_BORDER_RADIUS_PX = 8;
     var PANEL_FONT_SIZE_PX = 14;
@@ -13487,6 +13495,9 @@
     //=========================
     var STORAGE_BUTTON_VISIBILITY = "activityPlanState.buttonVisibility";
     var STORAGE_BUTTON_LAYOUT = "activityPlanState.buttonLayout";
+    var STORAGE_BUTTON_COLORS = "activityPlanState.buttonColors";
+    var STORAGE_BUTTON_LOADOUTS = "activityPlanState.buttonLoadouts";
+    var STORAGE_ACTIVE_BUTTON_LOADOUT = "activityPlanState.activeButtonLoadout";
     var SETTINGS_MODAL_OPEN = false;
     var HELP_MODAL_OPEN = false;
 
@@ -13638,68 +13649,71 @@
             {
                 title: "Study Setup",
                 features: [
-                    { label: "Lock Activity Plans", desc: "Automatically locks activity plans for one or more studies." },
-                    { label: "Lock Sample Paths", desc: "Locks sample path configurations for the current study." },
-                    { label: "Update Study Status", desc: "Updates the status of studies to Active if not already. Handles the status change workflow automatically." },
-                    { label: "Run Study Setup", desc: "Runs the full study setup pipeline, executing multiple sequential setup steps automatically in the correct order." }
+                    { label: "Lock Activity Plans", desc: "Locks activity plans for one or more studies and reports progress for each target." },
+                    { label: "Lock Sample Paths", desc: "Locks sample path configurations while skipping paths whose lock checkbox is disabled, with a dedicated skipped status when locking is required but unavailable." },
+                    { label: "Update Study Status", desc: "Updates studies to Active when needed and handles the status change workflow automatically." },
+                    { label: "Run Study Setup", desc: "Runs the full setup pipeline in sequence, including activity plan locking, sample path locking, status updates, cohort setup, and consent steps where configured." }
                 ]
             },
             {
                 title: "Subject Management",
                 features: [
-                    { label: "Add Cohort Subjects", desc: "Adds subjects to a cohort in a study. Specify the study and cohort, and the automator handles the enrollment steps without manual navigation." },
-                    { label: "Import Cohort Subjects", desc: "Imports a prepared list of subjects into a cohort, automating the entry of each subject's records." },
-                    { label: "Add Existing Subject", desc: "Adds a subject who already exists in the system to a new study or cohort, without creating a duplicate record." }
+                    { label: "Add Cohort Subjects", desc: "Adds subjects to a cohort in a selected study without manual navigation through each enrollment step." },
+                    { label: "Import Cohort Subjects", desc: "Imports a prepared subject list into a cohort and automates each subject record entry." },
+                    { label: "Add Existing Subject", desc: "Adds an existing subject to a new study or cohort without creating a duplicate subject." }
                 ]
             },
             {
                 title: "Consent",
                 features: [
-                    { label: "Run ICF Consent", desc: "Automates the Informed Consent Form (ICF) process for a subject. Navigates through the consent workflow, scans barcodes, and completes each required step automatically." }
+                    { label: "Run ICF Consent", desc: "Automates the informed consent workflow for a subject, including navigation, barcode scanning, and required consent steps." }
                 ]
             },
             {
                 title: "Data Collection",
                 features: [
-                    { label: "Pull Barcode", desc: "Automatically fills in the subject barcode for a subject based on the subject identifier — no manual typing needed." },
-                    { label: "Pull Lab Barcode", desc: "Scans all barcode icons on the current data collection page and fills them in one by one, confirming each automatically. Saves significant time during lab sample processing." },
-                    { label: "Run Form", desc: "Fills in and submits a data collection form with specified values. Can be configured to enter out-of-range (OOR) or in-range (IR) values — useful for study testing and setup verification." },
-                    { label: "Collect All", desc: "Processes all eligible data collection forms on the current page in sequence, collecting each one automatically without manual clicking." }
+                    { label: "Pull Barcode", desc: "Fills the subject barcode field from the current subject context." },
+                    { label: "Pull Lab Barcode", desc: "Scans barcode icons on the current page and fills lab barcode fields one by one." },
+                    { label: "Run Form", desc: "Fills and submits a data collection form with configured in-range or out-of-range values for testing and setup verification." },
+                    { label: "Collect All", desc: "Processes eligible data collection forms on the current page in sequence." }
                 ]
             },
             {
                 title: "CRF Design & Library",
                 features: [
-                    { label: "Search Methods", desc: "Opens up the method library that contains all coded methods/edit checks." },
-                    { label: "PLAP Builder", desc: "The Procedure Log Activity Plan Builder. Drag forms into segments, assign study events, configure time references, then submit all procedure log entries automatically." },
-                    { label: "Import from Library", desc: "Opens a side-by-side tool for importing forms from the study library into the current study. Select the target study and form, and the automator imports and saves it." },
+                    { label: "Search Methods", desc: "Opens the method library that contains coded methods and edit checks." },
+                    { label: "PLAP Builder", desc: "Builds procedure log activity plan rows with a full-screen, drag-and-drop workspace, existing-form editing, clear Existing visibility filtering, time offsets, example-time recalculation, and Apply Time Calculation." },
+                    { label: "Import from Library", desc: "Imports forms from another study library. Supports cached scans, duplicate import copies for the same source form, per-copy form names, item group/item renames, item inclusion settings, lock-on-save, confirmation warnings, progress tracking, and cancel/resume cleanup." },
+                    { label: "Activity Plan Removal", desc: "Selects scheduled activities for removal. Filtered Select All only affects visible rows, archived rows are shown with an archive indicator and cannot be selected, and unavailable deletes can fall back to archive." },
                     { label: "Archive/Update Forms", desc: "Batch archives or renames forms in the study library. Useful for replacing old versions with new versions." },
-                    { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study to another, preserving their structure and settings." },
-                    { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to their data pages." },
-                    { label: "Import I/E", desc: "Automatically map I/E items to the correct Activity Plan -> Forms -> Items" },
-                    { label: "Clear Mapping", desc: "Clears the current form-to-schedule mapping configuration so you can start fresh with a new mapping setup." },
-                    { label: "Edit Study Events List", desc: "Manage the study events list in the library — add new events, rename or reorder existing ones, and save all changes in a single batch." },
-                    { label: "Set Visibility Condition", desc: "Sets visibility (show/hide) conditions on forms in an activity plan. Map each form to the item and value that controls whether it is shown or hidden, and the automator saves each condition." }
+                    { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study or activity plan context to another while preserving structure and settings where possible." },
+                    { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to relevant data pages." },
+                    { label: "Import I/E", desc: "Maps inclusion/exclusion check items to Activity Plan forms and items. Shows expected eligibility defaults and supports selective mapping cleanup." },
+                    { label: "Clear Mapping", desc: "Scans eligibility mappings, displays selectable eligibility items, and removes only the mappings confirmed by the user." },
+                    { label: "Edit Study Events List", desc: "Adds, renames, reorders, and saves study event list changes in one batch." },
+                    { label: "Set Visibility Condition", desc: "Sets show/hide conditions on scheduled activity forms using auto-populated visibility references, with refresh handling and animated loading states." }
                 ]
             },
             {
                 title: "Navigation",
                 features: [
-                    { label: "Find Form & Events", desc: "Navigates directly to a form or study event data page. Enter a form keyword and/or a study event keyword, plus an optional subject identifier, and the automator applies the filters and searches automatically." }
+                    { label: "Find Form & Events", desc: "Navigates directly to a form or study event data page using keywords and an optional subject identifier." }
                 ]
             },
             {
                 title: "Reports",
                 features: [
-                    { label: "Download DTS Report", desc: "Automatically generates and downloads Clinical Data Text (Delimited) reports for selected studies, handling all navigation and download steps." }
+                    { label: "Download DTS Report", desc: "Generates and downloads Clinical Data Text reports for selected studies while handling navigation and download steps." }
                 ]
             },
             {
                 title: "Panel Controls",
                 features: [
-                    { label: "Pause", desc: "Pauses any currently running automation. Click again to resume. Useful for briefly halting a long process without canceling it." },
-                    { label: "Clear Logs", desc: "Clears all entries from the activity log panel for a fresh view." },
-                    { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space when the log is not needed." }
+                    { label: "Settings", desc: "Customize visible buttons, panel order, and panel hotkey." },
+                    { label: "Help Guide", desc: "Opens this searchable guide for quick reminders about each available feature." },
+                    { label: "Pause", desc: "Pauses any running automation and resumes when supported by that workflow." },
+                    { label: "Clear Logs", desc: "Clears the activity log panel for a fresh view." },
+                    { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space." }
                 ]
             }
         ];
@@ -13825,6 +13839,8 @@
 
         var pendingLayout = JSON.parse(JSON.stringify(getEffectiveButtonLayout()));
         var originalLayout = JSON.parse(JSON.stringify(pendingLayout));
+        var pendingColors = JSON.parse(JSON.stringify(getButtonColors()));
+        var originalColors = JSON.parse(JSON.stringify(pendingColors));
         var pendingTheme = getThemeMode();
         var originalTheme = pendingTheme;
         var pendingHotkey = getPanelHotkey();
@@ -13871,7 +13887,7 @@
         container.setAttribute("role", "dialog");
         container.setAttribute("aria-modal", "true");
         container.setAttribute("aria-labelledby", "cfg-modal-title");
-        container.style.cssText = "background:" + tc.containerBg + ";border-radius:12px;padding:0;width:520px;max-width:94%;box-shadow:0 15px 35px rgba(0,0,0,0.4);position:relative;display:flex;flex-direction:column;max-height:92vh;";
+        container.style.cssText = "background:" + tc.containerBg + ";border-radius:12px;padding:0;width:760px;max-width:96vw;box-shadow:0 15px 35px rgba(0,0,0,0.4);position:relative;display:flex;flex-direction:column;max-height:94vh;min-width:0;";
 
         // --- Header ---
         var modalHeader = document.createElement("div");
@@ -13895,7 +13911,7 @@
 
         // --- Body (scrollable) ---
         var modalBody = document.createElement("div");
-        modalBody.style.cssText = "padding:16px;overflow-y:auto;flex:1;";
+        modalBody.style.cssText = "padding:20px;overflow-y:auto;overflow-x:hidden;flex:1;min-width:0;";
 
         // === HOTKEY SECTION ===
         var hotkeySection = document.createElement("div");
@@ -13987,6 +14003,7 @@
                         siblings[si].style.border = "1px solid " + (isA ? tc.tBtnActiveBorder : tc.tBtnInactiveBorder);
                         siblings[si].style.background = isA ? tc.tBtnActiveBg : tc.tBtnInactiveBg;
                     }
+                    if (btnGrid) { var colorPickers = btnGrid.querySelectorAll("select"); for (var csi = 0; csi < colorPickers.length; csi++) colorPickers[csi].disabled = pendingTheme === THEME_MODE_GLASS; }
                     checkDirty();
                 };
                 themeBtn.onmouseover = function() { if (pendingTheme !== themeOpt.value) themeBtn.style.background = tc.tBtnHover; };
@@ -14009,12 +14026,40 @@
         btnSectionTitle.style.cssText = "color:" + tc.textSec + ";font-size:13px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;";
         btnSection.appendChild(btnSectionTitle);
         var btnSectionHint = document.createElement("div");
-        btnSectionHint.textContent = "Drag buttons to reorder. Dropped button inserts at that cell; others shift right.";
+        btnSectionHint.textContent = "Drag to reorder, use the checkmark to show or hide, and choose a Black-theme color. Save named loadouts for quick reuse.";
         btnSectionHint.style.cssText = "font-size:11px;color:" + tc.textHint + ";margin-bottom:10px;font-style:italic;";
         btnSection.appendChild(btnSectionHint);
 
+        var loadoutBar = document.createElement("div"); loadoutBar.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-bottom:10px;";
+        var loadoutSelectRow = document.createElement("div"); loadoutSelectRow.style.cssText = "display:flex;gap:6px;align-items:center;min-width:0;";
+        var loadoutSelect = document.createElement("select");
+        loadoutSelect.style.cssText = "flex:1;min-width:130px;padding:6px 8px;background:" + tc.inputBg + ";border:1px solid " + tc.inputBorder + ";border-radius:6px;color:" + tc.inputText + ";font-size:11px;";
+        var loadoutManageRow = document.createElement("div"); loadoutManageRow.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-width:0;";
+        var loadoutName = document.createElement("input");
+        loadoutName.type = "text";
+        loadoutName.placeholder = "Loadout name";
+        loadoutName.style.cssText = "width:112px;padding:6px 8px;background:" + tc.inputBg + ";border:1px solid " + tc.inputBorder + ";border-radius:6px;color:" + tc.inputText + ";font-size:11px;box-sizing:border-box;";
+        function refreshLoadoutSelect() {
+            loadoutSelect.innerHTML = "";
+            var loadouts = getButtonLoadouts();
+            var names = Object.keys(loadouts).sort();
+            var blank = document.createElement("option"); blank.value = ""; blank.textContent = names.length ? "Select loadout..." : "No saved loadouts"; loadoutSelect.appendChild(blank);
+            var active = getActiveButtonLoadout();
+            for (var ldi = 0; ldi < names.length; ldi++) { var opt = document.createElement("option"); opt.value = names[ldi]; opt.textContent = names[ldi]; opt.selected = names[ldi] === active; loadoutSelect.appendChild(opt); }
+        }
+        function smallLoadoutButton(label, title) { var b = document.createElement("button"); b.type = "button"; b.textContent = label; b.title = title; b.style.cssText = "padding:6px 8px;background:" + tc.tBtnInactiveBg + ";border:1px solid " + tc.tBtnInactiveBorder + ";border-radius:6px;color:white;font-size:11px;cursor:pointer;white-space:nowrap;"; b.onmouseover = function() { b.style.background = tc.tBtnHover; }; b.onmouseout = function() { b.style.background = tc.tBtnInactiveBg; }; return b; }
+        var applyLoadoutBtn = smallLoadoutButton("Apply", "Apply selected loadout");
+        var saveLoadoutBtn = smallLoadoutButton("Save As", "Save the current button setup as a new loadout");
+        var updateLoadoutBtn = smallLoadoutButton("Update", "Update the selected loadout");
+        var deleteLoadoutBtn = smallLoadoutButton("Delete", "Delete the selected loadout");
+        loadoutSelectRow.appendChild(loadoutSelect); loadoutSelectRow.appendChild(applyLoadoutBtn);
+        loadoutManageRow.appendChild(loadoutName); loadoutManageRow.appendChild(saveLoadoutBtn); loadoutManageRow.appendChild(updateLoadoutBtn); loadoutManageRow.appendChild(deleteLoadoutBtn); loadoutBar.appendChild(loadoutSelectRow); loadoutBar.appendChild(loadoutManageRow);
+        var loadoutFeedback = document.createElement("div"); loadoutFeedback.style.cssText = "min-height:16px;font-size:11px;color:" + tc.textMuted + ";opacity:0;transition:opacity .2s;"; loadoutBar.appendChild(loadoutFeedback); btnSection.appendChild(loadoutBar);
+        var selectionBar = document.createElement("div"); selectionBar.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+        var selectAllBtn = smallLoadoutButton("Select All", "Show all feature buttons"); var deselectAllBtn = smallLoadoutButton("Deselect All", "Hide all feature buttons"); selectionBar.appendChild(selectAllBtn); selectionBar.appendChild(deselectAllBtn); btnSection.appendChild(selectionBar);
+
         var btnGridContainer = document.createElement("div");
-        btnGridContainer.style.cssText = "max-height:480px;overflow-y:auto;border-radius:6px;background:" + tc.gridBg + ";padding:6px;";
+        btnGridContainer.style.cssText = "max-height:60vh;min-height:280px;overflow-y:auto;overflow-x:hidden;border-radius:6px;background:" + tc.gridBg + ";padding:8px;box-sizing:border-box;";
         btnGridContainer.setAttribute("role", "grid");
         btnGridContainer.setAttribute("aria-label", "Feature button order and visibility");
         var defMap = buildPanelDefMap();
@@ -14065,7 +14110,7 @@
         btnGridContainer.addEventListener("dragend", function() { stopAutoScroll(); });
 
         var btnGrid = document.createElement("div");
-        btnGrid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:4px;";
+        btnGrid.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-width:0;";
 
         // --- Insert-and-shift logic ---
         function moveButtonToPosition(fromPos, toPos) {
@@ -14114,7 +14159,7 @@
                     cell.setAttribute("draggable", "true");
                     cell.setAttribute("tabindex", "0");
                     cell.dataset.pos = String(entry.position);
-                    cell.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:5px;cursor:grab;transition:background 0.15s ease,opacity 0.15s ease,box-shadow 0.15s ease;background:" + tc.cellBg + ";opacity:" + (entry.visible ? "1" : "0.4") + ";border:1px solid transparent;min-height:36px;user-select:none;";
+                    cell.style.cssText = "display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:5px;cursor:grab;transition:background 0.15s ease,opacity 0.15s ease,box-shadow 0.15s ease;background:" + tc.cellBg + ";opacity:" + (entry.visible ? "1" : "0.4") + ";border:1px solid transparent;min-height:40px;min-width:0;user-select:none;";
                     cell.onmouseover = function() { if (dragSrcPos === null) cell.style.background = tc.cellHover; };
                     cell.onmouseout = function() { if (dragSrcPos === null) cell.style.background = tc.cellBg; };
 
@@ -14124,7 +14169,10 @@
 
                     var nameLabel = document.createElement("span");
                     nameLabel.textContent = def.label;
-                    nameLabel.style.cssText = "color:white;font-size:11px;font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" + (entry.visible ? "" : "text-decoration:line-through;color:rgba(255,255,255,0.45);");
+                    nameLabel.style.cssText = "color:white;font-size:11px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:3px;padding:2px 4px;" + (pendingColors[entry.id] && pendingTheme === THEME_MODE_BLACK ? "background:" + pendingColors[entry.id] + ";" : "") + (entry.visible ? "" : "text-decoration:line-through;color:rgba(255,255,255,0.45);");
+                    var colorSelect = document.createElement("select"); colorSelect.title = "Button color (Black theme only)"; colorSelect.disabled = pendingTheme === THEME_MODE_GLASS; colorSelect.style.cssText = "width:86px;padding:3px;background:" + (pendingTheme === THEME_MODE_BLACK && pendingColors[entry.id] ? pendingColors[entry.id] : tc.inputBg) + ";border:1px solid " + tc.inputBorder + ";border-radius:4px;color:" + tc.inputText + ";font-size:10px;flex-shrink:0;";
+                    for (var cpi = 0; cpi < BUTTON_COLOR_PRESETS.length; cpi++) { var colorOpt = document.createElement("option"); colorOpt.value = BUTTON_COLOR_PRESETS[cpi].value; colorOpt.textContent = BUTTON_COLOR_PRESETS[cpi].label; colorOpt.selected = (pendingColors[entry.id] || "") === colorOpt.value; colorSelect.appendChild(colorOpt); }
+                    colorSelect.onchange = function() { pendingColors[entry.id] = this.value; this.style.background = this.value || tc.inputBg; nameLabel.style.background = this.value && pendingTheme === THEME_MODE_BLACK ? this.value : "transparent"; var liveButton = document.querySelector("#" + PANEL_ID + " [data-feature-button='" + entry.id.replace(/'/g, "\\'") + "']"); if (liveButton && pendingTheme === THEME_MODE_BLACK) { var previewColor = this.value || "#34343d"; liveButton.setAttribute("data-clinspark-button-color", previewColor); liveButton.style.setProperty("background", previewColor, "important"); } checkDirty(); };
 
                     var toggleBtn = document.createElement("button");
                     toggleBtn.textContent = entry.visible ? "\u2713" : "\u2715";
@@ -14219,11 +14267,22 @@
 
                     cell.appendChild(posLabel);
                     cell.appendChild(nameLabel);
+                    cell.appendChild(colorSelect);
                     cell.appendChild(toggleBtn);
                     btnGrid.appendChild(cell);
                 })(si);
             }
         }
+        refreshLoadoutSelect();
+        var loadoutFeedbackTimer = null;
+        function showLoadoutFeedback(message, tone) { loadoutFeedback.textContent = message; loadoutFeedback.style.color = tone === "error" ? "#ff9b9b" : (tone === "success" ? "#8ee6a3" : tc.textMuted); loadoutFeedback.style.opacity = "1"; if (loadoutFeedbackTimer) clearTimeout(loadoutFeedbackTimer); loadoutFeedbackTimer = setTimeout(function() { loadoutFeedback.style.opacity = "0"; }, 2600); }
+        loadoutSelect.onchange = function() { if (loadoutSelect.value) showLoadoutFeedback("Selected loadout: " + loadoutSelect.value, "info"); };
+        selectAllBtn.onclick = function() { for (var sai = 0; sai < pendingLayout.length; sai++) pendingLayout[sai].visible = true; renderBtnGrid(); checkDirty(); };
+        deselectAllBtn.onclick = function() { for (var dsi = 0; dsi < pendingLayout.length; dsi++) pendingLayout[dsi].visible = false; renderBtnGrid(); checkDirty(); };
+        applyLoadoutBtn.onclick = function() { var selected = loadoutSelect.value; var loadouts = getButtonLoadouts(); if (!selected || !loadouts[selected]) { showLoadoutFeedback("Select a saved loadout first.", "error"); return; } pendingLayout = JSON.parse(JSON.stringify(loadouts[selected].layout || pendingLayout)); pendingColors = JSON.parse(JSON.stringify(loadouts[selected].colors || {})); setActiveButtonLoadout(selected); saveButtonLayout(pendingLayout); setButtonColors(pendingColors); showLoadoutFeedback("Applying loadout: " + selected + "...", "info"); setTimeout(function() { location.reload(); }, 250); };
+        saveLoadoutBtn.onclick = function() { var name = (loadoutName.value || "").trim(); if (!name) { showLoadoutFeedback("Enter a loadout name first.", "error"); loadoutName.focus(); return; } var loadouts = getButtonLoadouts(); if (loadouts[name] && !window.confirm("A loadout named '" + name + "' already exists. Replace it?")) { showLoadoutFeedback("Save canceled.", "info"); return; } loadouts[name] = { layout: JSON.parse(JSON.stringify(pendingLayout)), colors: JSON.parse(JSON.stringify(pendingColors)), updatedAt: new Date().toISOString() }; setButtonLoadouts(loadouts); setActiveButtonLoadout(name); refreshLoadoutSelect(); loadoutSelect.value = name; loadoutName.value = ""; showLoadoutFeedback("Saved loadout: " + name, "success"); };
+        updateLoadoutBtn.onclick = function() { var name = loadoutSelect.value; if (!name) { showLoadoutFeedback("Select a saved loadout to update.", "error"); return; } var loadouts = getButtonLoadouts(); loadouts[name] = { layout: JSON.parse(JSON.stringify(pendingLayout)), colors: JSON.parse(JSON.stringify(pendingColors)), updatedAt: new Date().toISOString() }; setButtonLoadouts(loadouts); setActiveButtonLoadout(name); refreshLoadoutSelect(); showLoadoutFeedback("Updated loadout: " + name, "success"); };
+        deleteLoadoutBtn.onclick = function() { var name = loadoutSelect.value; if (!name) { showLoadoutFeedback("Select a saved loadout to delete.", "error"); return; } if (!window.confirm("Delete the loadout '" + name + "'? This cannot be undone.")) { showLoadoutFeedback("Delete canceled.", "info"); return; } var loadouts = getButtonLoadouts(); delete loadouts[name]; setButtonLoadouts(loadouts); if (getActiveButtonLoadout() === name) setActiveButtonLoadout(""); refreshLoadoutSelect(); showLoadoutFeedback("Deleted loadout: " + name, "success"); };
         renderBtnGrid();
         btnGridContainer.appendChild(btnGrid);
         btnSection.appendChild(btnGridContainer);
@@ -14271,6 +14330,7 @@
             if (pendingHotkey !== originalHotkey) cfgHasDirty = true;
             if (pendingTheme !== originalTheme) cfgHasDirty = true;
             if (JSON.stringify(pendingLayout) !== JSON.stringify(originalLayout)) cfgHasDirty = true;
+            if (JSON.stringify(pendingColors) !== JSON.stringify(originalColors)) cfgHasDirty = true;
             updateSaveBtnState(cfgHasDirty);
         }
 
@@ -14300,6 +14360,7 @@
             var hotkeyChanged = pendingHotkey !== originalHotkey;
             var themeChanged = pendingTheme !== originalTheme;
             var layoutChanged = JSON.stringify(pendingLayout) !== JSON.stringify(originalLayout);
+            var colorsChanged = JSON.stringify(pendingColors) !== JSON.stringify(originalColors);
             closeModal();
             if (hotkeyChanged) {
                 setPanelHotkey(pendingHotkey);
@@ -14319,6 +14380,7 @@
                 setButtonVisibility(newVis);
                 log("Settings: Button layout saved");
             }
+            if (colorsChanged) { setButtonColors(pendingColors); log("Settings: Button colors saved"); }
             log("Settings: Saved, refreshing");
             location.reload();
         };
@@ -14379,15 +14441,6 @@
     }
 
     function getStoredUIScale() {
-        try {
-            var stored = localStorage.getItem(STORAGE_UI_SCALE);
-            if (stored) {
-                var scale = parseFloat(stored);
-                if (!isNaN(scale) && scale >= 0.5 && scale <= 1.0) {
-                    return scale;
-                }
-            }
-        } catch (e) {}
         return 1.0;
     }
 
@@ -14404,12 +14457,11 @@
      * @param {number} newScale
      */
     function updateUIScale(newScale) {
-        UI_SCALE = Math.max(0.5, Math.min(1.0, newScale));
-        setStoredUIScale(UI_SCALE);
+        UI_SCALE = 1.0;
     }
 
     // Initialize UI scale from storage
-    UI_SCALE = getStoredUIScale();
+    UI_SCALE = 1.0;
 
     //==========================
     // ADD EXISTING SUBJECT FEATURE
@@ -17592,6 +17644,76 @@
         }
         log("BPL: no " + wanted + " column found in thead");
         return -1;
+    }
+
+    var BUTTON_COLOR_PRESETS = [
+        { value: "", label: "Default" },
+        { value: "#34343d", label: "Graphite" },
+        { value: "#3f3a5a", label: "Indigo" },
+        { value: "#3d4b5c", label: "Steel" },
+        { value: "#3e5148", label: "Forest" },
+        { value: "#5a4437", label: "Copper" },
+        { value: "#553c4b", label: "Plum" },
+        { value: "#4a4a31", label: "Olive" }
+    ];
+
+    function getButtonColors() {
+        try {
+            var raw = localStorage.getItem(STORAGE_BUTTON_COLORS);
+            var parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (e) { return {}; }
+    }
+
+    function setButtonColors(colors) {
+        try { localStorage.setItem(STORAGE_BUTTON_COLORS, JSON.stringify(colors || {})); } catch (e) {}
+    }
+
+    function getButtonLoadouts() {
+        try {
+            var raw = localStorage.getItem(STORAGE_BUTTON_LOADOUTS);
+            var parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (e) { return {}; }
+    }
+
+    function setButtonLoadouts(loadouts) {
+        try { localStorage.setItem(STORAGE_BUTTON_LOADOUTS, JSON.stringify(loadouts || {})); } catch (e) {}
+    }
+
+    function getActiveButtonLoadout() {
+        try { return localStorage.getItem(STORAGE_ACTIVE_BUTTON_LOADOUT) || ""; } catch (e) { return ""; }
+    }
+
+    function setActiveButtonLoadout(name) {
+        try { localStorage.setItem(STORAGE_ACTIVE_BUTTON_LOADOUT, name || ""); } catch (e) {}
+    }
+
+    function applyPanelButtonColors(panel) {
+        if (!panel || isGlassTheme()) return;
+        var colors = getButtonColors();
+        var buttons = panel.querySelectorAll("[data-aps-panel-body] button[data-feature-button]");
+        for (var i = 0; i < buttons.length; i++) {
+            var button = buttons[i];
+            var color = colors[button.getAttribute("data-feature-button")] || "#34343d";
+            button.setAttribute("data-clinspark-button-color", color);
+            button.style.setProperty("background", color, "important");
+            if (!button.getAttribute("data-clinspark-hover-bound")) {
+                button.addEventListener("mouseenter", function() { var base = this.getAttribute("data-clinspark-button-color") || "#34343d"; this.style.setProperty("background", shiftPanelButtonColor(base, 18), "important"); });
+                button.addEventListener("mouseleave", function() { this.style.setProperty("background", this.getAttribute("data-clinspark-button-color") || "#34343d", "important"); });
+                button.setAttribute("data-clinspark-hover-bound", "1");
+            }
+        }
+    }
+
+    function shiftPanelButtonColor(hex, amount) {
+        var match = String(hex || "").match(/^#([0-9a-f]{6})$/i);
+        if (!match) return hex || "#34343d";
+        var value = parseInt(match[1], 16);
+        var r = Math.min(255, ((value >> 16) & 255) + amount);
+        var g = Math.min(255, ((value >> 8) & 255) + amount);
+        var b = Math.min(255, (value & 255) + amount);
+        return "#" + [r, g, b].map(function(part) { return part.toString(16).padStart(2, "0"); }).join("");
     }
 
     function bplDetectTimepointColumn() {
@@ -23631,7 +23753,7 @@
         var btnRow = document.createElement("div");
         btnRow.style.display = "inline-flex";
         btnRow.style.justifyContent = "flex-end";
-        btnRow.style.gap = "8px";
+        btnRow.style.gap = scale(BUTTON_GAP_PX);
         var clearAllBtn = document.createElement("button");
         clearAllBtn.textContent = "Clear All";
         clearAllBtn.style.cssText = "background:#777;color:#fff;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;";
@@ -24002,13 +24124,16 @@
         }
         var isHidden = getPanelHidden();
         if (isHidden) {
-            panel.style.display = "block";
+            panel.style.display = "flex";
+            panel.style.flexDirection = "column";
             panel.style.pointerEvents = "auto";
             setPanelHidden(false);
+            applySidePanelLayout(panel, panel.querySelector("[data-aps-panel-body='1']"));
             log("Hotkey toggle: panel unhidden");
         } else {
             panel.style.display = "none";
             panel.style.pointerEvents = "none";
+            removeSidePanelOffset();
             setPanelHidden(true);
             log("Hotkey toggle: panel hidden");
         }
@@ -41182,12 +41307,184 @@
         return { width: w, height: h };
     }
 
+    function getPanelDock() {
+        try { return localStorage.getItem(STORAGE_PANEL_DOCK) === "bottom" ? "bottom" : "right"; } catch (e) { return "right"; }
+    }
+
+    function setPanelDock(dock) {
+        try { localStorage.setItem(STORAGE_PANEL_DOCK, dock === "bottom" ? "bottom" : "right"); } catch (e) {}
+    }
+
+    function pxToNumber(value, fallback) {
+        var n = parseInt(String(value || "").replace("px", ""), 10);
+        if (isNaN(n)) {
+            return fallback;
+        }
+        return n;
+    }
+
+    function clampSidePanelWidth(width) {
+        var minW = pxToNumber(scale(PANEL_DEFAULT_WIDTH), PANEL_DEFAULT_WIDTH);
+        var maxByViewport = Math.floor((window.innerWidth || 1280) * 0.55);
+        var maxW = Math.max(minW, Math.min(PANEL_MAX_WIDTH_PX, maxByViewport));
+        var n = pxToNumber(width, minW);
+        if (n < minW) n = minW;
+        if (n > maxW) n = maxW;
+        return String(n) + "px";
+    }
+
+    function clampBottomPanelHeight(height) {
+        var raw = String(height || "");
+        if (raw.indexOf("vh") !== -1 || raw.indexOf("%") !== -1) return String(PANEL_BOTTOM_HEIGHT_PX) + "px";
+        var n = pxToNumber(raw, PANEL_BOTTOM_HEIGHT_PX);
+        if (n < 220) n = 220;
+        if (n > PANEL_BOTTOM_HEIGHT_PX) n = PANEL_BOTTOM_HEIGHT_PX;
+        return String(n) + "px";
+    }
+
+    function applySidePanelLayout(panel, bodyContainer) {
+        if (!panel) return;
+        var dock = getPanelDock();
+        var width = clampSidePanelWidth((getStoredPanelSize() || {}).width);
+        panel.style.position = "fixed";
+        panel.style.top = dock === "bottom" ? "auto" : "0px";
+        panel.style.right = "0px";
+        panel.style.bottom = "0px";
+        panel.style.left = dock === "bottom" ? "0px" : "auto";
+        panel.style.width = dock === "bottom" ? "100vw" : width;
+        panel.style.minWidth = dock === "bottom" ? "0px" : scale(PANEL_DEFAULT_WIDTH);
+        panel.style.maxWidth = dock === "bottom" ? "100vw" : clampSidePanelWidth(PANEL_MAX_WIDTH_PX + "px");
+        panel.style.height = dock === "bottom" ? clampBottomPanelHeight((getStoredPanelSize() || {}).height) : "100vh";
+        panel.style.maxHeight = dock === "bottom" ? "45vh" : "100vh";
+        panel.style.borderRadius = "0";
+        panel.style.boxShadow = isGlassTheme() ? "none" : "-8px 0 28px rgba(0,0,0,0.28)";
+        panel.style.display = getPanelHidden() ? "none" : "flex";
+        panel.style.flexDirection = "column";
+        panel.style.overflow = "hidden";
+        var dockHeader = panel.querySelector("[data-aps-panel-header='1']");
+        if (dockHeader) {
+            var scrollbarWidth = Math.max(0, (window.innerWidth || 0) - (document.documentElement ? document.documentElement.clientWidth : 0));
+            dockHeader.style.paddingRight = dock === "bottom" ? Math.max(10, scrollbarWidth + 8) + "px" : "";
+        }
+        if (bodyContainer) {
+            bodyContainer.style.display = "flex";
+            bodyContainer.style.flexDirection = "column";
+            bodyContainer.style.height = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
+            bodyContainer.style.maxHeight = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
+            bodyContainer.style.overflowY = "auto";
+            bodyContainer.style.minHeight = "0px";
+            applyBottomDockBodyLayout(bodyContainer, dock);
+        }
+        applySidePanelOffset(panel);
+    }
+
+    function applyBottomDockBodyLayout(bodyContainer, dock) {
+        if (!bodyContainer) return;
+        var buttonRow = bodyContainer.querySelector("[data-aps-panel-buttons='1']");
+        var status = bodyContainer.querySelector("[data-aps-panel-status='1']");
+        var logBox = bodyContainer.querySelector("#" + LOG_ID);
+        if (!buttonRow || !status || !logBox) return;
+        var info = bodyContainer.querySelector("[data-aps-bottom-info='1']");
+        if (!info) {
+            info = document.createElement("div"); info.setAttribute("data-aps-bottom-info", "1"); bodyContainer.appendChild(info); info.appendChild(status); info.appendChild(logBox);
+        }
+        if (dock === "bottom") {
+            bodyContainer.style.flexDirection = "row"; bodyContainer.style.alignItems = "stretch"; bodyContainer.style.gap = "10px"; bodyContainer.style.overflow = "hidden";
+            buttonRow.style.flex = "1 1 auto"; buttonRow.style.minWidth = "0"; buttonRow.style.minHeight = "0"; buttonRow.style.gridTemplateColumns = "none"; buttonRow.style.gridTemplateRows = "repeat(4,minmax(0,1fr))"; buttonRow.style.gridAutoFlow = "column"; buttonRow.style.gridAutoColumns = "minmax(0,1fr)"; buttonRow.style.gap = "6px"; buttonRow.style.overflow = "hidden";
+            info.style.display = "flex"; info.style.flex = "0 1 clamp(210px,24vw,340px)"; info.style.minWidth = "210px"; info.style.minHeight = "0"; info.style.flexDirection = "column"; info.style.gap = "6px";
+            status.style.marginTop = "0"; status.style.flex = "0 0 auto"; status.style.minHeight = "0"; logBox.style.marginTop = "0"; logBox.style.flex = "1 1 auto"; logBox.style.minHeight = "0";
+            var bottomButtons = buttonRow.querySelectorAll("button"); for (var bi = 0; bi < bottomButtons.length; bi++) { bottomButtons[bi].style.minWidth = "0"; bottomButtons[bi].style.minHeight = "0"; bottomButtons[bi].style.height = "100%"; bottomButtons[bi].style.padding = "4px 5px"; bottomButtons[bi].style.fontSize = "11px"; bottomButtons[bi].style.lineHeight = "1.15"; bottomButtons[bi].style.whiteSpace = "normal"; bottomButtons[bi].style.overflow = "hidden"; }
+        } else {
+            bodyContainer.style.flexDirection = "column"; bodyContainer.style.alignItems = "stretch"; bodyContainer.style.gap = "0"; bodyContainer.style.overflow = "auto";
+            buttonRow.style.flex = "0 0 auto"; buttonRow.style.minWidth = ""; buttonRow.style.minHeight = ""; buttonRow.style.gridTemplateColumns = "1fr 1fr"; buttonRow.style.gridTemplateRows = ""; buttonRow.style.gridAutoFlow = ""; buttonRow.style.gridAutoColumns = ""; buttonRow.style.gap = scale(BUTTON_GAP_PX); buttonRow.style.overflow = "visible";
+            info.style.display = "contents"; info.style.flex = ""; info.style.minWidth = ""; info.style.gap = ""; status.style.marginTop = scale(STATUS_MARGIN_TOP_PX); status.style.flex = ""; status.style.minHeight = ""; logBox.style.marginTop = scale(LOG_MARGIN_TOP_PX); logBox.style.flex = "1"; logBox.style.minHeight = "0";
+            var rightButtons = buttonRow.querySelectorAll("button"); for (var ri = 0; ri < rightButtons.length; ri++) { rightButtons[ri].style.minWidth = ""; rightButtons[ri].style.minHeight = ""; rightButtons[ri].style.height = ""; rightButtons[ri].style.padding = scale(BUTTON_PADDING_PX); rightButtons[ri].style.fontSize = scale(PANEL_FONT_SIZE_PX); rightButtons[ri].style.lineHeight = ""; rightButtons[ri].style.whiteSpace = ""; rightButtons[ri].style.overflow = ""; }
+        }
+    }
+
+    function applySidePanelOffset(panel) {
+        if (!document.documentElement || !panel || getPanelHidden()) return;
+        var width = String(panel.offsetWidth || pxToNumber(panel.style.width, PANEL_DEFAULT_WIDTH)) + "px";
+        if (SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT === null) {
+            SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT = document.documentElement.style.paddingRight || "";
+        }
+        var dock = getPanelDock();
+        document.documentElement.style.paddingRight = dock === "right" ? width : (SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT || "");
+        if (SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM === null) SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM = document.documentElement.style.paddingBottom || "";
+        document.documentElement.style.paddingBottom = dock === "bottom" ? String(panel.offsetHeight || PANEL_BOTTOM_HEIGHT_PX) + "px" : SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM;
+        document.documentElement.setAttribute("data-clinspark-sidebar-open", "1");
+        document.documentElement.style.setProperty("--clinspark-sidebar-width", width);
+        document.documentElement.setAttribute("data-clinspark-sidebar-dock", dock);
+        ensureSidePanelLayoutStyles();
+        if (document.body) {
+            if (SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT === null) {
+                SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = document.body.style.paddingRight || "";
+                SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = document.body.style.boxSizing || "";
+                SIDE_PANEL_ORIGINAL_BODY_WIDTH = document.body.style.width || "";
+            }
+            document.body.style.paddingRight = "0px";
+            document.body.style.width = "100%";
+            document.body.style.boxSizing = "border-box";
+        }
+    }
+
+    function removeSidePanelOffset() {
+        if (document.documentElement) {
+            document.documentElement.style.paddingRight = SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT === null ? "" : SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT;
+            document.documentElement.removeAttribute("data-clinspark-sidebar-open");
+            document.documentElement.removeAttribute("data-clinspark-sidebar-dock");
+            document.documentElement.style.removeProperty("--clinspark-sidebar-width");
+            document.documentElement.style.paddingBottom = SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM === null ? "" : SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM;
+        }
+        if (document.body && SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT !== null) {
+            document.body.style.paddingRight = SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT;
+            document.body.style.boxSizing = SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING;
+            document.body.style.width = SIDE_PANEL_ORIGINAL_BODY_WIDTH;
+        }
+        SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT = null;
+        SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = null;
+        SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = null;
+        SIDE_PANEL_ORIGINAL_BODY_WIDTH = null;
+        SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM = null;
+    }
+
+    function ensureSidePanelLayoutStyles() {
+        var styleId = "clinspark-side-panel-layout-style";
+        var style = document.getElementById(styleId);
+        if (!style) {
+            style = document.createElement("style");
+            style.id = styleId;
+            document.head.appendChild(style);
+        }
+        style.textContent = "html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .header.navbar-fixed-top, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .navbar-fixed-top { right: var(--clinspark-sidebar-width) !important; width: auto !important; }";
+    }
+
+    function applyPanelButtonTheme(panel) {
+        if (!panel) return;
+        var styleId = "clinspark-panel-button-style";
+        var style = document.getElementById(styleId);
+        if (!style) {
+            style = document.createElement("style");
+            style.id = styleId;
+            document.head.appendChild(style);
+        }
+        var glass = isGlassTheme();
+        var buttonBg = glass ? THEME_GRADIENT_BG : "#34343d";
+        var buttonHover = glass ? "linear-gradient(135deg, #7b8ff0 0%, #8b5bb8 100%)" : "#464653";
+        var buttonBorder = glass ? "rgba(255,255,255,0.28)" : "#50505c";
+        style.textContent = "#" + PANEL_ID + " [data-aps-panel-body] button { background: " + buttonBg + " !important; border: 1px solid " + buttonBorder + " !important; color: #f5f5f7 !important; box-shadow: none !important; } #" + PANEL_ID + " [data-aps-panel-body] button:hover { background: " + buttonHover + " !important; border-color: " + (glass ? "rgba(255,255,255,0.5)" : "#7066b8") + " !important; } #" + PANEL_ID + " [data-aps-panel-body] button:focus-visible { outline: 2px solid #8b7de8 !important; outline-offset: 1px; } #" + PANEL_ID + " [data-aps-panel-body] button:disabled { opacity: .55; cursor: not-allowed !important; }";
+    }
+
     function updatePanelCollapsedState(panel, bodyContainer, resizeHandle, collapseBtn, headerBar) {
         var collapsed = getPanelCollapsed();
         if (collapsed) {
             // Collapse: shrink height but DO NOT overwrite stored expanded size
             panel.style.width = scale(PANEL_DEFAULT_WIDTH);
             panel.style.height = scale(PANEL_HEADER_HEIGHT_PX);
+            panel.style.top = "0px";
+            panel.style.right = "0px";
+            panel.style.bottom = "auto";
+            panel.style.borderRadius = "0 0 0 " + scale(PANEL_BORDER_RADIUS_PX);
             panel.style.overflow = "hidden";
 
             if (bodyContainer) {
@@ -41197,27 +41494,25 @@
                 resizeHandle.style.display = "none";
             }
             if (collapseBtn) {
-                collapseBtn.textContent = "+";
+                collapseBtn.textContent = "Expand";
             }
         } else {
             // Expand: restore last stored size
-            var size = getStoredPanelSize();
-            panel.style.width = size.width;
-            panel.style.height = size.height;
-            panel.style.overflow = "hidden";
+            applySidePanelLayout(panel, bodyContainer);
 
             if (bodyContainer) {
                 bodyContainer.style.display = "flex";
                 bodyContainer.style.flexDirection = "column";
                 bodyContainer.style.height = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
                 bodyContainer.style.maxHeight = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
-                bodyContainer.style.overflow = "hidden";
+                bodyContainer.style.overflowY = "auto";
+                bodyContainer.style.overflowX = "hidden";
             }
             if (resizeHandle) {
                 resizeHandle.style.display = "block";
             }
             if (collapseBtn) {
-                collapseBtn.textContent = "—";
+                collapseBtn.textContent = "Collapse";
             }
         }
     }
@@ -43243,19 +43538,36 @@
     function setupResizeHandle(panel, bodyContainer) {
         var handle = document.createElement("div");
         handle.style.position = "absolute";
-        handle.style.width = "12px";
-        handle.style.height = "12px";
-        handle.style.right = "6px";
-        handle.style.bottom = "6px";
-        handle.style.cursor = "se-resize";
-        handle.style.background = isGlassTheme() ? THEME_SURFACE_BG_HEAVY : "#333";
-        handle.style.borderRadius = "2px";
+        handle.style.width = "10px";
+        handle.style.height = "auto";
+        handle.style.top = "0";
+        handle.style.bottom = "0";
+        handle.style.left = "-5px";
+        handle.style.right = "auto";
+        handle.style.cursor = "col-resize";
+        handle.style.background = "transparent";
+        handle.style.borderRadius = "0";
         handle.style.display = "block";
+        handle.title = "Drag to resize panel";
+
+        function syncHandleDock() {
+            var bottom = getPanelDock() === "bottom";
+            handle.style.width = bottom ? "100%" : "10px";
+            handle.style.height = bottom ? "10px" : "auto";
+            handle.style.top = bottom ? "-5px" : "0";
+            handle.style.bottom = bottom ? "auto" : "0";
+            handle.style.left = bottom ? "0" : "-5px";
+            handle.style.right = bottom ? "0" : "auto";
+            handle.style.cursor = bottom ? "row-resize" : "col-resize";
+            handle.title = bottom ? "Drag to resize bottom dock" : "Drag to resize sidebar";
+        }
+        handle.__syncDock = syncHandleDock;
+        syncHandleDock();
 
         var isResizing = false;
         var startX = 0;
-        var startY = 0;
         var startW = 0;
+        var startY = 0;
         var startH = 0;
 
         function toInt(s) {
@@ -43271,10 +43583,9 @@
                 return;
             }
             isResizing = true;
-            startX = e.clientX;
-            startY = e.clientY;
-            startW = toInt(panel.style.width);
-            startH = panel.offsetHeight;
+            if (getPanelDock() === "bottom") { startY = e.clientY; startH = toInt(panel.style.height) || PANEL_BOTTOM_HEIGHT_PX; document.body.style.cursor = "row-resize"; }
+            else { startX = e.clientX; startW = toInt(panel.style.width); document.body.style.cursor = "col-resize"; }
+            handle.style.background = isGlassTheme() ? "rgba(158,124,255,0.28)" : "rgba(91,67,199,0.35)";
             e.preventDefault();
         });
 
@@ -43282,33 +43593,22 @@
             if (!isResizing) {
                 return;
             }
-            var dx = e.clientX - startX;
-            var dy = e.clientY - startY;
-            var newW = startW + dx;
-            var newH = startH + dy;
-
-            var minW = toInt(scale(PANEL_DEFAULT_WIDTH));
-            if (newW < minW) {
-                newW = minW;
+            if (getPanelDock() === "bottom") {
+                var dy = e.clientY - startY; var newH = startH - dy;
+                if (newH < 220) newH = 220; if (newH > PANEL_BOTTOM_HEIGHT_PX) newH = PANEL_BOTTOM_HEIGHT_PX;
+                panel.style.height = String(newH) + "px"; applySidePanelOffset(panel); applyBottomDockBodyLayout(bodyContainer, "bottom");
+            } else {
+                var dx = e.clientX - startX; var newW = startW - dx;
+                var minW = toInt(scale(PANEL_DEFAULT_WIDTH)); if (newW < minW) newW = minW; if (newW > PANEL_MAX_WIDTH_PX) newW = PANEL_MAX_WIDTH_PX;
+                panel.style.width = String(newW) + "px"; panel.style.height = "100vh"; applySidePanelOffset(panel);
             }
-            if (newW > PANEL_MAX_WIDTH_PX) {
-                newW = PANEL_MAX_WIDTH_PX;
-            }
-
-            var minH = PANEL_HEADER_HEIGHT_PX + 88;
-            if (newH < minH) {
-                newH = minH;
-            }
-
-            panel.style.width = String(newW) + "px";
-            panel.style.height = String(newH) + "px";
 
             if (bodyContainer) {
                 bodyContainer.style.display = "flex";
-                bodyContainer.style.flexDirection = "column";
+                bodyContainer.style.flexDirection = getPanelDock() === "bottom" ? "row" : "column";
                 bodyContainer.style.height = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
                 bodyContainer.style.maxHeight = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
-                bodyContainer.style.overflowY = "hidden";
+                bodyContainer.style.overflowY = getPanelDock() === "bottom" ? "hidden" : "hidden";
             }
         });
 
@@ -43317,7 +43617,11 @@
                 return;
             }
             isResizing = false;
-            setStoredPanelSize(panel.style.width, panel.style.height);
+            document.body.style.cursor = "";
+            handle.style.background = "transparent";
+            if (getPanelDock() === "bottom") setStoredPanelSize((getStoredPanelSize() || {}).width, clampBottomPanelHeight(panel.style.height));
+            else setStoredPanelSize(clampSidePanelWidth(panel.style.width), "100vh");
+            applySidePanelLayout(panel, bodyContainer);
         });
 
         return handle;
@@ -43344,10 +43648,13 @@
         if (hidden) {
             panel.style.display = "none";
             panel.style.pointerEvents = "none";
+            removeSidePanelOffset();
             log("applyPanelHiddenState: applied hidden");
         } else {
-            panel.style.display = "block";
+            panel.style.display = "flex";
+            panel.style.flexDirection = "column";
             panel.style.pointerEvents = "auto";
+            applySidePanelOffset(panel);
             log("applyPanelHiddenState: applied visible");
         }
     }
@@ -43448,36 +43755,38 @@
             panel.classList.add(THEME_SCOPE_CLASS);
             panel.classList.add("ie-glass-panel");
         }
-        var savedTop = getStoredPos("activityPlanState.panel.top", "20px");
-        var savedRight = getStoredPos("activityPlanState.panel.right", "20px");
         var savedSize = getStoredPanelSize();
-        panel.style.top = savedTop;
+        panel.style.top = "0px";
         panel.style.position = "fixed";
-        panel.style.right = savedRight;
-        panel.style.zIndex = glass ? String(THEME_Z_BASE) : "999999";
+        panel.style.right = "0px";
+        panel.style.bottom = "0px";
+        panel.style.left = "auto";
+        panel.style.zIndex = String(PANEL_Z_INDEX);
         if (!glass) {
             panel.style.background = "#111";
             panel.style.color = "#fff";
-            panel.style.border = "1px solid #444";
+            panel.style.border = "0";
+            panel.style.borderLeft = "1px solid #444";
         }
-        panel.style.borderRadius = scale(PANEL_BORDER_RADIUS_PX);
+        panel.style.borderRadius = "0";
         panel.style.padding = scale(PANEL_PADDING_PX);
         panel.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Arial";
         panel.style.fontSize = scale(PANEL_FONT_SIZE_PX);
         panel.style.minWidth = scale(PANEL_DEFAULT_WIDTH);
-        panel.style.width = savedSize.width || scale(PANEL_DEFAULT_WIDTH);
-        var appliedHeight = savedSize.height;
-        if (!appliedHeight || appliedHeight === "auto" || !String(appliedHeight).endsWith("px")) {
-            appliedHeight = PANEL_DEFAULT_HEIGHT;
-        }
-        panel.style.height = appliedHeight;
+        panel.style.width = clampSidePanelWidth(savedSize.width);
+        panel.style.maxWidth = clampSidePanelWidth(PANEL_MAX_WIDTH_PX + "px");
+        panel.style.height = "100vh";
+        panel.style.maxHeight = "100vh";
         panel.style.boxSizing = "border-box";
         panel.style.overflow = "hidden";
+        panel.style.display = "flex";
+        panel.style.flexDirection = "column";
 
         var headerBar = document.createElement("div");
+        headerBar.setAttribute("data-aps-panel-header", "1");
         if (glass) {
             headerBar.classList.add("ie-glass-panel-header");
-            headerBar.style.borderRadius = THEME_RADIUS + "px " + THEME_RADIUS + "px 0 0";
+            headerBar.style.borderRadius = "0";
         }
         headerBar.style.position = "relative";
         headerBar.style.display = "grid";
@@ -43486,33 +43795,44 @@
         headerBar.style.gap = scale(PANEL_HEADER_GAP_PX);
         headerBar.style.height = scale(PANEL_HEADER_HEIGHT_PX);
         headerBar.style.boxSizing = "border-box";
-        headerBar.style.cursor = "grab";
+        headerBar.style.cursor = "default";
         headerBar.style.userSelect = "none";
         var leftSpacer = document.createElement("div");
         leftSpacer.style.width = scale(HEADER_LEFT_SPACER_WIDTH_PX);
+        var dockToggleBtn = document.createElement("button");
+        dockToggleBtn.type = "button";
+        dockToggleBtn.textContent = getPanelDock() === "right" ? "\u2194" : "\u2195";
+        dockToggleBtn.title = getPanelDock() === "right" ? "Move sidebar to bottom" : "Move dock back to right";
+        dockToggleBtn.setAttribute("aria-label", dockToggleBtn.title);
+        dockToggleBtn.style.cssText = "width:28px;height:26px;padding:0;background:transparent;color:" + (glass ? THEME_TEXT_PRIMARY : "#fff") + ";border:1px solid " + (glass ? "rgba(255,255,255,0.24)" : "#444") + ";border-radius:5px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;";
+        dockToggleBtn.onclick = function(e) {
+            e.stopPropagation();
+            var nextDock = getPanelDock() === "right" ? "bottom" : "right";
+            setPanelDock(nextDock);
+            dockToggleBtn.textContent = nextDock === "right" ? "\u2194" : "\u2195";
+            dockToggleBtn.title = nextDock === "right" ? "Move sidebar to bottom" : "Move dock back to right";
+            dockToggleBtn.setAttribute("aria-label", dockToggleBtn.title);
+            applySidePanelLayout(panel, bodyContainer);
+            if (resizeHandle && resizeHandle.__syncDock) resizeHandle.__syncDock();
+        };
+        leftSpacer.appendChild(dockToggleBtn);
         var title = document.createElement("div");
-        title.textContent = "Automator";
+        title.textContent = "ClinSpark Test Automator";
         title.style.fontWeight = HEADER_FONT_WEIGHT;
         title.style.textAlign = "center";
         title.style.justifySelf = "center";
-        title.style.transform = "translateX(" + scale(HEADER_TITLE_OFFSET_PX) + ")";
+        title.style.transform = "none";
         title.style.paddingBottom = scale(8);
         if (glass) title.style.color = THEME_TEXT_PRIMARY;
-        headerBar.appendChild(title);
         headerBar.appendChild(leftSpacer);
+        headerBar.appendChild(title);
         var rightControls = document.createElement("div");
         rightControls.style.display = "inline-flex";
         rightControls.style.alignItems = "center";
         rightControls.style.gap = scale(PANEL_HEADER_GAP_PX);
-        var collapseBtn = document.createElement("button");
-        collapseBtn.textContent = getPanelCollapsed() ? "Expand" : "Collapse";
-        collapseBtn.style.background = "transparent";
-        collapseBtn.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
-        collapseBtn.style.border = "none";
-        collapseBtn.style.cursor = "pointer";
-        collapseBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
         var closeBtn = document.createElement("button");
         closeBtn.textContent = CLOSE_BTN_TEXT;
+        closeBtn.title = "Hide sidebar";
         closeBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
         closeBtn.style.background = "transparent";
         closeBtn.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
@@ -43561,7 +43881,6 @@
 
         rightControls.appendChild(helpBtn);
         rightControls.appendChild(settingsBtn);
-        rightControls.appendChild(collapseBtn);
         rightControls.appendChild(closeBtn);
 
         headerBar.appendChild(rightControls);
@@ -43571,13 +43890,15 @@
         bodyContainer.style.flexDirection = "column";
         bodyContainer.style.height = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
         bodyContainer.style.maxHeight = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
-        bodyContainer.style.overflowY = "hidden";
+        bodyContainer.style.overflowY = "auto";
         bodyContainer.style.boxSizing = "border-box";
-        bodyContainer.style.padding = scale(12);
+        bodyContainer.style.minHeight = "0px";
+        bodyContainer.setAttribute("data-aps-panel-body", "1");
         var btnRow = document.createElement("div");
+        btnRow.setAttribute("data-aps-panel-buttons", "1");
         btnRow.style.display = "grid";
         btnRow.style.gridTemplateColumns = "1fr 1fr";
-        btnRow.style.gap = "8px";
+        btnRow.style.gap = scale(BUTTON_GAP_PX);
         btnRowRef = btnRow;
         var runPlansBtn = document.createElement("button");
         runPlansBtn.textContent = "Lock Activity Plans";
@@ -44065,6 +44386,9 @@
             "Clear Logs": clearLogsBtn,
             "Hide Logs": toggleLogsBtn
         };
+        for (var featureButtonLabel in panelButtonMap) {
+            if (panelButtonMap.hasOwnProperty(featureButtonLabel)) panelButtonMap[featureButtonLabel].setAttribute("data-feature-button", featureButtonLabel);
+        }
 
         var effectiveLayout = getEffectiveButtonLayout();
         var sortedLayout = effectiveLayout.slice().sort(function(a, b) { return a.position - b.position; });
@@ -44086,6 +44410,7 @@
 
         bodyContainer.appendChild(btnRow);
         var status = document.createElement("div");
+        status.setAttribute("data-aps-panel-status", "1");
         status.style.marginTop = scale(STATUS_MARGIN_TOP_PX);
         status.style.background = glass ? THEME_SURFACE_BG : "#1a1a1a";
         status.style.border = glass ? ("1px solid " + THEME_SURFACE_INNER_BORDER) : "1px solid #333";
@@ -44098,43 +44423,6 @@
         bodyContainer.appendChild(status);
 
 
-        // UI Scale Control
-        var scaleControl = document.createElement("div");
-        scaleControl.style.marginTop = scale(STATUS_MARGIN_TOP_PX);
-        scaleControl.style.background = glass ? THEME_SURFACE_BG : "#1a1a1a";
-        scaleControl.style.border = glass ? ("1px solid " + THEME_SURFACE_INNER_BORDER) : "1px solid #333";
-        scaleControl.style.borderRadius = scale(STATUS_BORDER_RADIUS_PX);
-        scaleControl.style.padding = scale(STATUS_PADDING_PX);
-        scaleControl.style.fontSize = scale(STATUS_FONT_SIZE_PX);
-
-        var scaleLabel = document.createElement("div");
-        scaleLabel.textContent = "UI Scale: " + Math.round(UI_SCALE * 100) + "%";
-        scaleLabel.style.marginBottom = "4px";
-        scaleLabel.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
-
-        var scaleSlider = document.createElement("input");
-        scaleSlider.type = "range";
-        scaleSlider.min = "50";
-        scaleSlider.max = "100";
-        scaleSlider.value = String(UI_SCALE * 100);
-        scaleSlider.step = "10";
-        scaleSlider.style.width = "100%";
-        scaleSlider.style.cursor = "pointer";
-
-        scaleSlider.addEventListener("input", function() {
-            var newScale = parseFloat(this.value) / 100;
-            updateUIScale(newScale);
-            scaleLabel.textContent = "UI Scale: " + Math.round(newScale * 100) + "%";
-            status.textContent = "UI Scale updated to " + Math.round(newScale * 100) + "% - Refresh to see changes";
-        });
-
-        scaleSlider.addEventListener("change", function() {
-            log("UI Scale changed to " + Math.round(UI_SCALE * 100) + "%");
-        });
-
-        scaleControl.appendChild(scaleLabel);
-        scaleControl.appendChild(scaleSlider);
-        bodyContainer.appendChild(scaleControl);
         var logBox = document.createElement("div");
         logBox.id = LOG_ID;
         logBox.style.marginTop = scale(LOG_MARGIN_TOP_PX);
@@ -44793,15 +45081,6 @@
             log("CollectAll: mode=" + selectedMode);
             runCollectAll(selectedMode);
         });
-        collapseBtn.addEventListener("click", function () {
-            var collapsed = getPanelCollapsed();
-            if (collapsed) {
-                setPanelCollapsed(false);
-            } else {
-                setPanelCollapsed(true);
-            }
-            updatePanelCollapsedState(panel, bodyContainer, resizeHandle, collapseBtn, headerBar);
-        });
         importEligBtn.addEventListener("click", function () {
             log("ImportElig: button clicked");
             startImportEligibilityMapping();
@@ -44927,7 +45206,8 @@
             startClearMapping();
         });
         closeBtn.addEventListener("click", function () {
-            panel.remove();
+            setPanelHidden(true);
+            applyPanelHiddenState(panel);
         });
         var isDragging = false;
         var startX = 0;
@@ -44942,7 +45222,8 @@
             return n;
         }
         headerBar.addEventListener("mousedown", function (e) {
-            if (e.target === collapseBtn || e.target === closeBtn || collapseBtn.contains(e.target) || closeBtn.contains(e.target)) {
+            return;
+            if (e.target === closeBtn || closeBtn.contains(e.target)) {
                 return;
             }
             isDragging = true;
@@ -44979,8 +45260,10 @@
         });
         document.body.appendChild(panel);
         applyPanelHiddenState(panel);
-
-        updatePanelCollapsedState(panel, bodyContainer, resizeHandle, collapseBtn, headerBar);
+        setPanelCollapsed(false);
+        applySidePanelLayout(panel, bodyContainer);
+        applyPanelButtonTheme(panel);
+        applyPanelButtonColors(panel);
 
         var t = pxToInt(panel.style.top);
         var r2 = pxToInt(panel.style.right);
@@ -45015,14 +45298,28 @@
             }
         }
         if (offTop || offRight) {
-            panel.style.top = "20px";
-            panel.style.right = "20px";
+            panel.style.top = "0px";
+            panel.style.right = "0px";
             try {
                 localStorage.setItem("activityPlanState.panel.top", panel.style.top);
             } catch (e3) {}
             try {
                 localStorage.setItem("activityPlanState.panel.right", panel.style.right);
             } catch (e4) {}
+        }
+        if (!getPanelCollapsed()) {
+            applySidePanelLayout(panel, bodyContainer);
+        }
+        if (!window.__APS_SIDE_PANEL_RESIZE_BOUND) {
+            window.__APS_SIDE_PANEL_RESIZE_BOUND = true;
+            window.addEventListener("resize", function () {
+                var currentPanel = document.getElementById(PANEL_ID);
+                if (!currentPanel || getPanelHidden()) {
+                    removeSidePanelOffset();
+                    return;
+                }
+                applySidePanelLayout(currentPanel, currentPanel.querySelector("[data-aps-panel-body='1']"));
+            });
         }
 
         if (PENDING_BUTTONS.length > 0) {

@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Val Automator
 // @namespace vinh.activity.plan.state
-// @version 4.2.19
+// @version 4.2.20
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexel-val.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Val%20Val%20Automator.js
@@ -11937,73 +11937,74 @@
             {
                 title: "Study Setup",
                 features: [
-                    { label: "Lock Activity Plans", desc: "Automatically locks activity plans for one or more studies." },
-                    { label: "Lock Sample Paths", desc: "Locks sample path configurations for the current study." },
-                    { label: "Update Study Status", desc: "Updates the status of studies to Active if not already. Handles the status change workflow automatically." },
-                    { label: "Run Study Setup", desc: "Runs the full study setup pipeline, executing multiple sequential setup steps automatically in the correct order." }
+                    { label: "Lock Activity Plans", desc: "Locks activity plans for one or more studies and reports progress for each target." },
+                    { label: "Lock Sample Paths", desc: "Locks sample path configurations while skipping paths whose lock checkbox is disabled, with a dedicated skipped status when locking is required but unavailable." },
+                    { label: "Update Study Status", desc: "Updates studies to Active when needed and handles the status change workflow automatically." },
+                    { label: "Run Study Setup", desc: "Runs the full setup pipeline in sequence, including activity plan locking, sample path locking, status updates, cohort setup, and consent steps where configured." }
                 ]
             },
             {
                 title: "Subject Management",
                 features: [
-                    { label: "Add Cohort Subjects", desc: "Adds subjects to a cohort in a study. Specify the study and cohort, and the automator handles the enrollment steps without manual navigation." },
-                    { label: "Import Cohort Subjects", desc: "Imports a prepared list of subjects into a cohort, automating the entry of each subject's records." },
-                    { label: "Add Existing Subject", desc: "Adds a subject who already exists in the system to a new study or cohort, without creating a duplicate record." }
+                    { label: "Add Cohort Subjects", desc: "Adds subjects to a cohort in a selected study without manual navigation through each enrollment step." },
+                    { label: "Import Cohort Subjects", desc: "Imports a prepared subject list into a cohort and automates each subject record entry." },
+                    { label: "Add Existing Subject", desc: "Adds an existing subject to a new study or cohort without creating a duplicate subject." }
                 ]
             },
             {
                 title: "Consent",
                 features: [
-                    { label: "Run ICF Consent", desc: "Automates the Informed Consent Form (ICF) process for a subject. Navigates through the consent workflow, scans barcodes, and completes each required step automatically." }
+                    { label: "Run ICF Consent", desc: "Automates the informed consent workflow for a subject, including navigation, barcode scanning, and required consent steps." }
                 ]
             },
             {
                 title: "Data Collection",
                 features: [
-                    { label: "Pull Barcode", desc: "Automatically fills in the subject barcode for a subject based on the subject identifier — no manual typing needed." },
-                    { label: "Pull Lab Barcode", desc: "Scans all barcode icons on the current data collection page and fills them in one by one, confirming each automatically. Saves significant time during lab sample processing." },
-                    { label: "Run Form", desc: "Fills in and submits a data collection form with specified values. Can be configured to enter out-of-range (OOR) or in-range (IR) values — useful for study testing and setup verification." },
-                    { label: "Collect All", desc: "Processes all eligible data collection forms on the current page in sequence, collecting each one automatically without manual clicking." }
+                    { label: "Pull Barcode", desc: "Fills the subject barcode field from the current subject context." },
+                    { label: "Pull Lab Barcode", desc: "Scans barcode icons on the current page and fills lab barcode fields one by one." },
+                    { label: "Run Form", desc: "Fills and submits a data collection form with configured in-range or out-of-range values for testing and setup verification." },
+                    { label: "Collect All", desc: "Processes eligible data collection forms on the current page in sequence." }
                 ]
             },
             {
                 title: "CRF Design & Library",
                 features: [
-                    { label: "Search Methods", desc: "Opens up the method library that contains all coded methods/edit checks." },
-                    { label: "PLAP Builder", desc: "The Procedure Log Activity Plan Builder. Drag forms into segments, assign study events, configure time references, then submit all procedure log entries automatically." },
-                    { label: "Import from Library", desc: "Opens a side-by-side tool for importing forms from the study library into the current study. Select the target study and form, and the automator imports and saves it." },
+                    { label: "Search Methods", desc: "Opens the method library that contains coded methods and edit checks." },
+                    { label: "PLAP Builder", desc: "Builds procedure log activity plan rows with a full-screen, drag-and-drop workspace, existing-form editing, clear Existing visibility filtering, time offsets, example-time recalculation, and Apply Time Calculation." },
+                    { label: "Import from Library", desc: "Imports forms from another study library. Supports cached scans, duplicate import copies for the same source form, per-copy form names, item group/item renames, item inclusion settings, lock-on-save, confirmation warnings, progress tracking, and cancel/resume cleanup." },
+                    { label: "Activity Plan Removal", desc: "Selects scheduled activities for removal. Filtered Select All only affects visible rows, archived rows are shown with an archive indicator and cannot be selected, and unavailable deletes can fall back to archive." },
                     { label: "Archive/Update Forms", desc: "Batch archives or renames forms in the study library. Useful for replacing old versions with new versions." },
-                    { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study to another, preserving their structure and settings." },
-                    { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to their data pages." },
-                    { label: "Import I/E", desc: "Automatically map I/E items to the correct Activity Plan -> Forms -> Items" },
-                    { label: "Clear Mapping", desc: "Clears the current form-to-schedule mapping configuration so you can start fresh with a new mapping setup." },
-                    { label: "Edit Study Events List", desc: "Manage the study events list in the library — add new events, rename or reorder existing ones, and save all changes in a single batch." },
-                    { label: "Set Visibility Condition", desc: "Sets visibility (show/hide) conditions on forms in an activity plan. Map each form to the item and value that controls whether it is shown or hidden, and the automator saves each condition." }
+                    { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study or activity plan context to another while preserving structure and settings where possible." },
+                    { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to relevant data pages." },
+                    { label: "Import I/E", desc: "Maps inclusion/exclusion check items to Activity Plan forms and items. Shows expected eligibility defaults and supports selective mapping cleanup." },
+                    { label: "Clear Mapping", desc: "Scans eligibility mappings, displays selectable eligibility items, and removes only the mappings confirmed by the user." },
+                    { label: "Edit Study Events List", desc: "Adds, renames, reorders, and saves study event list changes in one batch." },
+                    { label: "Set Visibility Condition", desc: "Sets show/hide conditions on scheduled activity forms using auto-populated visibility references, with refresh handling and animated loading states." }
                 ]
             },
             {
                 title: "Navigation",
                 features: [
-                    { label: "Find Form & Events", desc: "Navigates directly to a form or study event data page. Enter a form keyword and/or a study event keyword, plus an optional subject identifier, and the automator applies the filters and searches automatically." }
+                    { label: "Find Form & Events", desc: "Navigates directly to a form or study event data page using keywords and an optional subject identifier." }
                 ]
             },
             {
                 title: "Reports",
                 features: [
-                    { label: "Download DTS Report", desc: "Automatically generates and downloads Clinical Data Text (Delimited) reports for selected studies, handling all navigation and download steps." }
+                    { label: "Download DTS Report", desc: "Generates and downloads Clinical Data Text reports for selected studies while handling navigation and download steps." }
                 ]
             },
             {
                 title: "Panel Controls",
                 features: [
-                    { label: "Pause", desc: "Pauses any currently running automation. Click again to resume. Useful for briefly halting a long process without canceling it." },
-                    { label: "Clear Logs", desc: "Clears all entries from the activity log panel for a fresh view." },
-                    { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space when the log is not needed." }
+                    { label: "Settings", desc: "Customize visible buttons, panel order, and panel hotkey." },
+                    { label: "Help Guide", desc: "Opens this searchable guide for quick reminders about each available feature." },
+                    { label: "Pause", desc: "Pauses any running automation and resumes when supported by that workflow." },
+                    { label: "Clear Logs", desc: "Clears the activity log panel for a fresh view." },
+                    { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space." }
                 ]
             }
-        ];
-
-        var overlay = document.createElement("div");
+        ];        var overlay = document.createElement("div");
         overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:30000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
 
         var modal = document.createElement("div");
@@ -12023,7 +12024,7 @@
         mHeader.style.cssText = "padding:20px 24px;background:rgba(102,126,234,0.15);border-bottom:1px solid rgba(102,126,234,0.3);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;";
 
         var mTitle = document.createElement("div");
-        mTitle.innerHTML = "<span style='font-size:20px;font-weight:700;color:white;'>ClinSpark Test Automator</span><span style='font-size:14px;color:rgba(255,255,255,0.6);margin-left:10px;'>Help Guide</span>";
+        mTitle.innerHTML = "<span style='font-size:20px;font-weight:700;color:white;'>ClinSpark Val Automator</span><span style='font-size:14px;color:rgba(255,255,255,0.6);margin-left:10px;'>Help Guide</span>";
 
         var closeX = document.createElement("button");
         closeX.innerHTML = "\u2715";
