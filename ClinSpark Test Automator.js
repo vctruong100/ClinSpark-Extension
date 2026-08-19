@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.58
+// @version 4.3.59
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -5212,7 +5212,7 @@
         var editSEIsFullscreen = false;
         try { editSEIsFullscreen = localStorage.getItem(STORAGE_EDIT_SE_FULLSCREEN) === "true"; } catch (e) {}
         var topBar = document.createElement("div");
-        topBar.style.cssText = "display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-bottom:8px;";
+        topBar.style.cssText = "display:none;";
         var fullscreenBtn = document.createElement("button");
         fullscreenBtn.textContent = editSEIsFullscreen ? "\u2716\u26F6" : "\u26F6";
         fullscreenBtn.title = editSEIsFullscreen ? "Exit Full Screen" : "Toggle Full Screen";
@@ -5768,6 +5768,13 @@
                 if (!locked) editSE_cleanup();
             }
         });
+        var editSEHeader = EDIT_SE_POPUP_REF.element && EDIT_SE_POPUP_REF.element.firstElementChild;
+        if (editSEHeader) {
+            editSEHeader.style.gridTemplateColumns = "1fr auto auto";
+            var editSEClose = editSEHeader.querySelector("button:last-of-type") || editSEHeader.querySelector("button");
+            if (editSEClose) editSEHeader.insertBefore(fullscreenBtn, editSEClose);
+            else editSEHeader.appendChild(fullscreenBtn);
+        }
         setTimeout(function() { applyEditSEFullscreen(); }, 50);
     }
 

@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name        ClinSpark Automator
 // @namespace   vinh.activity.plan.state
-// @version     3.6.62
+// @version     3.6.65
 // @description Automate various tasks in ClinSpark platform
 // @match       https://cenexel.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Automator.js
@@ -17345,7 +17345,7 @@
         var container = document.createElement("div");
         container.style.cssText = "display:flex;flex-direction:column;gap:10px;height:100%;min-height:560px;color:#fff;";
         var topBar = document.createElement("div");
-        topBar.style.cssText = "display:flex;justify-content:flex-end;align-items:center;gap:8px;";
+        topBar.style.cssText = "display:none;";
         var fullscreenBtn = document.createElement("button");
         fullscreenBtn.id = "editFormsFullscreenBtn";
         fullscreenBtn.textContent = editFormsIsFullscreen ? "\u2716\u26F6" : "\u26F6";
@@ -17977,6 +17977,7 @@
                 EDIT_FORMS_POPUP_REF = null;
             }
         });
+        clinsparkPlaceHeaderControl(EDIT_FORMS_POPUP_REF, gui.querySelector ? gui.querySelector("#editFormsFullscreenBtn") : null);
     }
 
     //==================================================
@@ -21969,6 +21970,19 @@
         container.style.height = "100%";
         container.style.padding = "12px";
 
+        var fullscreenBtn = document.createElement("button");
+        fullscreenBtn.id = "parseFormsFullscreenBtn";
+        fullscreenBtn.textContent = "\u26F6";
+        fullscreenBtn.title = "Toggle Full Screen";
+        fullscreenBtn.style.cssText = "padding:4px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:14px;cursor:pointer;line-height:1;width:32px;height:32px;display:flex;align-items:center;justify-content:center;";
+        container.__parseFormsFullscreenBtn = fullscreenBtn;
+
+        var searchInput = document.createElement("input");
+        searchInput.type = "search";
+        searchInput.placeholder = "Filter forms...";
+        searchInput.style.cssText = "padding:8px 10px;border-radius:5px;border:1px solid #555;background:#181818;color:#fff;font-size:13px;outline:none;";
+        container.appendChild(searchInput);
+
         var countDiv = document.createElement("div");
         countDiv.style.textAlign = "center";
         countDiv.style.fontSize = "16px";
@@ -21977,7 +21991,6 @@
         countDiv.style.padding = "8px";
         countDiv.style.background = "#1a1a1a";
         countDiv.style.borderRadius = "6px";
-        countDiv.textContent = "Collected " + forms.length + " forms";
         container.appendChild(countDiv);
 
         var contentContainer = document.createElement("div");
@@ -21987,8 +22000,6 @@
         contentContainer.style.flex = "1";
         contentContainer.style.minHeight = "0";
         contentContainer.style.overflow = "hidden";
-
-        var outputData = parseFormsGenerateOutput(forms);
 
         var header = document.createElement("div");
         header.style.display = "flex";
@@ -22016,7 +22027,7 @@
         copyBtn.addEventListener("mouseenter", function() { this.style.background = "#218838"; });
         copyBtn.addEventListener("mouseleave", function() { this.style.background = "#28a745"; });
         copyBtn.addEventListener("click", function() {
-            parseFormsCopyToClipboard(outputData);
+            parseFormsCopyToClipboard(parseFormsGenerateOutput(getFilteredForms()));
             var origText = copyBtn.textContent;
             copyBtn.textContent = "Copied!";
             copyBtn.style.background = "#17a2b8";
@@ -22042,10 +22053,26 @@
         content.style.whiteSpace = "pre-wrap";
         content.style.wordBreak = "break-word";
         content.style.color = "#e0e0e0";
-        content.textContent = outputData;
 
         contentContainer.appendChild(content);
         container.appendChild(contentContainer);
+
+        function getFilteredForms() {
+            var filter = (searchInput.value || "").trim().toLowerCase();
+            if (!filter) return forms.slice();
+            return forms.filter(function(form) { return form.name.toLowerCase().indexOf(filter) !== -1; });
+        }
+
+        function renderFilteredForms() {
+            var filtered = getFilteredForms();
+            countDiv.textContent = "Showing " + filtered.length + " of " + forms.length + " forms";
+            content.textContent = parseFormsGenerateOutput(filtered);
+            copyBtn.disabled = filtered.length === 0;
+            copyBtn.style.opacity = filtered.length === 0 ? "0.5" : "1";
+            copyBtn.style.cursor = filtered.length === 0 ? "default" : "pointer";
+        }
+        searchInput.addEventListener("input", renderFilteredForms);
+        renderFilteredForms();
 
         return container;
     }
@@ -22133,8 +22160,63 @@
             popup.element.style.top = (window.innerHeight / 2) + "px";
             popup.element.style.transform = "translate(-50%, -50%)";
 
+            var parseFullscreenBtn = resultsUI.__parseFormsFullscreenBtn;
+            clinsparkPlaceHeaderControl(popup, parseFullscreenBtn);
+            parseFullscreenBtn = popup.element.querySelector("#parseFormsFullscreenBtn") || parseFullscreenBtn;
+            var parseFullscreen = false;
+            try { parseFullscreen = localStorage.getItem("parseForms.fullscreen") === "true"; } catch (e) {}
+            function applyParseFormsFullscreen() {
+                if (!parseFullscreenBtn || !popup || !popup.element) return;
+                if (parseFullscreen) {
+                    popup.element.dataset.parseFormsOrigWidth = popup.element.style.width || "";
+                    popup.element.dataset.parseFormsOrigHeight = popup.element.style.height || "";
+                    popup.element.dataset.parseFormsOrigMaxWidth = popup.element.style.maxWidth || "";
+                    popup.element.dataset.parseFormsOrigMaxHeight = popup.element.style.maxHeight || "";
+                    popup.element.style.width = "calc(100vw - 16px)";
+                    popup.element.style.maxWidth = "calc(100vw - 16px)";
+                    popup.element.style.height = "calc(100vh - 16px)";
+                    popup.element.style.maxHeight = "calc(100vh - 16px)";
+                    popup.element.style.top = "8px";
+                    popup.element.style.left = "8px";
+                    popup.element.style.position = "fixed";
+                    popup.element.style.zIndex = "999999";
+                    popup.element.style.transform = "none";
+                    parseFullscreenBtn.textContent = "\u2716\u26F6";
+                    parseFullscreenBtn.title = "Exit Full Screen";
+                } else {
+                    popup.element.style.width = popup.element.dataset.parseFormsOrigWidth || "600px";
+                    popup.element.style.maxWidth = popup.element.dataset.parseFormsOrigMaxWidth || "95%";
+                    popup.element.style.height = popup.element.dataset.parseFormsOrigHeight || "500px";
+                    popup.element.style.maxHeight = popup.element.dataset.parseFormsOrigMaxHeight || "85%";
+                    popup.element.style.top = "50%";
+                    popup.element.style.left = "50%";
+                    popup.element.style.transform = "translate(-50%, -50%)";
+                    parseFullscreenBtn.textContent = "\u26F6";
+                    parseFullscreenBtn.title = "Toggle Full Screen";
+                }
+            }
+            parseFullscreenBtn.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+            parseFullscreenBtn.addEventListener("click", function(e) {
+                e.stopPropagation();
+                parseFullscreen = !parseFullscreen;
+                try { localStorage.setItem("parseForms.fullscreen", String(parseFullscreen)); } catch (ignore) {}
+                applyParseFormsFullscreen();
+            });
+            applyParseFormsFullscreen();
+
             log("[ParseForms] Results displayed, collected " + forms.length + " forms");
         }, 300);
+    }
+
+    function clinsparkPlaceHeaderControl(popupRef, button) {
+        if (!popupRef || !popupRef.element || !button) return;
+        var header = popupRef.element.firstElementChild;
+        if (!header) return;
+        var closeButton = header.querySelector("button:last-of-type") || header.querySelector("button");
+        header.style.gridTemplateColumns = "1fr auto auto";
+        button.style.margin = "0";
+        if (closeButton && closeButton !== button) header.insertBefore(button, closeButton);
+        else if (!button.parentNode || button.parentNode !== header) header.appendChild(button);
     }
 
     var BUTTON_COLOR_PRESETS = [
@@ -38944,7 +39026,7 @@
         var editSEIsFullscreen = false;
         try { editSEIsFullscreen = localStorage.getItem(STORAGE_EDIT_SE_FULLSCREEN) === "true"; } catch (e) {}
         var topBar = document.createElement("div");
-        topBar.style.cssText = "display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-bottom:8px;";
+        topBar.style.cssText = "display:none;";
         var fullscreenBtn = document.createElement("button");
         fullscreenBtn.textContent = editSEIsFullscreen ? "\u2716\u26F6" : "\u26F6";
         fullscreenBtn.title = editSEIsFullscreen ? "Exit Full Screen" : "Toggle Full Screen";
@@ -39514,6 +39596,7 @@
                 if (!locked) editSE_cleanup();
             }
         });
+        clinsparkPlaceHeaderControl(EDIT_SE_POPUP_REF, fullscreenBtn);
         setTimeout(function() { applyEditSEFullscreen(); }, 50);
     }
 
@@ -40532,6 +40615,14 @@
         var root = document.createElement('div');
         root.style.cssText = 'display:flex;flex-direction:column;height:100%;gap:0;';
 
+        var eirIsFullscreen = false;
+        try { eirIsFullscreen = localStorage.getItem('activityPlanState.eir.fullscreen') === 'true'; } catch (e) {}
+        var eirFullscreenBtn = document.createElement('button');
+        eirFullscreenBtn.id = 'eirFullscreenBtn';
+        eirFullscreenBtn.textContent = eirIsFullscreen ? '\u2716\u26F6' : '\u26F6';
+        eirFullscreenBtn.title = eirIsFullscreen ? 'Exit Full Screen' : 'Toggle Full Screen';
+        eirFullscreenBtn.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:14px;cursor:pointer;line-height:1;width:32px;height:32px;display:flex;align-items:center;justify-content:center;';
+
         var topRow = document.createElement('div');
         topRow.style.cssText = 'display:flex;flex:1;overflow:hidden;gap:10px;min-height:0;';
 
@@ -40900,6 +40991,45 @@
                 EIR_CANCELLED = true;
             }
         });
+
+        function applyEirFullscreen() {
+            var popup = EIR_POPUP_REF && EIR_POPUP_REF.element;
+            if (!popup) return;
+            if (eirIsFullscreen) {
+                popup.dataset.eirOrigWidth = popup.style.width || '';
+                popup.dataset.eirOrigHeight = popup.style.height || '';
+                popup.dataset.eirOrigMaxWidth = popup.style.maxWidth || '';
+                popup.dataset.eirOrigMaxHeight = popup.style.maxHeight || '';
+                popup.style.width = 'calc(100vw - 16px)';
+                popup.style.maxWidth = 'calc(100vw - 16px)';
+                popup.style.height = 'calc(100vh - 16px)';
+                popup.style.maxHeight = 'calc(100vh - 16px)';
+                popup.style.top = '8px';
+                popup.style.left = '8px';
+                popup.style.transform = 'none';
+                eirFullscreenBtn.textContent = '\u2716\u26F6';
+                eirFullscreenBtn.title = 'Exit Full Screen';
+            } else {
+                popup.style.width = popup.dataset.eirOrigWidth || '900px';
+                popup.style.maxWidth = popup.dataset.eirOrigMaxWidth || '95%';
+                popup.style.height = popup.dataset.eirOrigHeight || '620px';
+                popup.style.maxHeight = popup.dataset.eirOrigMaxHeight || '90%';
+                popup.style.top = '50%';
+                popup.style.left = '50%';
+                popup.style.transform = 'translate(-50%, -50%)';
+                eirFullscreenBtn.textContent = '\u26F6';
+                eirFullscreenBtn.title = 'Toggle Full Screen';
+            }
+        }
+        clinsparkPlaceHeaderControl(EIR_POPUP_REF, eirFullscreenBtn);
+        eirFullscreenBtn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+        eirFullscreenBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            eirIsFullscreen = !eirIsFullscreen;
+            try { localStorage.setItem('activityPlanState.eir.fullscreen', String(eirIsFullscreen)); } catch (ignore) {}
+            applyEirFullscreen();
+        });
+        applyEirFullscreen();
 
         renderRight();
         renderOverview();
