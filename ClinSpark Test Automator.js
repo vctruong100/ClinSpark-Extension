@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.59
+// @version 4.3.80
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -95,6 +95,8 @@
     var STORAGE_RUN_LOCK_SAMPLE_PATHS = "activityPlanState.runLockSamplePaths";
     var STORAGE_SAMPLE_PATH_AUTO_CLOSE = "activityPlanState.samplePath.autoClose";
     var STORAGE_LOCK_SAMPLE_PATHS_POPUP = "activityPlanState.lockSamplePaths.popup";
+    var STORAGE_SAMPLE_PATH_APPROVAL = "activityPlanState.samplePath.approval";
+    var STORAGE_SAMPLE_PATH_NAVIGATION = "activityPlanState.samplePath.navigation";
     var LOCK_SAMPLE_PATHS_POPUP_REF = null;
     var STORAGE_LOCK_ACTIVITY_PLANS_POPUP = "activityPlanState.lockActivityPlans.popup";
     var LOCK_ACTIVITY_PLANS_POPUP_REF = null;
@@ -13760,7 +13762,7 @@
                 title: "Study Setup",
                 features: [
                     { label: "Lock Activity Plans", desc: "Locks activity plans for one or more studies and reports progress for each target." },
-                    { label: "Lock Sample Paths", desc: "Locks sample path configurations while skipping paths whose lock checkbox is disabled, with a dedicated skipped status when locking is required but unavailable." },
+                    { label: "Lock Sample Paths", desc: "Locks sample path configurations and attempts electronic approval when a required lock checkbox is disabled; unavailable approvals are reported as skipped." },
                     { label: "Update Study Status", desc: "Updates studies to Active when needed and handles the status change workflow automatically." },
                     { label: "Run Study Setup", desc: "Runs the full setup pipeline in sequence, including activity plan locking, sample path locking, status updates, cohort setup, and consent steps where configured." }
                 ]
@@ -34253,7 +34255,7 @@
 
             if (lockCheckbox.disabled || lockCheckbox.hasAttribute("disabled")) {
                 log("Sample Path lock checkbox disabled; skipping: " + samplePathName);
-                return { success: false, skipped: true, message: "Skipped - lock checkbox disabled" };
+                return { success: false, needsApproval: true, message: "Lock checkbox disabled; approval required" };
             }
 
             var formElement = updateDoc.querySelector('form');
@@ -34352,6 +34354,7 @@
 
     async function processLockSamplePathsPage() {
         log("processLockSamplePathsPage: start");
+        if (samplePathStopOnReload()) return;
 
         var flag = null;
 
@@ -34365,6 +34368,26 @@
         }
 
         log("processLockSamplePathsPage: flag detected");
+
+        var approvalState = samplePathApprovalLoad();
+        log("processLockSamplePathsPage: approval state=" + (approvalState ? JSON.stringify({ phase: approvalState.phase, name: approvalState.name, completed: approvalState.completedUrls || [], skipped: approvalState.skippedUrls || [] }) : "none"));
+        if (approvalState && (approvalState.phase === "detail" || approvalState.phase === "approval" || approvalState.phase === "approval-processing")) {
+            log("Lock Sample Paths: stale approval state detected on list page; stopping instead of rerunning approval");
+            try {
+                localStorage.removeItem(STORAGE_RUN_LOCK_SAMPLE_PATHS);
+                localStorage.removeItem(STORAGE_LOCK_SAMPLE_PATHS_POPUP);
+            } catch (e) {}
+            samplePathApprovalClear();
+            return;
+        }
+        samplePathInstallRefreshGuard();
+        if (approvalState && approvalState.phase === "return-list") {
+            approvalState.phase = "list";
+            samplePathApprovalSave(approvalState);
+        }
+        var skippedApprovalUrls = approvalState && approvalState.skippedUrls ? approvalState.skippedUrls : [];
+        var completedApprovalUrls = approvalState && approvalState.completedUrls ? approvalState.completedUrls : [];
+        log("processLockSamplePathsPage: excluding completed=" + completedApprovalUrls.length + " skipped=" + skippedApprovalUrls.length);
 
         var tbody = await waitForSelector("tbody#deviceTbody", 10000);
         if (!tbody) {
@@ -34396,7 +34419,11 @@
                         var href = link.getAttribute("href") + "";
                         if (href.length > 0) {
                             var fullUrl = location.origin + href;
-                            unlockedPaths.push({ url: fullUrl, name: pathName });
+                            if (skippedApprovalUrls.indexOf(fullUrl) === -1 && completedApprovalUrls.indexOf(fullUrl) === -1) {
+                                unlockedPaths.push({ url: fullUrl, name: pathName });
+                            } else {
+                                log("Skipping previously unavailable approval path: " + pathName);
+                            }
                         }
                     }
                 }
@@ -34407,10 +34434,20 @@
 
         log("processLockSamplePathsPage: found " + String(unlockedPaths.length) + " unlocked paths");
 
+        var progressState = approvalState && approvalState.progress ? approvalState.progress : { total: 0, success: 0, skipped: 0, failed: 0, current: "" };
+        if (!progressState.total) {
+            progressState.total = unlockedPaths.length + completedApprovalUrls.length + skippedApprovalUrls.length;
+        }
+        progressState.current = "";
+        approvalState = approvalState || {};
+        approvalState.progress = progressState;
+        samplePathApprovalSave(approvalState);
+
         if (unlockedPaths.length === 0) {
             log("processLockSamplePathsPage: no unlocked paths to process");
             try {
                 localStorage.removeItem(STORAGE_RUN_LOCK_SAMPLE_PATHS);
+                samplePathApprovalClear();
             } catch (e) { }
 
             var mode = getRunMode();
@@ -34445,7 +34482,7 @@
         progressDiv.style.textAlign = "center";
         progressDiv.style.fontSize = "16px";
         progressDiv.style.color = "#9df";
-        progressDiv.textContent = "Processing 0/" + String(unlockedPaths.length);
+        progressDiv.textContent = "Completed " + String(progressState.success + progressState.skipped) + "/" + String(progressState.total);
 
         var loadingAnimation = document.createElement("div");
         loadingAnimation.id = "lockSamplePathsLoading";
@@ -34459,7 +34496,7 @@
         countsDiv.style.textAlign = "center";
         countsDiv.style.fontSize = "14px";
         countsDiv.style.color = "#ccc";
-        countsDiv.innerHTML = "<span style='color:#9f9'>Success: 0</span> | <span style='color:#f99'>Failed: 0</span>";
+        countsDiv.innerHTML = "<span style='color:#9f9'>Success: " + String(progressState.success) + "</span> | <span style='color:#ffd166'>Skipped: " + String(progressState.skipped) + "</span> | <span style='color:#f99'>Failed: " + String(progressState.failed) + "</span>";
 
         popupContainer.appendChild(statusDiv);
         popupContainer.appendChild(progressDiv);
@@ -34515,21 +34552,41 @@
             log("Processing (" + String(j + 1) + "/" + String(unlockedPaths.length) + "): " + path.name);
 
             if (progressDiv) {
-                progressDiv.textContent = "Processing " + String(j + 1) + "/" + String(unlockedPaths.length) + ": " + path.name;
+                progressState.current = path.name;
+                progressDiv.textContent = "Processing " + String(progressState.success + progressState.skipped + 1) + "/" + String(progressState.total) + ": " + path.name;
             }
 
             var result = await fetchAndLockSamplePath(path.url, path.name);
-            if (result.skipped) {
+            if (result.needsApproval) {
+                progressState.current = path.name;
+                approvalState.progress = progressState;
+                var nextApprovalState = samplePathApprovalLoad() || {};
+                nextApprovalState.progress = progressState;
+                nextApprovalState.phase = "detail";
+                nextApprovalState.pathUrl = path.url;
+                nextApprovalState.name = path.name;
+                nextApprovalState.skippedUrls = nextApprovalState.skippedUrls || [];
+                samplePathApprovalSave(nextApprovalState);
+                log("Lock checkbox disabled; navigating to sample path for visible approval: " + path.name);
+                samplePathNavigate(path.url);
+                return;
+            } else if (result.skipped) {
                 skippedCount = skippedCount + 1;
+                progressState.skipped = progressState.skipped + 1;
             } else if (result.success) {
                 successCount = successCount + 1;
+                progressState.success = progressState.success + 1;
             } else {
                 failCount = failCount + 1;
+                progressState.failed = progressState.failed + 1;
             }
 
             if (countsDiv) {
-                countsDiv.innerHTML = "<span style='color:#9f9'>Success: " + String(successCount) + "</span> | <span style='color:#ffd166'>Skipped: " + String(skippedCount) + "</span> | <span style='color:#f99'>Failed: " + String(failCount) + "</span>";
+                countsDiv.innerHTML = "<span style='color:#9f9'>Success: " + String(progressState.success) + "</span> | <span style='color:#ffd166'>Skipped: " + String(progressState.skipped) + "</span> | <span style='color:#f99'>Failed: " + String(progressState.failed) + "</span>";
             }
+
+            approvalState.progress = progressState;
+            samplePathApprovalSave(approvalState);
 
             await sleep(500);
             j = j + 1;
@@ -34553,6 +34610,7 @@
         try {
             localStorage.removeItem(STORAGE_RUN_LOCK_SAMPLE_PATHS);
             localStorage.removeItem(STORAGE_LOCK_SAMPLE_PATHS_POPUP);
+            samplePathApprovalClear();
             log("processLockSamplePathsPage: flag cleared");
         } catch (e) { }
 
@@ -41526,6 +41584,404 @@
         return { width: w, height: h };
     }
 
+    function samplePathApprovalLoad() {
+        try {
+            var raw = localStorage.getItem(STORAGE_SAMPLE_PATH_APPROVAL);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    function samplePathApprovalSave(state) {
+        try { localStorage.setItem(STORAGE_SAMPLE_PATH_APPROVAL, JSON.stringify(state || {})); } catch (e) {}
+    }
+
+    function samplePathApprovalClear() {
+        try { localStorage.removeItem(STORAGE_SAMPLE_PATH_APPROVAL); } catch (e) {}
+    }
+
+    function samplePathInstallRefreshGuard() {
+        try { localStorage.removeItem(STORAGE_SAMPLE_PATH_NAVIGATION); } catch (e) {}
+    }
+
+    function samplePathWasBrowserReloaded() {
+        try {
+            var entries = window.performance && performance.getEntriesByType ? performance.getEntriesByType("navigation") : [];
+            if (entries && entries.length && entries[0].type === "reload") return true;
+            return !!(performance.navigation && performance.navigation.type === 1);
+        } catch (e) { return false; }
+    }
+
+    function samplePathStopOnReload() {
+        if (!samplePathWasBrowserReloaded()) return false;
+        log("Lock Sample Paths: browser refresh detected; clearing the active workflow");
+        try {
+            localStorage.removeItem(STORAGE_RUN_LOCK_SAMPLE_PATHS);
+            localStorage.removeItem(STORAGE_LOCK_SAMPLE_PATHS_POPUP);
+            localStorage.removeItem(STORAGE_SAMPLE_PATH_APPROVAL);
+            localStorage.removeItem(STORAGE_SAMPLE_PATH_NAVIGATION);
+        } catch (e) {}
+        return true;
+    }
+
+    function samplePathNavigate(url) {
+        try { localStorage.setItem(STORAGE_SAMPLE_PATH_NAVIGATION, "1"); } catch (e) {}
+        location.href = url;
+    }
+
+    function samplePathApprovalUsername(rootDoc) {
+        rootDoc = rootDoc || document;
+        var selectors = [".username", "#username", "[data-username]", ".user .username"];
+        for (var i = 0; i < selectors.length; i++) {
+            var el = rootDoc.querySelector(selectors[i]);
+            var value = el ? (el.getAttribute("data-username") || el.textContent || el.value || "").replace(/\s+/g, " ").trim() : "";
+            if (value && /@/.test(value)) return value;
+        }
+        var chosen = rootDoc.querySelectorAll(".select2-chosen, select option:checked, .select2-choice");
+        for (var j = 0; j < chosen.length; j++) {
+            var text = (chosen[j].textContent || chosen[j].value || "").replace(/\s+/g, " ").trim();
+            if (text && /@/.test(text)) return text;
+        }
+        var match = (rootDoc.body ? rootDoc.body.textContent || "" : "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+        return match ? match[0] : "";
+    }
+
+    async function samplePathApproveInBackground(pathUrl, samplePathName) {
+        var frame = document.createElement("iframe");
+        frame.setAttribute("aria-hidden", "true");
+        frame.style.cssText = "position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;";
+        document.body.appendChild(frame);
+        log("Background approval: hidden frame created for " + samplePathName + " -> " + pathUrl);
+        try {
+            frame.addEventListener("error", function(e) { log("Background approval: frame error for " + samplePathName + ": " + String(e && e.message ? e.message : e)); });
+        } catch (e) {}
+        var settled = false;
+        var timer = null;
+        function finish(result) {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            try { frame.remove(); } catch (e) {}
+            return result;
+        }
+        function waitForFrameElement(selector, timeoutMs) {
+            return new Promise(function(resolve) {
+                var started = Date.now();
+                var poll = setInterval(function() {
+                    var doc = frame.contentDocument;
+                    var el = doc ? doc.querySelector(selector) : null;
+                    if (el) {
+                        clearInterval(poll);
+                        resolve(el);
+                    } else if (Date.now() - started >= timeoutMs) {
+                        clearInterval(poll);
+                        resolve(null);
+                    }
+                }, 250);
+            });
+        }
+        try {
+            var result = await new Promise(function(resolve) {
+                timer = setTimeout(function() { resolve({ success: false, message: "Approval timed out" }); }, 30000);
+                frame.onload = async function() {
+                    if (settled) return;
+                    var doc = frame.contentDocument;
+                    var frameHref = "";
+                    try { frameHref = frame.contentWindow.location.href || ""; } catch (ignoreHref) {}
+                    log("Background approval: frame loaded for " + samplePathName + " url=" + frameHref);
+                    if (!doc) { log("Background approval: approval frame document unavailable"); resolve({ success: false, message: "Approval frame unavailable" }); return; }
+                    var approveLink = doc.querySelector('a[href*="/secure/samples/configure/paths/approve/"]');
+                    if (approveLink) {
+                        log("Background approval: detail page found Approve href=" + (approveLink.getAttribute("href") || ""));
+                        var approveHref = approveLink.getAttribute("href") || "";
+                        frame.src = approveHref.indexOf("http") === 0 ? approveHref : location.origin + approveHref;
+                        return;
+                    }
+                    var approveButton = await waitForFrameElement('button[onclick*="initiateApproval"], button.btn.green', 10000);
+                    if (!approveButton) { log("Background approval: Approve button not found after waiting"); resolve({ success: false, message: "Approve button not found" }); return; }
+                    log("Background approval: Approve button found disabled=" + String(!!approveButton.disabled) + " text='" + (approveButton.textContent || "").replace(/\s+/g, " ").trim() + "'");
+                    approveButton.click();
+                    var modal = await waitForFrameElement(".modal-content", 10000);
+                    if (!modal) { log("Background approval: electronic signature modal not found after clicking Approve"); resolve({ success: false, message: "Electronic signature modal not found" }); return; }
+                    var modalInputs = modal.querySelectorAll("input, textarea, select, button");
+                    var modalFields = [];
+                    for (var mfi = 0; mfi < modalInputs.length; mfi++) {
+                        modalFields.push((modalInputs[mfi].tagName || "") + "#" + (modalInputs[mfi].id || "") + "[name=" + (modalInputs[mfi].name || "") + "]" + (modalInputs[mfi].type ? " type=" + modalInputs[mfi].type : ""));
+                    }
+                    log("Background approval: modal found fields=" + modalFields.join(", "));
+                    var usernameInput = await waitForFrameElement("#eSigUsername", 5000);
+                    var username = samplePathApprovalUsername(document) || samplePathApprovalUsername(doc);
+                    if (usernameInput) {
+                        if (!username) { resolve({ success: false, message: "Username field is present but current username was not found" }); return; }
+                        usernameInput.value = username;
+                        usernameInput.dispatchEvent(new Event("input", { bubbles: true }));
+                        usernameInput.dispatchEvent(new Event("change", { bubbles: true }));
+                    } else {
+                        log("Background approval: username field not present; continuing with existing signature session");
+                    }
+                    var passwordInput = modal.querySelector("#eSigPassword");
+                    log("Background approval: password field present=" + String(!!passwordInput) + " currentValueLength=" + String(passwordInput && passwordInput.value ? passwordInput.value.length : 0));
+                    var comment = modal.querySelector("#eSigComment");
+                    if (comment && !comment.value) {
+                        comment.value = "Automated approval for sample path";
+                        comment.dispatchEvent(new Event("input", { bubbles: true }));
+                    }
+                    await new Promise(function(resolveWait) { setTimeout(resolveWait, 800); });
+                    var ok = modal.querySelector(".eSigPwdOkButton, button[data-bb-handler='success']");
+                    if (!ok || ok.disabled) { log("Background approval: OK button unavailable or disabled=" + String(!!(ok && ok.disabled))); resolve({ success: false, message: "Electronic signature OK button unavailable" }); return; }
+                    log("Background approval: submitting electronic signature for " + samplePathName + " okDisabled=" + String(!!ok.disabled));
+                    ok.click();
+                    var approvalVerified = await new Promise(function(resolveWait2) {
+                        var approvalStarted = Date.now();
+                        var lastApprovalDiagnostic = "";
+                        var approvalPoll = setInterval(function() {
+                            var currentDoc = frame.contentDocument;
+                            var currentModal = null;
+                            if (currentDoc) {
+                                var modalCandidates = currentDoc.querySelectorAll(".modal-content");
+                                for (var mi = 0; mi < modalCandidates.length; mi++) {
+                                    var modalStyle = currentDoc.defaultView ? currentDoc.defaultView.getComputedStyle(modalCandidates[mi]) : null;
+                                    if (modalStyle && modalStyle.display !== "none" && modalStyle.visibility !== "hidden" && modalStyle.opacity !== "0") {
+                                        currentModal = modalCandidates[mi];
+                                        break;
+                                    }
+                                }
+                            }
+                            var successAlert = currentDoc ? currentDoc.querySelector(".alert.alert-success, .alert-success") : null;
+                            var currentPath = "";
+                            try { currentPath = frame.contentWindow.location.pathname || ""; } catch (ignore) {}
+                            var leftApprovalPage = currentPath.indexOf("/secure/samples/configure/paths/approve/") === -1;
+                            var diagnostic = "url=" + currentPath + " visibleModal=" + String(!!currentModal) + " successAlert=" + String(!!successAlert);
+                            if (currentModal) {
+                                var errorText = (currentModal.textContent || "").replace(/\s+/g, " ").trim();
+                                diagnostic += " modalText='" + errorText.slice(0, 240) + "'";
+                            }
+                            if (diagnostic !== lastApprovalDiagnostic) {
+                                log("Background approval: post-OK state " + diagnostic);
+                                lastApprovalDiagnostic = diagnostic;
+                            }
+                            if (successAlert || !currentModal) {
+                                clearInterval(approvalPoll);
+                                resolveWait2(true);
+                            } else if (Date.now() - approvalStarted >= 8000) {
+                                clearInterval(approvalPoll);
+                                log("Background approval: verification timeout; modal remained visible and no success alert was detected");
+                                resolveWait2(false);
+                            }
+                        }, 400);
+                    });
+                    if (!approvalVerified) {
+                        resolve({ success: false, message: "Approval was not confirmed; electronic signature modal or approval page remained active" });
+                        return;
+                    }
+                    resolve({ success: true, message: "Approved successfully" });
+                };
+                frame.src = pathUrl;
+            });
+            return finish(result);
+        } catch (error) {
+            return finish({ success: false, message: String(error) });
+        }
+    }
+
+    async function processSamplePathApprovalDetailPage() {
+        if (samplePathStopOnReload()) return;
+        var state = samplePathApprovalLoad();
+        if (!state || state.phase !== "detail" || !state.pathUrl) return;
+        samplePathInstallRefreshGuard();
+        var approve = document.querySelector('a[href*="/secure/samples/configure/paths/approve/"]');
+        if (!approve) {
+            log("Visible approval link not available: " + state.name);
+            state.skippedUrls = state.skippedUrls || [];
+            if (state.skippedUrls.indexOf(state.pathUrl) === -1) state.skippedUrls.push(state.pathUrl);
+            state.progress = state.progress || { total: 0, success: 0, skipped: 0, failed: 0, current: "" };
+            state.progress.skipped = (state.progress.skipped || 0) + 1;
+            state.phase = "return-list";
+            samplePathApprovalSave(state);
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return;
+        }
+        state.phase = "approval";
+        samplePathApprovalSave(state);
+        var href = approve.getAttribute("href") || "";
+        log("Opening visible approval page for " + state.name);
+        samplePathNavigate(href.indexOf("http") === 0 ? href : location.origin + href);
+    }
+
+    async function processSamplePathApprovalPage() {
+        if (samplePathStopOnReload()) return;
+        var state = samplePathApprovalLoad();
+        if (!state || state.phase !== "approval") return;
+        samplePathInstallRefreshGuard();
+        // Persist the action lock before any click events. A duplicate userscript
+        // initialization or refresh must never click Approve again.
+        state.phase = "approval-processing";
+        samplePathApprovalSave(state);
+        var approveButton = null;
+        var invalidPathWarning = null;
+        var approvalPageStarted = Date.now();
+        while (Date.now() - approvalPageStarted < 10000) {
+            invalidPathWarning = document.querySelector(".note.note-danger");
+            if (invalidPathWarning && (invalidPathWarning.textContent || "").toLowerCase().indexOf("sample path not valid") !== -1) {
+                break;
+            }
+            approveButton = document.querySelector('button[onclick*="initiateApproval"], button.btn.green');
+            if (approveButton) break;
+            await sleep(250);
+        }
+        if (invalidPathWarning && (invalidPathWarning.textContent || "").toLowerCase().indexOf("sample path not valid") !== -1) {
+            log("Sample Path Not Valid; skipping visible approval for " + state.name);
+            state.skippedUrls = state.skippedUrls || [];
+            if (state.skippedUrls.indexOf(state.pathUrl) === -1) state.skippedUrls.push(state.pathUrl);
+            state.phase = "return-list";
+            samplePathApprovalSave(state);
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return;
+        }
+        if (!approveButton) {
+            log("Visible Approve button not found: " + state.name);
+            state.skippedUrls = state.skippedUrls || [];
+            if (state.skippedUrls.indexOf(state.pathUrl) === -1) state.skippedUrls.push(state.pathUrl);
+            state.phase = "return-list";
+            samplePathApprovalSave(state);
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return;
+        }
+        log("Physically simulating click on visible Approve button for " + state.name);
+        try { approveButton.scrollIntoView({ block: "center" }); } catch (e) {}
+        try {
+            approveButton.focus();
+            var approveRect = approveButton.getBoundingClientRect();
+            var approveMouseOptions = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: approveRect.left + (approveRect.width / 2),
+                clientY: approveRect.top + (approveRect.height / 2),
+                button: 0
+            };
+            approveButton.dispatchEvent(new MouseEvent("mousedown", approveMouseOptions));
+            approveButton.dispatchEvent(new MouseEvent("mouseup", approveMouseOptions));
+            approveButton.dispatchEvent(new MouseEvent("click", approveMouseOptions));
+        } catch (e2) {}
+        await sleep(250);
+        var select2Search = document.querySelector("#select2-drop .select2-input, .select2-drop-active .select2-input, .select2-search .select2-input");
+        if (select2Search) {
+            log("Approval Select2 search control detected; focusing it before signature handling for " + state.name);
+            try { select2Search.focus(); } catch (e3) {}
+            try { select2Search.click(); } catch (e4) {}
+            await sleep(250);
+        } else {
+            log("No approval Select2 search control detected; continuing with signature modal for " + state.name);
+        }
+        var modal = null;
+        var modalStarted = Date.now();
+        while (!modal && Date.now() - modalStarted < 10000) {
+            var modalCandidates = document.querySelectorAll(".modal-content");
+            for (var mci = 0; mci < modalCandidates.length; mci++) {
+                var modalCandidateStyle = window.getComputedStyle(modalCandidates[mci]);
+                if (modalCandidateStyle.display !== "none" && modalCandidateStyle.visibility !== "hidden" && modalCandidateStyle.opacity !== "0") {
+                    modal = modalCandidates[mci];
+                    break;
+                }
+            }
+            if (!modal) await sleep(250);
+        }
+        if (!modal) {
+            log("Visible electronic signature modal did not appear: " + state.name);
+            return;
+        }
+        // ClinSpark renders the modal shell before its signature fields and browser autofill settle.
+        await sleep(400);
+        var currentVisibleModal = document.querySelectorAll(".modal-content");
+        for (var cvmi = 0; cvmi < currentVisibleModal.length; cvmi++) {
+            var currentModalStyle = window.getComputedStyle(currentVisibleModal[cvmi]);
+            if (currentModalStyle.display !== "none" && currentModalStyle.visibility !== "hidden" && currentModalStyle.opacity !== "0") {
+                modal = currentVisibleModal[cvmi];
+                break;
+            }
+        }
+        var usernameInput = modal.querySelector("#eSigUsername");
+        var username = samplePathApprovalUsername(document);
+        if (usernameInput && username) {
+            usernameInput.value = username;
+            usernameInput.dispatchEvent(new Event("input", { bubbles: true }));
+            usernameInput.dispatchEvent(new Event("change", { bubbles: true }));
+            log("Entered username in visible approval modal for " + state.name);
+        } else if (usernameInput) {
+            log("Visible approval modal username field is present but username could not be detected");
+        } else {
+            log("Visible approval modal has no username field; waiting for password entry");
+        }
+        var comment = modal.querySelector("#eSigComment");
+        if (comment && !comment.value) comment.value = "Automated approval for sample path";
+        var approvalPrompt = createPopup({
+            title: "Approval Required",
+            content: "<div style='padding:10px;line-height:1.5;'>Review the Electronic Signature modal and click <strong>OK</strong> to approve <strong>" + String(state.name).replace(/[&<>\"']/g, function(ch) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]; }) + "</strong>.<br><br>The automation will continue after ClinSpark closes the signature modal.</div>",
+            width: "320px",
+            height: "auto",
+            onClose: function() { log("Approval instruction popup closed; waiting for ClinSpark signature modal"); }
+        });
+        if (approvalPrompt && approvalPrompt.element) {
+            approvalPrompt.element.style.zIndex = "1000001";
+        }
+        function positionApprovalPrompt() {
+            if (!approvalPrompt || !approvalPrompt.element || !modal || !document.body.contains(approvalPrompt.element)) return;
+            var modalRect = modal.getBoundingClientRect();
+            var promptWidth = approvalPrompt.element.getBoundingClientRect().width || 320;
+            var gap = 14;
+            var left = modalRect.right + gap;
+            if (left + promptWidth > window.innerWidth - 10) left = modalRect.left - promptWidth - gap;
+            if (left < 10) left = Math.max(10, window.innerWidth - promptWidth - 10);
+            var top = Math.max(10, Math.min(modalRect.top, window.innerHeight - 180));
+            approvalPrompt.element.style.top = top + "px";
+            approvalPrompt.element.style.left = left + "px";
+            approvalPrompt.element.style.right = "auto";
+            approvalPrompt.element.style.transform = "none";
+        }
+        positionApprovalPrompt();
+        window.addEventListener("resize", positionApprovalPrompt);
+        log("Waiting for user to click OK in the Electronic Signature modal for " + state.name);
+        var closed = false;
+        var closeStarted = Date.now();
+        while (Date.now() - closeStarted < 120000) {
+            await sleep(400);
+            var visibleModal = null;
+            var visibleModalCandidates = document.querySelectorAll(".modal-content");
+            for (var vmi = 0; vmi < visibleModalCandidates.length; vmi++) {
+                var visibleModalStyle = window.getComputedStyle(visibleModalCandidates[vmi]);
+                if (visibleModalStyle.display !== "none" && visibleModalStyle.visibility !== "hidden" && visibleModalStyle.opacity !== "0") {
+                    visibleModal = visibleModalCandidates[vmi];
+                    break;
+                }
+            }
+            if (visibleModal && (visibleModal.textContent || "").toLowerCase().indexOf("please enter the required fields before signing") !== -1) {
+                log("ClinSpark rejected the signature attempt; waiting for the user to correct the fields and click OK again for " + state.name);
+                continue;
+            }
+            if (!visibleModal) {
+                closed = true;
+                break;
+            }
+        }
+        if (approvalPrompt && approvalPrompt.close) {
+            try { window.removeEventListener("resize", positionApprovalPrompt); } catch (e7) {}
+            try { approvalPrompt.close(); } catch (e8) {}
+        }
+        if (!closed) {
+            log("Timed out waiting for the user to complete the Electronic Signature modal: " + state.name);
+            return;
+        }
+        log("Visible approval completed for " + state.name + "; returning to sample path list");
+        state.progress = state.progress || { total: 0, success: 0, skipped: 0, failed: 0, current: "" };
+        state.progress.success = (state.progress.success || 0) + 1;
+        state.progress.current = "";
+        state.phase = "return-list";
+        state.completedUrls = state.completedUrls || [];
+        if (state.completedUrls.indexOf(state.pathUrl) === -1) state.completedUrls.push(state.pathUrl);
+        samplePathApprovalSave(state);
+        samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+    }
+
     function getPanelDock() {
         try { return localStorage.getItem(STORAGE_PANEL_DOCK) === "bottom" ? "bottom" : "right"; } catch (e) { return "right"; }
     }
@@ -45754,6 +46210,28 @@
         };
         bindPanelHotkeyOnce();
         initSmartPageLocator();
+
+        // Sample-path approval uses page navigation as part of its workflow.
+        // Dispatch these routes before unrelated reload-resume handlers so a
+        // returned list page cannot initialize the panel and then silently
+        // bypass the next sample path.
+        var earlySamplePath = (location.pathname || "").replace(/\/+$/, "");
+        if (earlySamplePath === "/secure/samples/configure/paths") {
+            log("Sample Path workflow: early list-page dispatch for " + location.pathname);
+            processLockSamplePathsPage();
+            return;
+        }
+        if (earlySamplePath.indexOf("/secure/samples/configure/paths/show/") === 0) {
+            log("Sample Path workflow: early detail-page dispatch for " + location.pathname);
+            processSamplePathApprovalDetailPage();
+            return;
+        }
+        if (earlySamplePath.indexOf("/secure/samples/configure/paths/approve/") === 0) {
+            log("Sample Path workflow: early approval-page dispatch for " + location.pathname);
+            processSamplePathApprovalPage();
+            return;
+        }
+
         editSE_resumeAfterReload();
         ifl_resumeImport();
 
@@ -45801,15 +46279,26 @@
                 processFindCombinedOnList();
             }
         }
-        var isSamplePathsPage = location.pathname === "/secure/samples/configure/paths";
+        // ClinSpark may return to this list with a trailing slash after an
+        // approval redirect. Normalize the route so the persisted workflow
+        // always resumes on the list page.
+        var normalizedPathname = (location.pathname || "").replace(/\/+$/, "");
+        var isSamplePathsPage = normalizedPathname === "/secure/samples/configure/paths";
         if (isSamplePathsPage) {
+            log("Sample Path workflow: dispatching list-page resume for " + location.pathname);
             processLockSamplePathsPage();
             return;
         }
 
         var isSamplePathDetail = location.pathname.indexOf("/secure/samples/configure/paths/show/") !== -1;
         if (isSamplePathDetail) {
-            processLockSamplePathDetailPage();
+            processSamplePathApprovalDetailPage();
+            return;
+        }
+
+        var isSamplePathApproval = location.pathname.indexOf("/secure/samples/configure/paths/approve/") !== -1;
+        if (isSamplePathApproval) {
+            processSamplePathApprovalPage();
             return;
         }
 
