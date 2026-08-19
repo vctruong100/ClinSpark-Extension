@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name ClinSpark Test Automator
 // @namespace vinh.activity.plan.state
-// @version 4.3.36
+// @version 4.3.58
 // @description Run Activity Plans, Study Update (Cancel if already Active), Cohort Add, Informed Consent; Activity Plan Removal; draggable panel; Run ALL pipeline; Pause/Resume; Extensible buttons API;
 // @match https://cenexeltest.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Test%20Automator.js
@@ -20,16 +20,19 @@
     // UI Scale Constants
     var UI_SCALE = 1.0; // Master scale factor (will be initialized after function definitions)
     var PANEL_DEFAULT_WIDTH = 360;
+    var PANEL_MIN_WIDTH_PX = 180;
     var PANEL_DEFAULT_HEIGHT = "100vh";
     var PANEL_HEADER_HEIGHT_PX = 50;
     var PANEL_HEADER_GAP_PX = 8;
     var PANEL_MAX_WIDTH_PX = 620;
     var PANEL_BOTTOM_HEIGHT_PX = 360;
+    var PANEL_MIN_HEIGHT_PX = 110;
     var PANEL_Z_INDEX = 29999;
     var SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT = null;
     var SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = null;
     var SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = null;
     var SIDE_PANEL_ORIGINAL_BODY_WIDTH = null;
+    var SIDE_PANEL_ORIGINAL_BODY_PADDING_BOTTOM = null;
     var SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM = null;
     var PANEL_PADDING_PX = 12;
     var PANEL_BORDER_RADIUS_PX = 8;
@@ -397,6 +400,7 @@
     var EDIT_SE_ADD_BATCH_HREF = "/secure/crfdesign/studylibrary/batchsave/studyevent";
     var EDIT_SE_FEATURE_NAME = "Edit Study Events List";
     var STORAGE_EDIT_SE_PENDING = "activityPlanState.editSE.pending";
+    var STORAGE_EDIT_SE_FULLSCREEN = "activityPlanState.editSE.fullscreen";
     var EDIT_SE_CANCELED = false;
     var EDIT_SE_POPUP_REF = null;
     var EDIT_SE_COLLECTED = null;   // [{name, href, originalName}]  — href is null for added rows
@@ -4339,6 +4343,7 @@
             ifl_closeBgTab();
             document.removeEventListener("mousemove", onDragMove);
             document.removeEventListener("mouseup", onDragEnd);
+            document.removeEventListener("keydown", iflHideHandler, true);
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         };
         overlay.onclick = function(e) {
@@ -4346,6 +4351,7 @@
                 ifl_closeBgTab();
                 document.removeEventListener("mousemove", onDragMove);
                 document.removeEventListener("mouseup", onDragEnd);
+                document.removeEventListener("keydown", iflHideHandler, true);
                 if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
             }
         };
@@ -4360,6 +4366,7 @@
             ifl_closeBgTab();
             document.removeEventListener("mousemove", onDragMove);
             document.removeEventListener("mouseup", onDragEnd);
+            document.removeEventListener("keydown", iflHideHandler, true);
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
             onConfirm(selected);
         };
@@ -4373,9 +4380,18 @@
                 document.removeEventListener("mouseup", onDragEnd);
                 if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
                 document.removeEventListener("keydown", escHandler, true);
+                document.removeEventListener("keydown", iflHideHandler, true);
             }
         };
         document.addEventListener("keydown", escHandler, true);
+        var iflHideHandler = function(e) {
+            if (e.key !== "F4") return;
+            e.preventDefault();
+            e.stopPropagation();
+            overlay.style.display = overlay.style.display === "none" ? "flex" : "none";
+            log("IFL: selection panel " + (overlay.style.display === "none" ? "hidden" : "shown") + " via F4");
+        };
+        document.addEventListener("keydown", iflHideHandler, true);
 
         // Assemble
         container.appendChild(header);
@@ -5040,12 +5056,7 @@
 
         // Page check
         if (!isOnImportFromLibraryPage()) {
-            createPopup({
-                title: "Import from Library",
-                content: '<div style="text-align:center;padding:20px;"><p style="color:#ff6b6b;font-size:16px;margin-bottom:12px;">\u26A0\uFE0F Wrong Page</p><p>You must be on the Study Library Forms page to use this feature.</p><p style="margin-top:12px;font-size:12px;color:#ffffffff;word-wrap:break-word;word-break:break-all;">Required URL:<br>' + IFL_VALID_URLS[0] + '<br>or<br>' + IFL_VALID_URLS[1] + '</p></div>',
-                width: "450px",
-                height: "auto"
-            });
+            showWrongPagePopup("Import From Library", IFL_FORM_LIST_PATH, location.pathname, location.origin + IFL_FORM_LIST_PATH);
             log("IFL: wrong page \u2014 " + location.href);
             return;
         }
@@ -5078,6 +5089,42 @@
     // ================================================================
     // Edit Study Events List — Feature Implementation
     // ================================================================
+
+    function showWrongPagePopup(featureName, requiredPage, currentPath, linkUrl) {
+        if (!linkUrl && typeof requiredPage === "string" && requiredPage.indexOf("/secure/") === 0) {
+            linkUrl = location.origin + requiredPage;
+        }
+        var container = document.createElement("div");
+        container.style.cssText = "padding:20px;text-align:center;color:#fff";
+        var title = document.createElement("div");
+        title.textContent = "Wrong Page Detected";
+        title.style.cssText = "font-size:18px;font-weight:700;color:#ff6b6b;margin-bottom:10px";
+        var message = document.createElement("div");
+        message.textContent = "You must be on the " + featureName + " page to use this feature.";
+        message.style.marginBottom = "8px";
+        var current = document.createElement("div");
+        current.textContent = "Current page: " + currentPath;
+        current.style.cssText = "font-size:12px;color:#999;margin-bottom:8px;word-break:break-all";
+        var required = document.createElement("div");
+        required.textContent = "Required page: " + requiredPage;
+        required.style.cssText = "font-size:12px;color:#999;margin-bottom:18px;word-break:break-all";
+        var buttons = document.createElement("div");
+        buttons.style.cssText = "display:flex;justify-content:center;gap:8px";
+        var ok = document.createElement("button");
+        ok.textContent = "OK";
+        var popup = null;
+        ok.onclick = function() { if (popup) popup.close(); };
+        [ok].forEach(function(btn) { btn.style.cssText = "padding:8px 20px;border:0;border-radius:5px;background:#5b43c7;color:#fff;cursor:pointer;font-weight:600"; buttons.appendChild(btn); });
+        if (linkUrl) {
+            var go = document.createElement("button");
+            go.textContent = "Go to Required Page";
+            go.style.cssText = "padding:8px 20px;border:0;border-radius:5px;background:#28a745;color:#fff;cursor:pointer;font-weight:600";
+            go.onclick = function() { if (popup) popup.close(); location.href = linkUrl; };
+            buttons.appendChild(go);
+        }
+        container.appendChild(title); container.appendChild(message); container.appendChild(current); container.appendChild(required); container.appendChild(buttons);
+        popup = createPopup({ title: featureName + " - Page Warning", content: container, width: "430px", height: "auto" });
+    }
 
     function editSE_cleanup() {
         EDIT_SE_CANCELED = false;
@@ -5119,12 +5166,7 @@
         log("[EditSE] Button clicked");
         var currentUrl = location.href.split("?")[0].split("#")[0];
         if (currentUrl !== EDIT_SE_LIST_URL) {
-            createPopup({
-                title: "Edit Study Events List",
-                content: '<div style="text-align:center;padding:20px;"><p style="color:#f66;font-size:16px;margin-bottom:16px;">\u26A0\uFE0F Wrong Page</p><p>You must be on the Study List page to use this feature.</p><p style="margin-top:12px;font-size:12px;color:#ffffffff;word-wrap:break-word;word-break:break-all;">Required URL: ' + EDIT_SE_LIST_URL + '</p></div>',
-                width: "450px",
-                height: "auto"
-            });
+            showWrongPagePopup("Edit Study Events List", "/secure/crfdesign/studylibrary/list/studyevent", location.pathname, location.origin + "/secure/crfdesign/studylibrary/list/studyevent");
             log("[EditSE]: wrong page - " + location.href);
             return;
         }
@@ -5166,6 +5208,17 @@
         root.style.flexDirection = "column";
         root.style.height = "100%";
         root.style.gap = "0";
+
+        var editSEIsFullscreen = false;
+        try { editSEIsFullscreen = localStorage.getItem(STORAGE_EDIT_SE_FULLSCREEN) === "true"; } catch (e) {}
+        var topBar = document.createElement("div");
+        topBar.style.cssText = "display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-bottom:8px;";
+        var fullscreenBtn = document.createElement("button");
+        fullscreenBtn.textContent = editSEIsFullscreen ? "\u2716\u26F6" : "\u26F6";
+        fullscreenBtn.title = editSEIsFullscreen ? "Exit Full Screen" : "Toggle Full Screen";
+        fullscreenBtn.style.cssText = "padding:4px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:14px;cursor:pointer;line-height:1;width:32px;height:32px;display:flex;align-items:center;justify-content:center;";
+        topBar.appendChild(fullscreenBtn);
+        root.appendChild(topBar);
 
         // ---------- top: left + right ----------
         var topRow = document.createElement("div");
@@ -5384,6 +5437,50 @@
         bottomBar.appendChild(confirmBtn);
         root.appendChild(bottomBar);
 
+        function applyEditSEFullscreen() {
+            var popup = root.closest("[id^='clinsparkPopup_']");
+            if (!popup) return;
+            if (editSEIsFullscreen) {
+                var gap = 16;
+                try { gap = Math.max(12, window.innerWidth - document.documentElement.clientWidth); } catch (ignore) {}
+                popup.dataset.editSEOrigWidth = popup.style.width || "";
+                popup.dataset.editSEOrigMaxWidth = popup.style.maxWidth || "";
+                popup.dataset.editSEOrigHeight = popup.style.height || "";
+                popup.dataset.editSEOrigMaxHeight = popup.style.maxHeight || "";
+                popup.dataset.editSEOrigTop = popup.style.top || "";
+                popup.dataset.editSEOrigLeft = popup.style.left || "";
+                popup.dataset.editSEOrigTransform = popup.style.transform || "";
+                popup.style.width = "calc(100vw - " + gap + "px)";
+                popup.style.maxWidth = "calc(100vw - " + gap + "px)";
+                popup.style.height = "100vh";
+                popup.style.maxHeight = "100vh";
+                popup.style.top = "0";
+                popup.style.left = "0";
+                popup.style.right = gap + "px";
+                popup.style.transform = "none";
+                root.style.height = "100%";
+                root.style.minHeight = "0";
+                topRow.style.minHeight = "0";
+                fullscreenBtn.textContent = "\u2716\u26F6";
+                fullscreenBtn.title = "Exit Full Screen";
+            } else {
+                popup.style.width = popup.dataset.editSEOrigWidth || "820px";
+                popup.style.maxWidth = popup.dataset.editSEOrigMaxWidth || "95%";
+                popup.style.height = popup.dataset.editSEOrigHeight || "560px";
+                popup.style.maxHeight = popup.dataset.editSEOrigMaxHeight || "90%";
+                popup.style.top = popup.dataset.editSEOrigTop || "50%";
+                popup.style.left = popup.dataset.editSEOrigLeft || "50%";
+                popup.style.right = "";
+                popup.style.transform = popup.dataset.editSEOrigTransform || "translate(-50%, -50%)";
+                root.style.height = "100%";
+                root.style.minHeight = "";
+                fullscreenBtn.textContent = "\u26F6";
+                fullscreenBtn.title = "Toggle Full Screen";
+            }
+        }
+        fullscreenBtn.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+        fullscreenBtn.addEventListener("click", function(e) { e.stopPropagation(); editSEIsFullscreen = !editSEIsFullscreen; try { localStorage.setItem(STORAGE_EDIT_SE_FULLSCREEN, String(editSEIsFullscreen)); } catch (ignore) {} applyEditSEFullscreen(); });
+
         // ========== RENDER / HELPERS ==========
         var dragSrcIdx = null;
 
@@ -5433,7 +5530,11 @@
                     // name cell
                     var nameTd = document.createElement("td");
                     nameTd.style.padding = "6px 8px";
-                    nameTd.innerHTML = '<span>' + escapeHTML(rows[idx].name) + '</span>' + getStatusBadge(rows[idx].status);
+                    if (rows[idx].status === "updated") {
+                        nameTd.innerHTML = '<div style="font-size:11px;color:' + (glass ? 'rgba(255,255,255,0.62)' : '#999') + ';">Original: ' + escapeHTML(rows[idx].originalName || '') + '</div><div style="font-weight:600;color:#fbbf24;">Updated: ' + escapeHTML(rows[idx].name) + '</div>';
+                    } else {
+                        nameTd.innerHTML = '<span>' + escapeHTML(rows[idx].name) + '</span>' + getStatusBadge(rows[idx].status);
+                    }
                     tr.appendChild(nameTd);
 
                     // click to select
@@ -5667,6 +5768,7 @@
                 if (!locked) editSE_cleanup();
             }
         });
+        setTimeout(function() { applyEditSEFullscreen(); }, 50);
     }
 
     // ===== EXECUTION PHASE =====
@@ -12145,7 +12247,7 @@
         return { action: "none", clicked: false };
     }
 
-    async function aprCompleteArchiveModal(id) {
+    async function aprCompleteArchiveModal(id, reason) {
         var modal = null;
         if (typeof waitForSAModal === "function") {
             modal = await waitForSAModal(15000);
@@ -12161,7 +12263,7 @@
             aprLog("archive reason field not found for id " + id);
             return false;
         }
-        reasonEl.value = "Archiving forms";
+        reasonEl.value = reason || "Archiving forms";
         reasonEl.dispatchEvent(new Event("input", { bubbles: true }));
         reasonEl.dispatchEvent(new Event("change", { bubbles: true }));
 
@@ -12265,7 +12367,7 @@
                 }
 
                 if (actionResult.action === "archive") {
-                    var archived = await aprCompleteArchiveModal(item.id);
+                    var archived = await aprCompleteArchiveModal(item.id, item.archiveReason);
                     if (!archived) {
                         pItem.status = "Failed";
                         progressContent.updateItem(idx, "Failed");
@@ -12347,6 +12449,7 @@
             progressContent.setComplete();
             aprLog("removal complete - deleted:" + deletedCount + " archived:" + archivedCount + " failed:" + failedCount);
         }
+        return progressItems;
     }
 
     async function runActivityPlanRemoval() {
@@ -13833,6 +13936,29 @@
         document.addEventListener("keydown", handleHelpKey);
     }
 
+    var SMART_NAV_STORAGE = "activityPlanState.smartNavigation";
+    var SMART_NAV_DEFAULTS = [
+        ["Forms List", ["F"], "/secure/crfdesign/studylibrary/list/form"], ["Item Groups List", ["IG"], "/secure/crfdesign/studylibrary/list/itemgroup"], ["Item List", ["I"], "/secure/crfdesign/studylibrary/list/item"], ["Code Lists", ["CL"], "/secure/crfdesign/studylibrary/list/codelist"],
+        ["Study Events List", ["S", "SE", "EVENTS"], "/secure/crfdesign/studylibrary/list/studyevent"], ["Method List", ["M"], "/secure/crfdesign/studylibrary/list/method"], ["Activity Plans List", ["AP", "A"], "/secure/crfdesign/activityplans/list"], ["Study Data Page", ["D", "SD"], "/secure/study/data/list"], ["Study Subject Page", ["SS"], "/secure/study/subjects/list"], ["Study Configure Page", ["C", "SC"], "/secure/administration/studies/show"],
+        ["Data Collection Subject Page", ["DC"], "/secure/datacollection/subject"], ["Report Page", ["R"], "/secure/study/report/list"], ["User Page", ["US"], "/secure/administration/users/list"], ["Roles Page", ["RO"], "/secure/administration/roles/userrole/list"], ["Utility Page", ["UT"], "/secure/administration/utilities/org/utilities"], ["Barcode Label", ["BL"], "/secure/barcodeprinting/labels"], ["Barcode Subjects", ["B", "BS"], "/secure/barcodeprinting/subjects"], ["Sample Processing", ["SP"], "/secure/samples/processing/process"], ["Lab Orders", ["LO"], "/secure/lab/orders/list"], ["Study Eligibility", ["E", "EM"], "/secure/crfdesign/studylibrary/eligibility/list"], ["Study Lab Data", ["SL", "LD", "L"], "/secure/study/labdata/list"]
+    ];
+    function smartNavCloneRows(rows) { return rows.map(function (r) { return { name: r[0], keywords: r[1].slice(), path: r[2] }; }); }
+    function smartNavConfig() { try { var saved = JSON.parse(localStorage.getItem(SMART_NAV_STORAGE) || "null"); if (saved && Array.isArray(saved.defaults) && Array.isArray(saved.custom)) return saved; } catch (ignore) {} return { defaults: smartNavCloneRows(SMART_NAV_DEFAULTS), custom: [] }; }
+    function smartNavNormalize(value) { return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+    function smartNavPath(value) { var parsed = new URL(String(value || "").trim(), location.origin); if (parsed.protocol !== "https:" || parsed.hostname !== location.hostname) throw new Error("Link must belong to the current ClinSpark site."); return parsed.pathname + parsed.search + parsed.hash; }
+    function smartNavDistance(a, b) { var row = [], i, j, cost; for (j = 0; j <= b.length; j++) row[j] = j; for (i = 1; i <= a.length; i++) { var next = [i]; for (j = 1; j <= b.length; j++) { cost = a[i - 1] === b[j - 1] ? 0 : 1; next[j] = Math.min(next[j - 1] + 1, row[j] + 1, row[j - 1] + cost); } row = next; } return row[b.length]; }
+    function smartNavMatches(query) { var q = smartNavNormalize(query), c = smartNavConfig(), rows = c.defaults.concat(c.custom); return rows.map(function (item, index) { var name = smartNavNormalize(item.name), score = q ? 0 : 1; item.keywords.forEach(function (key) { var k = smartNavNormalize(key); if (k === q) score = Math.max(score, 1000); else if (k.indexOf(q) === 0) score = Math.max(score, 850); else if (q && k.indexOf(q) >= 0) score = Math.max(score, 650); }); if (name === q) score = Math.max(score, 950); else if (name.indexOf(q) === 0) score = Math.max(score, 800); else if (q && name.indexOf(q) >= 0) score = Math.max(score, 600); else if (q && smartNavDistance(q, name) <= (q.length > 5 ? 2 : 1)) score = Math.max(score, 500); return { item:item, score:score, index:index }; }).filter(function (r) { return r.score > 0; }).sort(function (a, b) { return b.score - a.score || a.index - b.index; }); }
+    function smartNavOpenSettings() {
+        var config = smartNavConfig(), draft = smartNavCloneRows(config.defaults.map(function (r) { return [r.name, r.keywords, r.path]; })); config.custom.forEach(function (r) { draft.push({ name:r.name, keywords:r.keywords.slice(), path:r.path, custom:true }); });
+        var panel = document.createElement("div"), list = document.createElement("div"), status = document.createElement("div"); panel.style.cssText = "box-sizing:border-box;width:100%;color:#e8e8ee;font:13px Arial,sans-serif;max-height:65vh;overflow:auto;padding:2px 14px 4px 2px"; var intro = document.createElement("p"); intro.textContent = "Edit page names, unique keywords, and same-site paths. Changes apply after Save."; intro.style.cssText = "color:#b9b9c6;margin:0 0 12px;line-height:1.45"; panel.appendChild(intro); panel.appendChild(list);
+        function draw() { list.innerHTML = ""; draft.forEach(function (row, i) { var line = document.createElement("div"); line.style.cssText = "display:grid;grid-template-columns:minmax(150px,1.2fr) minmax(120px,1fr) minmax(220px,1.7fr) 76px;gap:9px;margin:8px 0;align-items:center;min-width:0"; [row.name, row.keywords.join(", "), row.path].forEach(function (value, col) { var input = document.createElement("input"); input.value=value; input.placeholder=col===0?"Name":col===1?"Keywords":"Path or link"; input.style.cssText="box-sizing:border-box;min-width:0;width:100%;padding:9px 10px;border:1px solid #555;border-radius:5px;background:#202124;color:#fff;outline:2px solid transparent;outline-offset:1px"; input.onfocus=function(){input.style.borderColor="#9b82ff";input.style.outlineColor="rgba(155,130,255,.45)";}; input.onblur=function(){input.style.borderColor="#555";input.style.outlineColor="transparent";}; input.oninput=function(){ if(col===0)row.name=input.value; else if(col===1)row.keywords=input.value.split(",").map(function(v){return v.trim().toUpperCase();}).filter(Boolean); else row.path=input.value; }; line.appendChild(input); }); if(row.custom){var remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove"; remove.style.cssText="box-sizing:border-box;width:76px;padding:8px 6px;border:1px solid rgba(255,110,110,.55);border-radius:5px;background:rgba(125,30,40,.72);color:#fff;font-weight:600;cursor:pointer"; remove.onmouseenter=function(){remove.style.background="rgba(170,45,55,.9)";}; remove.onmouseleave=function(){remove.style.background="rgba(125,30,40,.72)";}; remove.onclick=function(){draft.splice(i,1);draw();}; line.appendChild(remove);} else {var badge=document.createElement("span"); badge.textContent="Default"; badge.style.cssText="display:block;color:#c9bbff;font-size:12px;font-weight:600;text-align:center;white-space:nowrap"; line.appendChild(badge);} list.appendChild(line); }); }
+        var actions=document.createElement("div"); actions.style.cssText="display:flex;gap:8px;margin-top:14px;justify-content:flex-end"; var add=document.createElement("button"); add.textContent="Add Navigation"; add.onclick=function(){draft.push({name:"",keywords:[],path:"/secure/",custom:true});draw();}; var reset=document.createElement("button"); reset.textContent="Reset Defaults"; reset.onclick=function(){draft=smartNavCloneRows(SMART_NAV_DEFAULTS).concat(config.custom.map(function(r){return{name:r.name,keywords:r.keywords.slice(),path:r.path,custom:true};}));status.textContent="Default pages restored. Save to keep this change.";draw();}; var save=document.createElement("button"); save.textContent="Save"; save.onclick=function(){var seen={};try{draft.forEach(function(r){if(!r.name.trim()||!r.keywords.length)throw new Error("Every page needs a name and at least one keyword.");r.path=smartNavPath(r.path);r.keywords.forEach(function(k){var n=smartNavNormalize(k);if(!n||seen[n])throw new Error("Keywords must be unique: "+k);seen[n]=true;});});localStorage.setItem(SMART_NAV_STORAGE,JSON.stringify({defaults:draft.filter(function(r){return !r.custom;}).map(function(r){return{name:r.name.trim(),keywords:r.keywords,path:r.path};}),custom:draft.filter(function(r){return r.custom;}).map(function(r){return{name:r.name.trim(),keywords:r.keywords,path:r.path};})}));popup.close();}catch(err){status.textContent=err.message;status.style.color="#ff9a9a";}}; [add,reset,save].forEach(function(b){b.style.cssText="padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer";actions.appendChild(b);}); panel.appendChild(status);panel.appendChild(actions);draw();var popup=createPopup({title:"Smart Navigation",content:panel,width:"900px",height:"auto"});
+    }
+    function initSmartPageLocator() { if(window.__CLINSPARK_SMART_NAV_BOUND)return;window.__CLINSPARK_SMART_NAV_BOUND=true;var overlay=null,input=null,menu=null,matches=[],selected=0;function close(){if(overlay){overlay.remove();overlay=null;input=null;menu=null;}}function render(){matches=smartNavMatches(input.value).slice(0,8);menu.innerHTML="";if(!matches.length){menu.textContent="No matching page";return;}matches.forEach(function(match,i){var option=document.createElement("div");option.textContent=match.item.name+"  ["+match.item.keywords.join(", ")+"]";option.style.cssText="padding:10px 12px;cursor:pointer;color:#eee;background:"+(i===selected?"#4f35a8":"transparent");option.onclick=function(){selected=i;input.focus();render();};menu.appendChild(option);});}function open(){if(overlay){close();return;}overlay=document.createElement("div");overlay.style.cssText="position:fixed;z-index:100005;top:18%;left:50%;transform:translateX(-50%);width:min(620px,calc(100vw - 32px));padding:10px;background:#151515;border:1px solid #7658d4;border-radius:8px;box-shadow:0 12px 40px #000b";input=document.createElement("input");input.type="search";input.placeholder="Navigate to a page...";input.autocomplete="off";input.style.cssText="box-sizing:border-box;width:100%;padding:13px 14px;background:#222;color:#fff;border:1px solid #666;border-radius:5px;font-size:16px";menu=document.createElement("div");menu.style.cssText="margin-top:6px;max-height:310px;overflow:auto";overlay.appendChild(input);overlay.appendChild(menu);document.body.appendChild(overlay);input.oninput=function(){selected=0;render();};input.onkeydown=function(e){if(e.key==="Escape"){e.preventDefault();close();}else if(e.key==="ArrowDown"){e.preventDefault();selected=Math.min(selected+1,Math.max(matches.length-1,0));render();}else if(e.key==="ArrowUp"){e.preventDefault();selected=Math.max(selected-1,0);render();}else if(e.key==="Enter"&&matches[selected]){e.preventDefault();var target=smartNavPath(matches[selected].item.path);close();location.href=location.origin+target;}};render();input.focus();}document.addEventListener("keydown",function(e){if(e.altKey&&(e.key==="s"||e.key==="S")){e.preventDefault();e.stopPropagation();open();}},true); }
+
+    document.addEventListener("click", function (e) { var overlay = document.querySelector('div[style*="z-index:100005"]'); if (overlay && !overlay.contains(e.target)) overlay.remove(); }, true);
+    document.addEventListener("dblclick", function (e) { var overlay = document.querySelector('div[style*="z-index:100005"]'); if (!overlay || !overlay.contains(e.target)) return; var option = e.target.closest("div"), text = option ? option.textContent : "", name = text.split("  [")[0], result = smartNavMatches(name)[0]; if (result && name) { e.preventDefault(); location.href = location.origin + smartNavPath(result.item.path); } }, true);
+
     function openSettingsPopup() {
         if (SETTINGS_MODAL_OPEN) return null;
         SETTINGS_MODAL_OPEN = true;
@@ -14159,7 +14285,7 @@
                     cell.setAttribute("draggable", "true");
                     cell.setAttribute("tabindex", "0");
                     cell.dataset.pos = String(entry.position);
-                    cell.style.cssText = "display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:5px;cursor:grab;transition:background 0.15s ease,opacity 0.15s ease,box-shadow 0.15s ease;background:" + tc.cellBg + ";opacity:" + (entry.visible ? "1" : "0.4") + ";border:1px solid transparent;min-height:40px;min-width:0;user-select:none;";
+                    cell.style.cssText = "display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:5px;cursor:grab;transition:background 0.15s ease,opacity 0.15s ease,box-shadow 0.15s ease;background:" + tc.cellBg + ";opacity:" + (entry.visible ? "1" : "0.68") + ";border:1px solid transparent;min-height:40px;min-width:0;user-select:none;";
                     cell.onmouseover = function() { if (dragSrcPos === null) cell.style.background = tc.cellHover; };
                     cell.onmouseout = function() { if (dragSrcPos === null) cell.style.background = tc.cellBg; };
 
@@ -14169,7 +14295,7 @@
 
                     var nameLabel = document.createElement("span");
                     nameLabel.textContent = def.label;
-                    nameLabel.style.cssText = "color:white;font-size:11px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:3px;padding:2px 4px;" + (pendingColors[entry.id] && pendingTheme === THEME_MODE_BLACK ? "background:" + pendingColors[entry.id] + ";" : "") + (entry.visible ? "" : "text-decoration:line-through;color:rgba(255,255,255,0.45);");
+                    nameLabel.style.cssText = "color:white;font-size:11px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:3px;padding:2px 4px;" + (pendingColors[entry.id] && pendingTheme === THEME_MODE_BLACK ? "background:" + pendingColors[entry.id] + ";" : "") + (entry.visible ? "" : "color:rgba(255,255,255,0.78);");
                     var colorSelect = document.createElement("select"); colorSelect.title = "Button color (Black theme only)"; colorSelect.disabled = pendingTheme === THEME_MODE_GLASS; colorSelect.style.cssText = "width:86px;padding:3px;background:" + (pendingTheme === THEME_MODE_BLACK && pendingColors[entry.id] ? pendingColors[entry.id] : tc.inputBg) + ";border:1px solid " + tc.inputBorder + ";border-radius:4px;color:" + tc.inputText + ";font-size:10px;flex-shrink:0;";
                     for (var cpi = 0; cpi < BUTTON_COLOR_PRESETS.length; cpi++) { var colorOpt = document.createElement("option"); colorOpt.value = BUTTON_COLOR_PRESETS[cpi].value; colorOpt.textContent = BUTTON_COLOR_PRESETS[cpi].label; colorOpt.selected = (pendingColors[entry.id] || "") === colorOpt.value; colorSelect.appendChild(colorOpt); }
                     colorSelect.onchange = function() { pendingColors[entry.id] = this.value; this.style.background = this.value || tc.inputBg; nameLabel.style.background = this.value && pendingTheme === THEME_MODE_BLACK ? this.value : "transparent"; var liveButton = document.querySelector("#" + PANEL_ID + " [data-feature-button='" + entry.id.replace(/'/g, "\\'") + "']"); if (liveButton && pendingTheme === THEME_MODE_BLACK) { var previewColor = this.value || "#34343d"; liveButton.setAttribute("data-clinspark-button-color", previewColor); liveButton.style.setProperty("background", previewColor, "important"); } checkDirty(); };
@@ -14409,7 +14535,20 @@
         };
 
         // Assemble
+        var smartNavSection = document.createElement("div");
+        smartNavSection.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,.12)";
+        var smartNavTitle = document.createElement("div");
+        smartNavTitle.textContent = "Smart Navigation";
+        smartNavTitle.style.cssText = "font-weight:700;color:#f0edf8;font-size:13px;margin-bottom:7px";
+        var smartNavButton = document.createElement("button");
+        smartNavButton.type = "button";
+        smartNavButton.textContent = "Manage Smart Navigation";
+        smartNavButton.style.cssText = "padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer";
+        smartNavButton.onclick = function () { smartNavOpenSettings(); };
+        smartNavSection.appendChild(smartNavTitle);
+        smartNavSection.appendChild(smartNavButton);
         modalBody.appendChild(hotkeySection);
+        modalBody.appendChild(smartNavSection);
         modalBody.appendChild(displaySection);
         modalBody.appendChild(btnSection);
 
@@ -17599,6 +17738,11 @@
     var STORAGE_BPL_EXAMPLE_REF_TIME = "activityPlanState.bpl.exampleRefTime";
     var STORAGE_BPL_SEGMENT_OFFSETS = "activityPlanState.bpl.segmentOffsets";
     var STORAGE_BPL_SA_TABLE_DATA = "activityPlanState.bpl.saTableData";
+    var STORAGE_BPL_ARCHIVE_REASON = "activityPlanState.bpl.archiveReason";
+    var BPL_PENDING_ARCHIVE_ITEMS = [];
+    var BPL_PENDING_ARCHIVE_REASON = "";
+    var BPL_ARCHIVE_DEFERRED = false;
+    var BPL_PENDING_ARCHIVE_CLEANUP = null;
     var STORAGE_BPL_HIDE_EXISTING = "activityPlanState.bpl.hideExisting";
     var STORAGE_BPL_SHOW_UPDATED_ONLY = "activityPlanState.bpl.showUpdatedOnly";
 
@@ -17648,7 +17792,6 @@
 
     var BUTTON_COLOR_PRESETS = [
         { value: "", label: "Default" },
-        { value: "#34343d", label: "Graphite" },
         { value: "#3f3a5a", label: "Indigo" },
         { value: "#3d4b5c", label: "Steel" },
         { value: "#3e5148", label: "Forest" },
@@ -20815,6 +20958,10 @@
                             rowBorderColor = "#aa4444";
                             rowBg = "#3a2a2a";
                         }
+                        if (fEntry.archiveRequested) {
+                            rowBorderColor = "#b45cff";
+                            rowBg = "#352044";
+                        }
                         var autoPopBorderLeft = "";
                         if (isAutoPopulated) {
                             if (isDuplicate) {
@@ -21061,9 +21208,20 @@
                         var removeFormBtn = document.createElement("button");
                         removeFormBtn.textContent = "\u2715";
                         if (isAutoPopulated) {
-                            removeFormBtn.style.cssText = "padding:2px 6px;border-radius:3px;border:none;background:transparent;color:#555;font-size:14px;font-weight:bold;cursor:not-allowed;flex-shrink:0;opacity:0.3;";
-                            removeFormBtn.disabled = true;
-                            removeFormBtn.title = "Cannot delete auto-populated items";
+                            var archiveRequested = !!fEntry.archiveRequested;
+                            removeFormBtn.style.cssText = "padding:2px 6px;border-radius:3px;border:1px solid " + (archiveRequested ? "#b45cff" : "#ff6b6b") + ";background:" + (archiveRequested ? "rgba(180,92,255,0.22)" : "rgba(255,107,107,0.14)") + ";color:" + (archiveRequested ? "#d39cff" : "#ff8585") + ";font-size:14px;font-weight:bold;cursor:pointer;flex-shrink:0;";
+                            removeFormBtn.disabled = false;
+                            removeFormBtn.title = archiveRequested ? "Undo archive/removal selection" : "Mark existing form for archive/removal";
+                            removeFormBtn.addEventListener("click", (function(sv, idx) {
+                                return function(e) {
+                                    e.stopPropagation();
+                                    var entry = (segmentFormMap[sv] || [])[idx];
+                                    if (entry) entry.archiveRequested = !entry.archiveRequested;
+                                    log("BPL: existing form archive selection " + (entry && entry.archiveRequested ? "enabled" : "cleared"));
+                                    saveSession();
+                                    renderCenterPanel(centerSearch.value);
+                                };
+                            })(seg.value, fi));
                         } else {
                             removeFormBtn.style.cssText = "padding:2px 6px;border-radius:3px;border:none;background:transparent;color:#ff6b6b;font-size:14px;font-weight:bold;cursor:pointer;flex-shrink:0;";
                             removeFormBtn.addEventListener("mouseenter", function() {
@@ -21694,6 +21852,22 @@
         });
         legendRow.appendChild(autoPasteAllBtn);
 
+        var archiveReasonWrap = document.createElement("label");
+        archiveReasonWrap.textContent = "Archive reason";
+        archiveReasonWrap.style.cssText = "display:inline-flex;align-items:center;gap:6px;padding:3px 0 3px 4px;color:#ccc;font-size:11px;font-weight:600;white-space:nowrap;";
+        var archiveReasonInput = document.createElement("input");
+        archiveReasonInput.type = "text";
+        archiveReasonInput.placeholder = "Reason for archive";
+        try { archiveReasonInput.value = localStorage.getItem(STORAGE_BPL_ARCHIVE_REASON) || ""; } catch (e) {}
+        archiveReasonInput.style.cssText = "width:150px;padding:5px 7px;border:1px solid #555;border-radius:4px;background:#222;color:#fff;font-size:11px;box-sizing:border-box;";
+        var archiveReasonHint = document.createElement("span");
+        archiveReasonHint.textContent = "Required when forms are marked with X";
+        archiveReasonHint.style.cssText = "display:none;color:#ff9b9b;font-size:10px;font-weight:500;";
+        archiveReasonInput.addEventListener("input", function() { archiveReasonHint.style.display = "none"; archiveReasonInput.style.borderColor = "#555"; try { localStorage.setItem(STORAGE_BPL_ARCHIVE_REASON, archiveReasonInput.value); } catch (e) {} });
+        archiveReasonWrap.appendChild(archiveReasonInput);
+        archiveReasonWrap.appendChild(archiveReasonHint);
+        legendRow.appendChild(archiveReasonWrap);
+
         var bottomRow = document.createElement("div");
         bottomRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:12px;";
 
@@ -21857,8 +22031,11 @@
                     }
                 }
             }
-            log("BPL: confirm clicked, " + mappedItems.length + " new items to add, " + updateItems.length + " items to update");
-            if (updateItems.length === 0 && mappedItems.length === 0) {
+            var archiveItems = bplCollectArchiveItems(segments, segmentFormMap, formDataStore, segmentCheckboxStates);
+            var archiveReason = (archiveReasonInput.value || "").trim();
+            log("BPL: confirm clicked, " + mappedItems.length + " new items to add, " + updateItems.length + " items to update, " + archiveItems.length + " existing items to archive");
+            if (archiveItems.length > 0 && !archiveReason) { confirmErrorDiv.style.display="block"; confirmErrorDiv.textContent="Archive reason is required. Enter it in the 'Archive reason' field beside Auto Paste All before confirming."; archiveReasonHint.textContent="Enter a reason here before Confirm"; archiveReasonHint.style.display="inline"; archiveReasonInput.style.borderColor="#ff6b6b"; archiveReasonInput.focus(); return; }
+            if (updateItems.length === 0 && mappedItems.length === 0 && archiveItems.length === 0) {
                 log("BPL: nothing to process (no new items and no modified items)");
                 confirmErrorDiv.style.display = "block";
                 confirmErrorDiv.innerHTML = "";
@@ -21868,6 +22045,8 @@
                 confirmErrorDiv.appendChild(noItemsMsg);
                 return;
             }
+            BPL_PENDING_ARCHIVE_CLEANUP = function(results) { for (var ai=0;ai<results.length;ai++){if(results[ai].status!=="Deleted"&&results[ai].status!=="Archived")continue;var key=results[ai].item.formKey,parts=key?key.split("|"):[];if(parts.length<3)continue;var forms=segmentFormMap[parts[0]]||[];for(var af=forms.length-1;af>=0;af--)if(getFormDataKey(parts[0],forms[af].value,forms[af].index)===key)forms.splice(af,1);segmentFormMap[parts[0]]=forms;delete formDataStore[key];}saveSession();renderCenterPanel(centerSearch.value);runAutoValidation(); };
+            if (archiveItems.length > 0) { bplShowArchiveConfirm(archiveItems, archiveReason, function(){bplStartConfirmedWorkflow(updateItems,mappedItems,archiveItems,archiveReason);}); return; }
             if (BPL_POPUP_REF) {
                 BPL_POPUP_REF.close();
                 BPL_POPUP_REF = null;
@@ -21881,13 +22060,7 @@
                 return;
             }
 
-            if (updateItems.length > 0 && mappedItems.length > 0) {
-                startBPLUpdateThenAddProcess(updateItems, mappedItems);
-            } else if (updateItems.length > 0) {
-                startBPLUpdateProcess(updateItems);
-            } else {
-                startBPLAddProcess(mappedItems);
-            }
+            bplStartConfirmedWorkflow(updateItems, mappedItems, [], "");
         });
 
         confirmArea.appendChild(confirmErrorDiv);
@@ -22264,6 +22437,48 @@
         log("PLAP Builder: selected value " + resolvedValue + " in " + selectId);
         return true;
     }
+    function bplGetFormDataKey(segmentValue, formValue, formIndex) { return String(segmentValue) + "|" + String(formValue) + "|" + String(formIndex); }
+    function bplGetScheduledActivityId(editHref) {
+        var match = String(editHref || "").match(/scheduledactivity\/(\d+)/);
+        return match ? match[1] : null;
+    }
+
+    function bplCollectArchiveItems(segments, segmentFormMap, formDataStore, segmentCheckboxStates) {
+        var result = [];
+        for (var si = 0; si < segments.length; si++) {
+            var seg = segments[si];
+            if (!segmentCheckboxStates[seg.value]) continue;
+            var forms = segmentFormMap[seg.value] || [];
+            for (var fi = 0; fi < forms.length; fi++) {
+                var entry = forms[fi];
+                var key = bplGetFormDataKey(seg.value, entry.value, entry.index);
+                var data = formDataStore[key] || {};
+                if (!entry.archiveRequested || !(entry.autoPopulated || data.autoPopulated)) continue;
+                var id = bplGetScheduledActivityId(data.editHref || entry.editHref);
+                if (!id || data.archived) continue;
+                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false });
+            }
+        }
+        return result;
+    }
+
+    function bplShowArchiveConfirm(items, reason, onConfirm) {
+        var wrap = document.createElement("div"); wrap.style.cssText = "padding:16px;color:#fff;";
+        var message = document.createElement("div"); message.textContent = "The following " + items.length + " existing form(s) will be deleted or archived after the PLAP updates finish:"; message.style.cssText = "font-size:13px;line-height:1.45;margin-bottom:10px;";
+        var list = document.createElement("div"); list.style.cssText = "max-height:240px;overflow:auto;padding:8px 10px;border:1px solid #55406b;border-radius:5px;background:#241b2d;font-size:12px;"; items.forEach(function(item){var row=document.createElement("div");row.textContent="• "+item.label;row.style.cssText="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08);";list.appendChild(row);});
+        var reasonLine = document.createElement("div"); reasonLine.textContent = "Archive reason: " + reason; reasonLine.style.cssText = "margin-top:10px;color:#ffcf8a;font-size:12px;";
+        var buttons = document.createElement("div"); buttons.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:16px;"; var cancel=document.createElement("button");cancel.textContent="Cancel";cancel.style.cssText="padding:8px 18px;border:1px solid #555;border-radius:5px;background:#333;color:#fff;cursor:pointer;";var proceed=document.createElement("button");proceed.textContent="Confirm and Continue";proceed.style.cssText="padding:8px 18px;border:1px solid #b45cff;border-radius:5px;background:#5b277c;color:#fff;font-weight:700;cursor:pointer;";wrap.appendChild(message);wrap.appendChild(list);wrap.appendChild(reasonLine);buttons.appendChild(cancel);buttons.appendChild(proceed);wrap.appendChild(buttons);var popup=createPopup({title:"PLAP Builder - Confirm Archive/Deletion",content:wrap,width:"520px",height:"auto"});cancel.onclick=function(){popup.close();};proceed.onclick=function(){popup.close();onConfirm();};
+    }
+
+    async function bplExecutePendingArchive() {
+        if (!BPL_PENDING_ARCHIVE_ITEMS.length || !BPL_PENDING_ARCHIVE_REASON) return;
+        var items=BPL_PENDING_ARCHIVE_ITEMS.slice(), reason=BPL_PENDING_ARCHIVE_REASON; for(var ri=0;ri<items.length;ri++)items[ri].archiveReason=reason; BPL_PENDING_ARCHIVE_ITEMS=[]; BPL_PENDING_ARCHIVE_REASON=""; BPL_ARCHIVE_DEFERRED=false;
+        if (BPL_PROGRESS_POPUP_REF) { try { BPL_PROGRESS_POPUP_REF.close(); } catch (e) {} BPL_PROGRESS_POPUP_REF=null; } BPL_CANCELLED=false;
+        var results=await aprExecuteDeletion(items, reason); if(BPL_PENDING_ARCHIVE_CLEANUP){BPL_PENDING_ARCHIVE_CLEANUP(results);BPL_PENDING_ARCHIVE_CLEANUP=null;}
+    }
+
+    function bplStartConfirmedWorkflow(updateItems,mappedItems,archiveItems,reason){if(BPL_POPUP_REF){try{BPL_POPUP_REF.close();}catch(e){}BPL_POPUP_REF=null;}BPL_CANCELLED=false;BPL_PENDING_ARCHIVE_ITEMS=archiveItems||[];BPL_PENDING_ARCHIVE_REASON=reason||"";BPL_ARCHIVE_DEFERRED=mappedItems.length>0;if(updateItems.length>0&&mappedItems.length>0)startBPLUpdateThenAddProcess(updateItems,mappedItems);else if(updateItems.length>0)startBPLUpdateProcess(updateItems);else if(mappedItems.length>0)startBPLAddProcess(mappedItems);else bplExecutePendingArchive();}
+
     async function startBPLUpdateProcess(updateItems) {
         log("BPL Update: starting update process for " + updateItems.length + " modified items");
 
@@ -22573,6 +22788,7 @@
                 log("BPL Update: session saved after removing " + removedFromSession + " successfully updated forms");
             }
         }
+        if (!BPL_CANCELLED && !BPL_ARCHIVE_DEFERRED) await bplExecutePendingArchive();
     }
 
     async function startBPLUpdateThenAddProcess(updateItems, addItems) {
@@ -22890,6 +23106,7 @@
             localStorage.removeItem(STORAGE_BPL_RUNNING);
             localStorage.removeItem(STORAGE_BPL_CURRENT_INDEX);
         } catch (e) {}
+        if (!BPL_CANCELLED) await bplExecutePendingArchive();
     }
 
     async function runBuildProcedureLog() {
@@ -26143,18 +26360,18 @@
         }
         log("ClearMapping: startClearMapping invoked");
 
+        var path = location.pathname;
+        if (path !== "/secure/crfdesign/studylibrary/eligibility/list") {
+            log("ClearMapping: not on eligibility list page; showing redirect warning");
+            try { localStorage.removeItem(STORAGE_RUN_MODE); } catch (e) {}
+            showWrongPagePopup("Clear Mapping", ELIGIBILITY_LIST_PATH, location.pathname, location.origin + ELIGIBILITY_LIST_PATH);
+            return;
+        }
+
         try {
             localStorage.setItem(STORAGE_RUN_MODE, RUNMODE_CLEAR_MAPPING);
         } catch (e) {
         }
-
-        var path = location.pathname;
-        if (path !== "/secure/crfdesign/studylibrary/eligibility/list") {
-            log("ClearMapping: not on eligibility list page; redirecting");
-            location.href = getBaseUrl() + ELIGIBILITY_LIST_PATH;
-            return;
-        }
-
         executeClearMappingAutomation();
     }
 
@@ -32117,12 +32334,7 @@
         log("ImportIE: startImportEligibilityMapping invoked");
 
         if (!isValidEligibilityPage()) {
-            createPopup({
-                title: "Import I/E - Error",
-                content: '<div style="text-align:center;padding:20px;"><p style="color:#ff6b6b;font-size:16px;margin-bottom:12px;">⚠️ Wrong Page</p><p>You must navigate to the Eligibility list page before using Import I/E.</p><p style="margin-top:12px;font-size:12px;color:#ffffffff;word-wrap:break-word;word-break:break-all;">Required URL: ' + getBaseUrl() + ELIGIBILITY_LIST_PATH + '</p></div>',
-                width: "450px",
-                height: "auto"
-            });
+            showWrongPagePopup("Import I/E", ELIGIBILITY_LIST_PATH, location.pathname, location.origin + ELIGIBILITY_LIST_PATH);
             log("ImportIE: invalid page, stopping");
             return;
         }
@@ -41324,7 +41536,7 @@
     }
 
     function clampSidePanelWidth(width) {
-        var minW = pxToNumber(scale(PANEL_DEFAULT_WIDTH), PANEL_DEFAULT_WIDTH);
+        var minW = pxToNumber(scale(PANEL_MIN_WIDTH_PX), PANEL_MIN_WIDTH_PX);
         var maxByViewport = Math.floor((window.innerWidth || 1280) * 0.55);
         var maxW = Math.max(minW, Math.min(PANEL_MAX_WIDTH_PX, maxByViewport));
         var n = pxToNumber(width, minW);
@@ -41337,7 +41549,7 @@
         var raw = String(height || "");
         if (raw.indexOf("vh") !== -1 || raw.indexOf("%") !== -1) return String(PANEL_BOTTOM_HEIGHT_PX) + "px";
         var n = pxToNumber(raw, PANEL_BOTTOM_HEIGHT_PX);
-        if (n < 220) n = 220;
+        if (n < PANEL_MIN_HEIGHT_PX) n = PANEL_MIN_HEIGHT_PX;
         if (n > PANEL_BOTTOM_HEIGHT_PX) n = PANEL_BOTTOM_HEIGHT_PX;
         return String(n) + "px";
     }
@@ -41352,7 +41564,7 @@
         panel.style.bottom = "0px";
         panel.style.left = dock === "bottom" ? "0px" : "auto";
         panel.style.width = dock === "bottom" ? "100vw" : width;
-        panel.style.minWidth = dock === "bottom" ? "0px" : scale(PANEL_DEFAULT_WIDTH);
+        panel.style.minWidth = dock === "bottom" ? "0px" : scale(PANEL_MIN_WIDTH_PX);
         panel.style.maxWidth = dock === "bottom" ? "100vw" : clampSidePanelWidth(PANEL_MAX_WIDTH_PX + "px");
         panel.style.height = dock === "bottom" ? clampBottomPanelHeight((getStoredPanelSize() || {}).height) : "100vh";
         panel.style.maxHeight = dock === "bottom" ? "45vh" : "100vh";
@@ -41375,7 +41587,179 @@
             bodyContainer.style.minHeight = "0px";
             applyBottomDockBodyLayout(bodyContainer, dock);
         }
+        applyDockHeaderLayout(panel, bodyContainer, dock);
+        applyDockHeaderSizing(panel, bodyContainer, dock);
         applySidePanelOffset(panel);
+    }
+
+    function applyDockHeaderSizing(panel, bodyContainer, dock) {
+        if (!panel || !bodyContainer) return;
+        var header = panel.querySelector("[data-aps-panel-header='1']");
+        var title = panel.querySelector("[data-aps-panel-title='1']");
+        var controls = panel.querySelector("[data-aps-panel-controls='1']");
+        if (!header || !title || !controls) return;
+        var buttons = controls.querySelectorAll("button");
+        if (dock === "right") {
+            var width = panel.offsetWidth || PANEL_DEFAULT_WIDTH;
+            var compact = width < 250;
+            header.style.height = compact ? (width < 205 ? "25px" : "28px") : scale(PANEL_HEADER_HEIGHT_PX);
+            title.style.fontSize = compact ? (width < 205 ? "10px" : "11px") : "";
+            title.style.whiteSpace = "nowrap";
+            title.style.overflow = "hidden";
+            title.style.textOverflow = "ellipsis";
+            controls.style.gap = compact ? "3px" : scale(PANEL_HEADER_GAP_PX);
+            for (var ri = 0; ri < buttons.length; ri++) {
+                buttons[ri].style.width = compact ? (width < 205 ? "20px" : "22px") : "";
+                buttons[ri].style.height = compact ? (width < 205 ? "20px" : "22px") : "";
+                buttons[ri].style.minWidth = compact ? "0" : "";
+                buttons[ri].style.padding = compact ? "0 2px" : "";
+                buttons[ri].style.fontSize = compact ? (width < 205 ? "11px" : "12px") : "";
+                buttons[ri].style.border = isGlassTheme() ? "1px solid rgba(255,255,255,0.28)" : "1px solid #444";
+                buttons[ri].style.borderRadius = "4px";
+                buttons[ri].style.background = "transparent";
+                buttons[ri].style.boxSizing = "border-box";
+                buttons[ri].style.display = "flex";
+                buttons[ri].style.alignItems = "center";
+                buttons[ri].style.justifyContent = "center";
+            }
+            bodyContainer.style.height = "calc(100% - " + header.offsetHeight + "px)";
+            bodyContainer.style.maxHeight = "calc(100% - " + header.offsetHeight + "px)";
+            bodyContainer.style.paddingTop = compact ? "5px" : "6px";
+        } else {
+            var height = panel.offsetHeight || PANEL_BOTTOM_HEIGHT_PX;
+            bodyContainer.style.paddingTop = "0";
+            var veryCompact = height < 145;
+            var compactBottom = height < 190;
+            var controlSize = veryCompact ? "19px" : (compactBottom ? "23px" : "28px");
+            controls.style.gap = veryCompact ? "3px" : (compactBottom ? "4px" : "6px");
+            controls.style.padding = veryCompact ? "2px" : (compactBottom ? "3px" : "4px");
+            controls.style.flexBasis = veryCompact ? "28px" : (compactBottom ? "32px" : "36px");
+            var info = bodyContainer.querySelector("[data-aps-bottom-info='1']");
+            if (info) info.style.gridTemplateColumns = "minmax(0,1fr) " + (veryCompact ? "30px" : (compactBottom ? "34px" : "40px"));
+            for (var bi = 0; bi < buttons.length; bi++) {
+                buttons[bi].style.width = controlSize;
+                buttons[bi].style.height = controlSize;
+                buttons[bi].style.minWidth = "0";
+                buttons[bi].style.minHeight = "0";
+                buttons[bi].style.padding = "0";
+                buttons[bi].style.fontSize = veryCompact ? "10px" : (compactBottom ? "11px" : "12px");
+                buttons[bi].style.lineHeight = "1";
+                buttons[bi].style.flexShrink = "0";
+                buttons[bi].style.border = isGlassTheme() ? "1px solid rgba(255,255,255,0.28)" : "1px solid #444";
+                buttons[bi].style.borderRadius = "4px";
+                buttons[bi].style.background = "transparent";
+                buttons[bi].style.boxSizing = "border-box";
+                buttons[bi].style.display = "flex";
+                buttons[bi].style.alignItems = "center";
+                buttons[bi].style.justifyContent = "center";
+            }
+        }
+    }
+
+    function applyDockHeaderLayout(panel, bodyContainer, dock) {
+        if (!panel || !bodyContainer) return;
+        var header = panel.querySelector("[data-aps-panel-header='1']");
+        var title = panel.querySelector("[data-aps-panel-title='1']");
+        var left = panel.querySelector("[data-aps-panel-header-left='1']");
+        var controls = panel.querySelector("[data-aps-panel-controls='1']");
+        var toggle = panel.querySelector("[data-aps-panel-dock-toggle='1']");
+        var info = bodyContainer.querySelector("[data-aps-bottom-info='1']");
+        if (!header || !title || !left || !controls || !toggle) return;
+        if (dock === "bottom" && info) {
+            if (controls.parentNode !== info) info.appendChild(controls);
+            controls.appendChild(panel.querySelector("button[title='Hide sidebar']"));
+            controls.appendChild(panel.querySelector("button[title='Settings']"));
+            controls.appendChild(panel.querySelector("button[title='Help Guide']"));
+            controls.appendChild(toggle);
+            left.style.display = "none";
+            header.style.display = "none";
+            header.style.flex = "0 0 0px";
+            header.style.width = "0px";
+            header.style.height = "0px";
+            header.style.minHeight = "0";
+            header.style.padding = "0";
+            header.style.flexDirection = "column";
+            header.style.justifyContent = "flex-start";
+            header.style.borderRight = isGlassTheme() ? "1px solid rgba(255,255,255,0.15)" : "1px solid #333";
+            header.style.borderBottom = "none";
+            title.style.writingMode = "vertical-rl";
+            title.style.transform = "rotate(180deg)";
+            title.style.flex = "1";
+            title.style.display = "none";
+            title.style.alignItems = "center";
+            title.style.justifyContent = "center";
+            title.style.paddingBottom = "0";
+            controls.style.display = "flex";
+            controls.style.flexDirection = "column";
+            controls.style.alignItems = "stretch";
+            controls.style.justifyContent = "flex-start";
+            controls.style.gap = "4px";
+            controls.style.flex = "0 0 32px";
+            controls.style.minWidth = "32px";
+            controls.style.padding = "4px";
+            controls.style.boxSizing = "border-box";
+            info.style.display = "grid";
+            info.style.gridTemplateColumns = "minmax(0,1fr) 40px";
+            info.style.gridTemplateRows = "auto minmax(0,1fr)";
+            info.style.alignItems = "stretch";
+            info.style.gap = "6px";
+            var status = bodyContainer.querySelector("[data-aps-panel-status='1']");
+            var logBox = bodyContainer.querySelector("#" + LOG_ID);
+            if (status) { status.style.gridColumn = "1"; status.style.gridRow = "1"; }
+            if (logBox) { logBox.style.gridColumn = "1"; logBox.style.gridRow = "2"; }
+            controls.style.gridColumn = "2";
+            controls.style.gridRow = "1 / span 2";
+            panel.style.flexDirection = "column";
+            bodyContainer.style.flex = "1 1 auto";
+            bodyContainer.style.width = "auto";
+            bodyContainer.style.height = "100%";
+            bodyContainer.style.maxHeight = "100%";
+        } else {
+            if (controls.parentNode !== header) header.appendChild(controls);
+            left.style.display = "none";
+            controls.appendChild(toggle);
+            controls.appendChild(panel.querySelector("button[title='Help Guide']"));
+            controls.appendChild(panel.querySelector("button[title='Settings']"));
+            controls.appendChild(panel.querySelector("button[title='Hide sidebar']"));
+            header.style.display = "flex";
+            header.style.flex = "0 0 auto";
+            header.style.width = "auto";
+            header.style.height = scale(PANEL_HEADER_HEIGHT_PX);
+            header.style.minHeight = "0";
+            header.style.padding = "2px 4px";
+            header.style.flexDirection = "";
+            header.style.justifyContent = "flex-end";
+            header.style.borderRight = "";
+            header.style.borderBottom = "";
+            title.style.writingMode = "horizontal-tb";
+            title.style.transform = "none";
+            title.style.flex = "";
+            title.style.display = "none";
+            title.style.alignItems = "";
+            title.style.justifyContent = "center";
+            title.style.paddingBottom = scale(8);
+            controls.style.display = "inline-flex";
+            controls.style.flexDirection = "row";
+            controls.style.alignItems = "center";
+            controls.style.justifyContent = "";
+            controls.style.gap = scale(PANEL_HEADER_GAP_PX);
+            controls.style.flex = "";
+            controls.style.flexBasis = "";
+            controls.style.minWidth = "";
+            controls.style.padding = "";
+            controls.style.boxSizing = "";
+            controls.style.gridColumn = "";
+            controls.style.gridRow = "";
+            info.style.display = "contents";
+            info.style.gridTemplateColumns = "";
+            info.style.gridTemplateRows = "";
+            info.style.gap = "";
+            panel.style.flexDirection = "column";
+            bodyContainer.style.flex = "";
+            bodyContainer.style.width = "";
+            bodyContainer.style.height = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
+            bodyContainer.style.maxHeight = "calc(100% - " + scale(PANEL_HEADER_HEIGHT_PX) + ")";
+        }
     }
 
     function applyBottomDockBodyLayout(bodyContainer, dock) {
@@ -41390,13 +41774,13 @@
         }
         if (dock === "bottom") {
             bodyContainer.style.flexDirection = "row"; bodyContainer.style.alignItems = "stretch"; bodyContainer.style.gap = "10px"; bodyContainer.style.overflow = "hidden";
-            buttonRow.style.flex = "1 1 auto"; buttonRow.style.minWidth = "0"; buttonRow.style.minHeight = "0"; buttonRow.style.gridTemplateColumns = "none"; buttonRow.style.gridTemplateRows = "repeat(4,minmax(0,1fr))"; buttonRow.style.gridAutoFlow = "column"; buttonRow.style.gridAutoColumns = "minmax(0,1fr)"; buttonRow.style.gap = "6px"; buttonRow.style.overflow = "hidden";
+            buttonRow.style.flex = "1 1 auto"; buttonRow.style.minWidth = "0"; buttonRow.style.minHeight = "0"; buttonRow.style.gridTemplateColumns = "repeat(4,minmax(0,1fr))"; buttonRow.style.gridTemplateRows = ""; buttonRow.style.gridAutoFlow = "row"; buttonRow.style.gridAutoColumns = ""; buttonRow.style.gridAutoRows = "minmax(0,1fr)"; buttonRow.style.gap = "6px"; buttonRow.style.overflowY = "auto"; buttonRow.style.overflowX = "hidden";
             info.style.display = "flex"; info.style.flex = "0 1 clamp(210px,24vw,340px)"; info.style.minWidth = "210px"; info.style.minHeight = "0"; info.style.flexDirection = "column"; info.style.gap = "6px";
             status.style.marginTop = "0"; status.style.flex = "0 0 auto"; status.style.minHeight = "0"; logBox.style.marginTop = "0"; logBox.style.flex = "1 1 auto"; logBox.style.minHeight = "0";
             var bottomButtons = buttonRow.querySelectorAll("button"); for (var bi = 0; bi < bottomButtons.length; bi++) { bottomButtons[bi].style.minWidth = "0"; bottomButtons[bi].style.minHeight = "0"; bottomButtons[bi].style.height = "100%"; bottomButtons[bi].style.padding = "4px 5px"; bottomButtons[bi].style.fontSize = "11px"; bottomButtons[bi].style.lineHeight = "1.15"; bottomButtons[bi].style.whiteSpace = "normal"; bottomButtons[bi].style.overflow = "hidden"; }
         } else {
             bodyContainer.style.flexDirection = "column"; bodyContainer.style.alignItems = "stretch"; bodyContainer.style.gap = "0"; bodyContainer.style.overflow = "auto";
-            buttonRow.style.flex = "0 0 auto"; buttonRow.style.minWidth = ""; buttonRow.style.minHeight = ""; buttonRow.style.gridTemplateColumns = "1fr 1fr"; buttonRow.style.gridTemplateRows = ""; buttonRow.style.gridAutoFlow = ""; buttonRow.style.gridAutoColumns = ""; buttonRow.style.gap = scale(BUTTON_GAP_PX); buttonRow.style.overflow = "visible";
+            buttonRow.style.flex = "0 0 auto"; buttonRow.style.minWidth = ""; buttonRow.style.minHeight = ""; buttonRow.style.gridTemplateColumns = "1fr 1fr"; buttonRow.style.gridTemplateRows = ""; buttonRow.style.gridAutoFlow = ""; buttonRow.style.gridAutoColumns = ""; buttonRow.style.gridAutoRows = ""; buttonRow.style.gap = scale(BUTTON_GAP_PX); buttonRow.style.overflow = "visible";
             info.style.display = "contents"; info.style.flex = ""; info.style.minWidth = ""; info.style.gap = ""; status.style.marginTop = scale(STATUS_MARGIN_TOP_PX); status.style.flex = ""; status.style.minHeight = ""; logBox.style.marginTop = scale(LOG_MARGIN_TOP_PX); logBox.style.flex = "1"; logBox.style.minHeight = "0";
             var rightButtons = buttonRow.querySelectorAll("button"); for (var ri = 0; ri < rightButtons.length; ri++) { rightButtons[ri].style.minWidth = ""; rightButtons[ri].style.minHeight = ""; rightButtons[ri].style.height = ""; rightButtons[ri].style.padding = scale(BUTTON_PADDING_PX); rightButtons[ri].style.fontSize = scale(PANEL_FONT_SIZE_PX); rightButtons[ri].style.lineHeight = ""; rightButtons[ri].style.whiteSpace = ""; rightButtons[ri].style.overflow = ""; }
         }
@@ -41416,15 +41800,18 @@
         document.documentElement.style.setProperty("--clinspark-sidebar-width", width);
         document.documentElement.setAttribute("data-clinspark-sidebar-dock", dock);
         ensureSidePanelLayoutStyles();
+        document.documentElement.style.setProperty("--clinspark-sidebar-height", String(panel.offsetHeight || PANEL_BOTTOM_HEIGHT_PX) + "px");
         if (document.body) {
             if (SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT === null) {
                 SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = document.body.style.paddingRight || "";
                 SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = document.body.style.boxSizing || "";
                 SIDE_PANEL_ORIGINAL_BODY_WIDTH = document.body.style.width || "";
+                SIDE_PANEL_ORIGINAL_BODY_PADDING_BOTTOM = document.body.style.paddingBottom || "";
             }
             document.body.style.paddingRight = "0px";
             document.body.style.width = "100%";
             document.body.style.boxSizing = "border-box";
+            document.body.style.paddingBottom = dock === "bottom" ? String(panel.offsetHeight || PANEL_BOTTOM_HEIGHT_PX) + "px" : SIDE_PANEL_ORIGINAL_BODY_PADDING_BOTTOM;
         }
     }
 
@@ -41434,17 +41821,20 @@
             document.documentElement.removeAttribute("data-clinspark-sidebar-open");
             document.documentElement.removeAttribute("data-clinspark-sidebar-dock");
             document.documentElement.style.removeProperty("--clinspark-sidebar-width");
+            document.documentElement.style.removeProperty("--clinspark-sidebar-height");
             document.documentElement.style.paddingBottom = SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM === null ? "" : SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM;
         }
         if (document.body && SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT !== null) {
             document.body.style.paddingRight = SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT;
             document.body.style.boxSizing = SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING;
             document.body.style.width = SIDE_PANEL_ORIGINAL_BODY_WIDTH;
+            document.body.style.paddingBottom = SIDE_PANEL_ORIGINAL_BODY_PADDING_BOTTOM;
         }
         SIDE_PANEL_ORIGINAL_HTML_PADDING_RIGHT = null;
         SIDE_PANEL_ORIGINAL_BODY_PADDING_RIGHT = null;
         SIDE_PANEL_ORIGINAL_BODY_BOX_SIZING = null;
         SIDE_PANEL_ORIGINAL_BODY_WIDTH = null;
+        SIDE_PANEL_ORIGINAL_BODY_PADDING_BOTTOM = null;
         SIDE_PANEL_ORIGINAL_HTML_PADDING_BOTTOM = null;
     }
 
@@ -41456,7 +41846,11 @@
             style.id = styleId;
             document.head.appendChild(style);
         }
-        style.textContent = "html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .header.navbar-fixed-top, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .navbar-fixed-top { right: var(--clinspark-sidebar-width) !important; width: auto !important; }";
+        style.textContent = "html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .header.navbar-fixed-top, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .navbar-fixed-top { right: var(--clinspark-sidebar-width) !important; width: auto !important; }" +
+            " html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .modal.in, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .modal.show { right: var(--clinspark-sidebar-width) !important; width: auto !important; }" +
+            " html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .modal-backdrop.in, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='right'] .modal-backdrop.show { right: var(--clinspark-sidebar-width) !important; width: auto !important; }" +
+            " html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='bottom'] .modal.in, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='bottom'] .modal.show { bottom: var(--clinspark-sidebar-height) !important; height: auto !important; }" +
+            " html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='bottom'] .modal-backdrop.in, html[data-clinspark-sidebar-open='1'][data-clinspark-sidebar-dock='bottom'] .modal-backdrop.show { bottom: var(--clinspark-sidebar-height) !important; height: auto !important; }";
     }
 
     function applyPanelButtonTheme(panel) {
@@ -43595,13 +43989,14 @@
             }
             if (getPanelDock() === "bottom") {
                 var dy = e.clientY - startY; var newH = startH - dy;
-                if (newH < 220) newH = 220; if (newH > PANEL_BOTTOM_HEIGHT_PX) newH = PANEL_BOTTOM_HEIGHT_PX;
+                if (newH < PANEL_MIN_HEIGHT_PX) newH = PANEL_MIN_HEIGHT_PX; if (newH > PANEL_BOTTOM_HEIGHT_PX) newH = PANEL_BOTTOM_HEIGHT_PX;
                 panel.style.height = String(newH) + "px"; applySidePanelOffset(panel); applyBottomDockBodyLayout(bodyContainer, "bottom");
             } else {
                 var dx = e.clientX - startX; var newW = startW - dx;
-                var minW = toInt(scale(PANEL_DEFAULT_WIDTH)); if (newW < minW) newW = minW; if (newW > PANEL_MAX_WIDTH_PX) newW = PANEL_MAX_WIDTH_PX;
+                var minW = toInt(scale(PANEL_MIN_WIDTH_PX)); if (newW < minW) newW = minW; if (newW > PANEL_MAX_WIDTH_PX) newW = PANEL_MAX_WIDTH_PX;
                 panel.style.width = String(newW) + "px"; panel.style.height = "100vh"; applySidePanelOffset(panel);
             }
+            applyDockHeaderSizing(panel, bodyContainer, getPanelDock());
 
             if (bodyContainer) {
                 bodyContainer.style.display = "flex";
@@ -43620,7 +44015,10 @@
             document.body.style.cursor = "";
             handle.style.background = "transparent";
             if (getPanelDock() === "bottom") setStoredPanelSize((getStoredPanelSize() || {}).width, clampBottomPanelHeight(panel.style.height));
-            else setStoredPanelSize(clampSidePanelWidth(panel.style.width), "100vh");
+            else {
+                var preservedSize = getStoredPanelSize() || {};
+                setStoredPanelSize(clampSidePanelWidth(panel.style.width), preservedSize.height || PANEL_DEFAULT_HEIGHT);
+            }
             applySidePanelLayout(panel, bodyContainer);
         });
 
@@ -43772,7 +44170,7 @@
         panel.style.padding = scale(PANEL_PADDING_PX);
         panel.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Arial";
         panel.style.fontSize = scale(PANEL_FONT_SIZE_PX);
-        panel.style.minWidth = scale(PANEL_DEFAULT_WIDTH);
+        panel.style.minWidth = scale(PANEL_MIN_WIDTH_PX);
         panel.style.width = clampSidePanelWidth(savedSize.width);
         panel.style.maxWidth = clampSidePanelWidth(PANEL_MAX_WIDTH_PX + "px");
         panel.style.height = "100vh";
@@ -43798,8 +44196,10 @@
         headerBar.style.cursor = "default";
         headerBar.style.userSelect = "none";
         var leftSpacer = document.createElement("div");
+        leftSpacer.setAttribute("data-aps-panel-header-left", "1");
         leftSpacer.style.width = scale(HEADER_LEFT_SPACER_WIDTH_PX);
         var dockToggleBtn = document.createElement("button");
+        dockToggleBtn.setAttribute("data-aps-panel-dock-toggle", "1");
         dockToggleBtn.type = "button";
         dockToggleBtn.textContent = getPanelDock() === "right" ? "\u2194" : "\u2195";
         dockToggleBtn.title = getPanelDock() === "right" ? "Move sidebar to bottom" : "Move dock back to right";
@@ -43817,6 +44217,7 @@
         };
         leftSpacer.appendChild(dockToggleBtn);
         var title = document.createElement("div");
+        title.setAttribute("data-aps-panel-title", "1");
         title.textContent = "ClinSpark Test Automator";
         title.style.fontWeight = HEADER_FONT_WEIGHT;
         title.style.textAlign = "center";
@@ -43827,6 +44228,7 @@
         headerBar.appendChild(leftSpacer);
         headerBar.appendChild(title);
         var rightControls = document.createElement("div");
+        rightControls.setAttribute("data-aps-panel-controls", "1");
         rightControls.style.display = "inline-flex";
         rightControls.style.alignItems = "center";
         rightControls.style.gap = scale(PANEL_HEADER_GAP_PX);
@@ -45344,6 +45746,7 @@
             addButtonToPanel(label, handler);
         };
         bindPanelHotkeyOnce();
+        initSmartPageLocator();
         editSE_resumeAfterReload();
         ifl_resumeImport();
 
