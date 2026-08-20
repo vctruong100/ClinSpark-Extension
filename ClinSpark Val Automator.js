@@ -7,7 +7,7 @@
 // @match https://cenexel-val.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Val%20Val%20Automator.js
 // @downloadURL  https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Val%20Val%20Automator.js
-// @run-at document-idle
+// @run-at document-start
 // @grant GM.openInTab
 // @grant GM_openInTab
 // @grant GM.xmlHttpRequest
@@ -276,6 +276,7 @@
     const STORAGE_ICF_BARCODE_POPUP = "activityPlanState.icfBarcodePopup";
     const STORAGE_RUN_ALL_STATUS = "activityPlanState.runAllStatus";
     const STORAGE_CLEAR_MAPPING_POPUP = "activityPlanState.clearMappingPopup";
+    const STORAGE_CLEAR_MAPPING_FULLSCREEN = "activityPlanState.clearMappingFullscreen";
     const STORAGE_IMPORT_ELIG_POPUP = "activityPlanState.importEligPopup";
     const STORAGE_IMPORT_COHORT_POPUP = "activityPlanState.importCohortPopup";
     const STORAGE_ADD_COHORT_POPUP = "activityPlanState.addCohortPopup";
@@ -3748,7 +3749,7 @@
             for (var si2 = 0; si2 < studies.length; si2++) {
                 var sName = studies[si2].text;
                 var sVal = studies[si2].value;
-                if (filter && sName.toLowerCase().indexOf(filter) === -1) continue;
+                if (filter && !matchesCommaSeparatedSearch(sName, filter)) continue;
                 var item = document.createElement("div");
                 item.textContent = sName;
                 item.style.cssText = "padding:6px 8px;border-radius:4px;cursor:pointer;font-size:12px;color:" + tc.text + ";white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px;";
@@ -3780,7 +3781,7 @@
                     if (showSelectedOnly && !formItems[fi2].selected) continue;
                     var desc = formItems[fi2].studyName + " - " + formItems[fi2].formName;
                     if (filter) {
-                        if (desc.toLowerCase().indexOf(filter) === -1 && sName.toLowerCase().indexOf(filter) === -1) continue;
+                        if (!matchesCommaSeparatedSearch(desc + " " + sName, filter)) continue;
                     }
                     sItems.push(formItems[fi2]);
                 }
@@ -5354,7 +5355,7 @@
             tableBody.innerHTML = "";
             var filter = searchInput.value.trim().toLowerCase();
             for (var ri = 0; ri < rows.length; ri++) {
-                if (filter && rows[ri].name.toLowerCase().indexOf(filter) === -1) continue;
+                if (filter && !matchesCommaSeparatedSearch(rows[ri].name, filter)) continue;
                 (function(idx) {
                     var tr = document.createElement("tr");
                     tr.setAttribute("draggable", "true");
@@ -7852,7 +7853,7 @@
                     var visibleForms = 0;
                     for (var f = 0; f < studyEvent.forms.length; f++) {
                         var form = studyEvent.forms[f];
-                        if (filter && form.formText.toLowerCase().indexOf(filter) === -1) continue;
+                        if (filter && !matchesCommaSeparatedSearch(form.formText, filter)) continue;
                         visibleForms++;
 
                         var formItem = document.createElement("div");
@@ -7976,7 +7977,7 @@
 
             for (var i = 0; i < studyEventsArray.length; i++) {
                 var ev = studyEventsArray[i];
-                if (filter && ev.text.toLowerCase().indexOf(filter) === -1) continue;
+                if (filter && !matchesCommaSeparatedSearch(ev.text, filter)) continue;
 
                 var item = document.createElement("div");
                 item.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;margin-bottom:6px;border:1px solid #333;border-radius:6px;background:#252525;cursor:pointer;transition:all 0.2s;";
@@ -9059,7 +9060,7 @@
             var filter = (searchValue || "").toLowerCase();
             for (var i = 0; i < targetFormsSorted.length; i++) {
                 var form = targetFormsSorted[i];
-                if (filter && form.text.toLowerCase().indexOf(filter) === -1) continue;
+                if (filter && !matchesCommaSeparatedSearch(form.text, filter)) continue;
 
                 var item = document.createElement("div");
                 item.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;margin-bottom:6px;border:1px solid #333;border-radius:6px;background:#252525;cursor:pointer;transition:all 0.2s;";
@@ -12313,6 +12314,14 @@
         btnSectionHint.style.cssText = "font-size:11px;color:" + tc.textHint + ";margin-bottom:10px;font-style:italic;";
         btnSection.appendChild(btnSectionHint);
 
+        var featureButtonFilter = "all";
+        var featureFilterBar = document.createElement("div"); featureFilterBar.style.cssText = "display:flex;align-items:center;gap:5px;margin-bottom:8px;";
+        var featureFilterLabel = document.createElement("span"); featureFilterLabel.textContent = "Show:"; featureFilterLabel.style.cssText = "font-size:11px;color:" + tc.textHint + ";margin-right:2px;"; featureFilterBar.appendChild(featureFilterLabel);
+        var featureFilterButtons = [];
+        function updateFeatureFilterButtons() { for (var fbi = 0; fbi < featureFilterButtons.length; fbi++) { var active = featureFilterButtons[fbi].dataset.filter === featureButtonFilter; featureFilterButtons[fbi].style.background = active ? tc.tBtnHover : tc.tBtnInactiveBg; featureFilterButtons[fbi].style.borderColor = active ? tc.tBtnActiveBorder : tc.tBtnInactiveBorder; featureFilterButtons[fbi].style.color = active ? "#fff" : tc.textSec; } }
+        [{ value: "enabled", label: "Enabled" }, { value: "disabled", label: "Disabled" }, { value: "all", label: "All" }].forEach(function(option) { var filterBtn = document.createElement("button"); filterBtn.type = "button"; filterBtn.textContent = option.label; filterBtn.dataset.filter = option.value; filterBtn.style.cssText = "padding:5px 9px;background:" + tc.tBtnInactiveBg + ";border:1px solid " + tc.tBtnInactiveBorder + ";border-radius:5px;color:" + tc.textSec + ";font-size:11px;cursor:pointer;"; filterBtn.onclick = function() { featureButtonFilter = this.dataset.filter; updateFeatureFilterButtons(); renderBtnGrid(); }; featureFilterButtons.push(filterBtn); featureFilterBar.appendChild(filterBtn); });
+        updateFeatureFilterButtons(); btnSection.appendChild(featureFilterBar);
+
         var btnGridContainer = document.createElement("div");
         btnGridContainer.style.cssText = "max-height:480px;overflow-y:auto;border-radius:6px;background:" + tc.gridBg + ";padding:6px;";
         btnGridContainer.setAttribute("role", "grid");
@@ -12407,6 +12416,8 @@
                     var entry = sorted[siLocal];
                     var def = defMap[entry.id];
                     if (!def) return;
+                    if (featureButtonFilter === "enabled" && !entry.visible) return;
+                    if (featureButtonFilter === "disabled" && entry.visible) return;
 
                     var cell = document.createElement("div");
                     cell.setAttribute("role", "gridcell");
@@ -14079,6 +14090,14 @@
     function normalizeSAText(t) {
         if (typeof t !== "string") return "";
         return t.trim().replace(/\s+/g, " ");
+    }
+
+    function matchesCommaSeparatedSearch(text, query) {
+        var haystack = String(text == null ? "" : text).toLowerCase();
+        var terms = String(query == null ? "" : query).split(",").map(function(term) { return term.trim().toLowerCase(); }).filter(function(term) { return term.length > 0; });
+        if (terms.length === 0) return true;
+        for (var i = 0; i < terms.length; i++) if (haystack.indexOf(terms[i]) !== -1) return true;
+        return false;
     }
 
     // Clear all SA Builder storage
@@ -16064,7 +16083,9 @@
             }
 
             var key = segment + " | " + studyEvent + " | " + form;
-            var dedupKey = key + " | " + (timepointCleaned || timepointRaw || "");
+            // Each table row is a distinct scheduled-activity instance. Do not collapse
+            // identical segment/event/form/timepoint combinations into one entry.
+            var dedupKey = String(i);
             if (seenKeys[dedupKey]) {
                 skippedDuplicate++;
                 continue;
@@ -16497,6 +16518,13 @@
                 if (!efData) {
                     continue;
                 }
+                if (efData.autoPopulated && efData.saRowIndex !== undefined && efData.saRowIndex !== null && saItem.saRowIndex !== undefined && saItem.saRowIndex !== null && String(efData.saRowIndex) === String(saItem.saRowIndex)) {
+                    existingAutoIdx = ef;
+                    break;
+                }
+                if (efData.autoPopulated) {
+                    continue;
+                }
                 var formText = normalizeSAText(existingForms[ef].text);
                 if (formText !== saItem.form) {
                     continue;
@@ -16509,11 +16537,7 @@
                 if (efData.studyEvents && efData.studyEvents.length > 0) {
                     var evText = normalizeSAText(efData.studyEvents[0].text);
                     if (evText === saItem.studyEvent) {
-                        if (efData.autoPopulated) {
-                            existingAutoIdx = ef;
-                        } else {
-                            existingSessionIdx = ef;
-                        }
+                        existingSessionIdx = ef;
                         break;
                     }
                 }
@@ -17442,7 +17466,7 @@
             var filterLower = (filter || "").toLowerCase();
             for (var i = 0; i < studyEvents.length; i++) {
                 var ev = studyEvents[i];
-                if (filterLower && ev.text.toLowerCase().indexOf(filterLower) === -1) {
+                if (filterLower && !matchesCommaSeparatedSearch(ev.text, filter)) {
                     continue;
                 }
                 var evItem = document.createElement("div");
@@ -17566,7 +17590,7 @@
             var filterLower = (filter || "").toLowerCase();
             for (var i = 0; i < forms.length; i++) {
                 var frm = forms[i];
-                if (filterLower && frm.text.toLowerCase().indexOf(filterLower) === -1) {
+                if (filterLower && !matchesCommaSeparatedSearch(frm.text, filter)) {
                     continue;
                 }
                 var frmItem = document.createElement("div");
@@ -17680,6 +17704,32 @@
                 }
             }
             return "N/A";
+        }
+
+        function showBPLAutoConfigurePanel() {
+            if (!selectedFormKey || !formDataStore[selectedFormKey]) { alert("Select a form in the PLAP Builder first, then click Auto Configure."); return; }
+            var p = selectedFormKey.split("|"), sourceSeg = p[0], sourceForms = segmentFormMap[sourceSeg] || [], sourceEntry = null;
+            for (var i = 0; i < sourceForms.length; i++) if (getFormDataKey(sourceSeg, sourceForms[i].value, sourceForms[i].index) === selectedFormKey) { sourceEntry = sourceForms[i]; break; }
+            if (!sourceEntry) { alert("The selected form is no longer available. Select it again and retry."); return; }
+            var sourceData = JSON.parse(JSON.stringify(formDataStore[selectedFormKey])), selected = {}; selected[selectedFormKey] = true;
+            var box = document.createElement("div"); box.style.cssText = "display:grid;grid-template-columns:minmax(280px,1fr) minmax(240px,.85fr);gap:14px;min-width:680px;max-width:920px;";
+            var left = document.createElement("div"), right = document.createElement("div"); right.style.cssText = "border-left:1px solid #333;padding-left:14px;min-width:0;";
+            var title = document.createElement("div"); title.textContent = "Matching forms across segments"; title.style.cssText = "font-size:13px;font-weight:700;color:#fff;margin-bottom:4px;";
+            var hint = document.createElement("div"); hint.textContent = "Select the rows that should receive the configuration shown on the right."; hint.style.cssText = "color:#aaa;font-size:11px;margin-bottom:9px;";
+            var sourceBanner = document.createElement("div"); sourceBanner.textContent = "Source form: " + sourceEntry.text; sourceBanner.style.cssText = "padding:8px 10px;margin-bottom:10px;border:1px solid #5dade2;border-radius:4px;background:#182735;color:#d6eaff;font-size:12px;line-height:1.4;";
+            var tools = document.createElement("div"); tools.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+            var count = document.createElement("span"); count.style.cssText = "color:#aaa;font-size:11px;"; var toggle = document.createElement("button"); toggle.style.cssText = "padding:5px 9px;border:1px solid #666;border-radius:4px;background:#2b2b2b;color:#fff;font-size:11px;cursor:pointer;";
+            var list = document.createElement("div"); list.style.cssText = "display:flex;flex-direction:column;gap:5px;max-height:390px;overflow:auto;padding-right:5px;"; var rows = [], sourceText = String(sourceEntry.text || "").replace(/\s+/g, " ").trim().toLowerCase();
+            function update() { var n = 0; for (var j = 0; j < rows.length; j++) if (rows[j].cb.checked) n++; count.textContent = n + " of " + rows.length + " selected"; toggle.textContent = n === rows.length ? "Clear All" : "Select All"; }
+            for (var si = 0; si < segments.length; si++) { var seg = segments[si], fs = segmentFormMap[seg.value] || []; for (var fi = 0; fi < fs.length; fi++) { var entry = fs[fi]; if (String(entry.value) !== String(sourceEntry.value) && String(entry.text || "").replace(/\s+/g, " ").trim().toLowerCase() !== sourceText) continue; var key = getFormDataKey(seg.value, entry.value, entry.index), data = formDataStore[key] || getDefaultFormData(); var row = document.createElement("label"); row.style.cssText = "display:flex;gap:8px;align-items:flex-start;padding:7px 8px;border:1px solid #444;border-radius:4px;background:#222;color:#eee;font-size:11px;line-height:1.35;cursor:pointer;"; var cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!selected[key]; cb.style.cssText = "margin-top:2px;flex-shrink:0;"; var text = document.createElement("span"); text.textContent = bplBuildFormLabel(seg.text, data.studyEvents || [], entry.text, data); text.style.cssText = "min-width:0;overflow-wrap:anywhere;"; cb.onchange = function(k, c) { return function() { selected[k] = c.checked; update(); }; }(key, cb); row.appendChild(cb); row.appendChild(text); list.appendChild(row); rows.push({ key: key, cb: cb }); } }
+            toggle.onclick = function() { var select = toggle.textContent === "Select All"; for (var j = 0; j < rows.length; j++) { rows[j].cb.checked = select; selected[rows[j].key] = select; } update(); }; tools.appendChild(count); tools.appendChild(toggle); left.appendChild(sourceBanner); left.appendChild(title); left.appendChild(hint); left.appendChild(tools); left.appendChild(list);
+            var ctitle = document.createElement("div"); ctitle.textContent = "Time Relative to Segment"; ctitle.style.cssText = "font-size:13px;font-weight:700;color:#fff;margin-bottom:10px;"; right.appendChild(ctitle);
+            function check(label, prop) { var w = document.createElement("label"); w.style.cssText = "display:flex;align-items:center;gap:7px;margin:8px 0;color:#ddd;font-size:12px;cursor:pointer;"; var c = document.createElement("input"); c.type = "checkbox"; c.checked = !!sourceData[prop]; c.onchange = function() { sourceData[prop] = c.checked; }; w.appendChild(c); w.appendChild(document.createTextNode(label)); right.appendChild(w); }
+            function input(label, prop, type, max) { var w = document.createElement("label"); w.style.cssText = "display:flex;flex-direction:column;gap:3px;margin:8px 0;color:#aaa;font-size:11px;"; w.appendChild(document.createTextNode(label)); var el = document.createElement("input"); el.type = type; el.value = String(sourceData[prop] || (type === "number" ? 0 : "")); if (max) el.max = String(max); el.style.cssText = "padding:6px;border:1px solid #444;border-radius:4px;background:#222;color:#fff;font-size:12px;box-sizing:border-box;"; el.oninput = function() { sourceData[prop] = type === "number" ? (parseInt(el.value, 10) || 0) : el.value.trim(); }; w.appendChild(el); right.appendChild(w); }
+            check("Hidden?", "hidden"); check("Mandatory", "mandatory"); check("Enforce Data Collection Order", "enforce"); input("Pre-Window", "preWindow", "text"); input("Post-Window", "postWindow", "text"); check("Reference Activity", "refActivity"); check("Pre-Reference?", "preReference"); input("Days", "days", "number", 200); input("Hours", "hours", "number", 23); input("Minutes", "minutes", "number", 59); input("Seconds", "seconds", "number", 59);
+            var footer = document.createElement("div"); footer.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:10px;border-top:1px solid #333;"; var cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.style.cssText = "padding:6px 14px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;cursor:pointer;font-size:12px;"; var confirm = document.createElement("button"); confirm.textContent = "Confirm"; confirm.style.cssText = "padding:6px 14px;border:1px solid #5dade2;border-radius:4px;background:#1a2a3a;color:#d6eaff;cursor:pointer;font-size:12px;";
+            cancel.onclick = function() { popup.close(); }; confirm.onclick = function() { var applied = 0; for (var j = 0; j < rows.length; j++) if (rows[j].cb.checked) { var d = formDataStore[rows[j].key] || getDefaultFormData(); d.days = sourceData.days || 0; d.hours = sourceData.hours || 0; d.minutes = sourceData.minutes || 0; d.seconds = sourceData.seconds || 0; d.hidden = !!sourceData.hidden; d.mandatory = sourceData.mandatory !== false; d.enforce = !!sourceData.enforce; d.preWindow = sourceData.preWindow || ""; d.postWindow = sourceData.postWindow || ""; d.refActivity = !!sourceData.refActivity; d.preReference = !!sourceData.preReference; var sv = rows[j].key.split("|")[0]; var targetRefTime = getSegmentRefDateTime(sv); if ((!targetRefTime || targetRefTime === "N/A") && !d.refActivity) targetRefTime = getReferenceActivityExampleTime(sv, rows[j].key); if ((!targetRefTime || targetRefTime === "N/A") && d.segmentRefDateTime && d.segmentRefDateTime !== "N/A") targetRefTime = d.segmentRefDateTime; d.segmentRefDateTime = targetRefTime || "N/A"; var recalculatedExampleTime = bplComputeExampleTime(d.segmentRefDateTime, bplFormatTimePoint(d.days, d.hours, d.minutes, d.seconds, d.preReference), d.preReference); if (recalculatedExampleTime && recalculatedExampleTime !== "N/A") d.exampleTime = recalculatedExampleTime; else if (!d.exampleTime || d.exampleTime === "N/A") d.exampleTime = "N/A"; if (d.autoPopulated) d.modified = true; formDataStore[rows[j].key] = d; applied++; } var autoConfigureSourceKey = selectedFormKey; selectedFormKey = null; saveSession(); renderCenterPanel(centerSearch.value); selectedFormKey = autoConfigureSourceKey; renderTimePanel(formDataStore[autoConfigureSourceKey], autoConfigureSourceKey); runAutoValidation(); popup.close(); showCopyToast("Configured " + applied + " form" + (applied === 1 ? "" : "s"), null); log("BPL: auto configure applied to " + applied + " form(s)"); };
+            footer.appendChild(cancel); footer.appendChild(confirm); right.appendChild(footer); box.appendChild(left); box.appendChild(right); var popup = createPopup({ title: "Auto Configure Forms", content: box, width: "760px", height: "760px", maxWidth: "94vw", maxHeight: "94vh" }); update();
         }
 
         function loadFormDataToPanel(key) {
@@ -18231,7 +18281,7 @@
             var filterLower = (filter || "").toLowerCase();
             for (var bsi = 0; bsi < segments.length; bsi++) {
                 var bseg = segments[bsi];
-                var bsegNameMatches = !filterLower || bseg.text.toLowerCase().indexOf(filterLower) !== -1;
+                var bsegNameMatches = !filterLower || matchesCommaSeparatedSearch(bseg.text, filter);
                 var bforms = segmentFormMap[bseg.value] || [];
                 for (var bfi = 0; bfi < bforms.length; bfi++) {
                     var bentry = bforms[bfi];
@@ -18267,7 +18317,7 @@
                         if (bdata.exampleTime && bdata.exampleTime !== "N/A") {
                             bsearchable += " " + bdata.exampleTime.toLowerCase();
                         }
-                        if (bsearchable.indexOf(filterLower) === -1) {
+                        if (!matchesCommaSeparatedSearch(bsearchable, filter)) {
                             continue;
                         }
                     }
@@ -18315,7 +18365,7 @@
             var filterLower = (filter || "").toLowerCase();
             for (var si2 = 0; si2 < segments.length; si2++) {
                 var seg = segments[si2];
-                var segNameMatches = !filterLower || seg.text.toLowerCase().indexOf(filterLower) !== -1;
+                var segNameMatches = !filterLower || matchesCommaSeparatedSearch(seg.text, filter);
                 var matchingFormIndices = null;
                 if (!segNameMatches && filterLower) {
                     var formsToCheck = segmentFormMap[seg.value] || [];
@@ -18340,7 +18390,7 @@
                         if (fcData.exampleTime && fcData.exampleTime !== "N/A") {
                             searchableText += " " + fcData.exampleTime.toLowerCase();
                         }
-                        if (searchableText.indexOf(filterLower) !== -1) {
+                        if (matchesCommaSeparatedSearch(searchableText, filter)) {
                             matchingFormIndices.push(fci);
                         }
                     }
@@ -19332,8 +19382,7 @@
 
             log("BPL: collect existing started");
 
-            // Build a set of updated auto-populated form identities (segment + studyEvent)
-            // to avoid re-adding duplicates
+            // Track updated auto-populated rows by their actual source table row.
             var updatedAutoKeys = {};
             for (var uSeg in segmentFormMap) {
                 if (!segmentFormMap.hasOwnProperty(uSeg)) continue;
@@ -19344,21 +19393,8 @@
                     var uData = formDataStore[uKey] || getDefaultFormData();
                     var uIsAuto = uEntry.autoPopulated || uData.autoPopulated;
                     if (uIsAuto && uData.modified) {
-                        // Build identity key from segment value + original study event text + form text
-                        // Use original study event if available, otherwise current
-                        var origEvText = "";
-                        if (uData.originalValues && uData.originalValues.studyEventText) {
-                            origEvText = uData.originalValues.studyEventText;
-                        } else if (uData.studyEvents && uData.studyEvents.length > 0) {
-                            origEvText = uData.studyEvents[0].text;
-                        }
-                        var identityKey = uSeg + "|" + normalizeSAText(origEvText) + "|" + normalizeSAText(uEntry.text);
-                        updatedAutoKeys[identityKey] = true;
-                        // Also add key with current study event in case it was changed
-                        if (uData.studyEvents && uData.studyEvents.length > 0) {
-                            var currEvText = uData.studyEvents[0].text;
-                            var identityKey2 = uSeg + "|" + normalizeSAText(currEvText) + "|" + normalizeSAText(uEntry.text);
-                            updatedAutoKeys[identityKey2] = true;
+                        if (uData.saRowIndex !== undefined && uData.saRowIndex !== null) {
+                            updatedAutoKeys[uSeg + "|" + String(uData.saRowIndex)] = true;
                         }
                     }
                 }
@@ -19397,7 +19433,7 @@
                     }
                 }
 
-                var checkKey = matchedSegVal + "|" + normalizeSAText(saItem.studyEvent) + "|" + normalizeSAText(resolvedFormText);
+                var checkKey = matchedSegVal + "|" + String(saItem.saRowIndex);
                 if (updatedAutoKeys[checkKey]) {
                     skippedCount++;
                     log("BPL: collect existing - skipping updated auto-populated form: " + saItem.segment + "|" + saItem.studyEvent + "|" + saItem.form);
@@ -19417,7 +19453,7 @@
                         var formTextNorm = normalizeSAText(existingForms[ef].text);
                         var saTpCleaned = saItem.timepointCleaned || "";
                         var efTpCleaned = efData.timepointCleaned || "";
-                        if (evText === saItem.studyEvent && formTextNorm === saItem.form && efTpCleaned === saTpCleaned) {
+                        if (efData.saRowIndex !== undefined && efData.saRowIndex !== null && saItem.saRowIndex !== undefined && String(efData.saRowIndex) === String(saItem.saRowIndex)) {
                             alreadyExists = true;
                             alreadyExistsKey = efKey;
                             break;
@@ -19585,6 +19621,22 @@
             log("BPL: View Duplicates toggled " + (bplShowDuplicatesOnly ? "ON" : "OFF"));
         });
         legendRow.appendChild(viewDuplicatesBtn);
+
+        var autoConfigureBtn = document.createElement("button");
+        autoConfigureBtn.textContent = "⚙ Auto Configure";
+        autoConfigureBtn.title = "Apply one selected form's configuration to matching forms across segments";
+        autoConfigureBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #8e7dff;background:#25203d;color:#cfc7ff;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;";
+        autoConfigureBtn.addEventListener("mouseenter", function() { this.style.background = "#342b58"; });
+        autoConfigureBtn.addEventListener("mouseleave", function() { this.style.background = "#25203d"; });
+        autoConfigureBtn.addEventListener("click", function() { showBPLAutoConfigurePanel(); });
+        legendRow.appendChild(autoConfigureBtn);
+
+        var sortAllBtn = document.createElement("button");
+        sortAllBtn.textContent = "↕ Sort All"; sortAllBtn.title = "Sort forms in every segment by time point";
+        sortAllBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #777;background:#2b2b2b;color:#fff;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;";
+        sortAllBtn.addEventListener("mouseenter", function() { this.style.background = "#3a3a3a"; }); sortAllBtn.addEventListener("mouseleave", function() { this.style.background = "#2b2b2b"; });
+        sortAllBtn.addEventListener("click", function() { saveFormDataFromPanel(selectedFormKey); for (var sai = 0; sai < segments.length; sai++) { var sv = segments[sai].value, list = segmentFormMap[sv] || []; list.sort(function(a, b) { var ad = formDataStore[getFormDataKey(sv, a.value, a.index)] || getDefaultFormData(), bd = formDataStore[getFormDataKey(sv, b.value, b.index)] || getDefaultFormData(); var at = (ad.days || 0) * 86400 + (ad.hours || 0) * 3600 + (ad.minutes || 0) * 60 + (ad.seconds || 0), bt = (bd.days || 0) * 86400 + (bd.hours || 0) * 3600 + (bd.minutes || 0) * 60 + (bd.seconds || 0); if (ad.preReference) at = -at; if (bd.preReference) bt = -bt; return at !== bt ? at - bt : a.text.localeCompare(b.text); }); segmentFormMap[sv] = list; } renderCenterPanel(centerSearch.value); runAutoValidation(); showCopyToast("Sorted all segments", null); log("BPL: sorted all segments"); });
+        legendRow.appendChild(sortAllBtn);
 
         var bottomRow = document.createElement("div");
         bottomRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:12px;";
@@ -24063,11 +24115,17 @@
 
     function showClearMappingSelectionPanel(rows) {
         var container = document.createElement("div");
-        container.style.cssText = "display:flex;flex-direction:column;gap:10px;color:#fff;font-size:13px;min-width:720px;";
+        container.style.cssText = "display:flex;flex-direction:column;gap:10px;color:#fff;font-size:13px;min-width:720px;min-height:0;";
         var summary = document.createElement("div");
         summary.style.cssText = "color:#ccc;line-height:1.4;";
         summary.textContent = "Select the eligibility mappings you want to remove. Only selected rows will be deleted.";
         container.appendChild(summary);
+        var searchInput = document.createElement("input");
+        searchInput.type = "search";
+        searchInput.placeholder = "Search eligibility items, forms, activities... (use commas for multiple keywords)";
+        searchInput.setAttribute("aria-label", "Filter eligibility mappings");
+        searchInput.style.cssText = "width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #444;border-radius:5px;background:#1a1a1a;color:#fff;font-size:12px;outline:none;";
+        container.appendChild(searchInput);
         var controls = document.createElement("div");
         controls.style.cssText = "display:flex;gap:8px;align-items:center;";
         var selectAllBtn = document.createElement("button");
@@ -24083,8 +24141,9 @@
         controls.appendChild(countLabel);
         container.appendChild(controls);
         var list = document.createElement("div");
-        list.style.cssText = "max-height:460px;overflow-y:auto;border:1px solid #333;border-radius:5px;background:#141414;";
+        list.style.cssText = "flex:1 1 auto;min-height:0;max-height:460px;overflow-y:auto;border:1px solid #333;border-radius:5px;background:#141414;";
         var checks = [];
+        var checkRows = [];
         function updateCount() {
             var selected = 0;
             var i = 0;
@@ -24127,6 +24186,7 @@
                 });
                 cb.addEventListener("change", updateCount);
                 list.appendChild(row);
+                checkRows.push({ row: row, data: rowData });
             })(rows[ri]);
             ri = ri + 1;
         }
@@ -24142,7 +24202,96 @@
         footer.appendChild(cancelBtn);
         footer.appendChild(confirmBtn);
         container.appendChild(footer);
-        var popup = createPopup({ title: "Clear Mapping - Select Eligibility Items", content: container, width: "780px", height: "auto", maxHeight: "85%" });
+        var clearMappingSelectionContinuing = false;
+        var popup = createPopup({ title: "Clear Mapping - Select Eligibility Items", content: container, width: "780px", height: "auto", maxHeight: "85%", onClose: function() {
+            if (!clearMappingSelectionContinuing) {
+                CLEAR_MAPPING_CANCELED = true;
+                clearRunMode();
+                clearClearMappingQueue();
+                try { localStorage.removeItem(STORAGE_CLEAR_MAPPING_POPUP); } catch (e) {}
+                log("ClearMapping: selection panel closed; automation cancelled");
+            }
+        } });
+        var fullscreenBtn = document.createElement("button");
+        fullscreenBtn.textContent = "\u26F6";
+        fullscreenBtn.title = "Toggle Full Screen";
+        fullscreenBtn.setAttribute("aria-label", "Toggle Clear Mapping full screen");
+        fullscreenBtn.style.cssText = "position:absolute;top:8px;right:42px;width:28px;height:28px;padding:3px 6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;font-size:14px;line-height:1;cursor:pointer;z-index:5;box-sizing:border-box;";
+        var clearMappingIsFullscreen = false;
+        var clearMappingOriginalStyles = {};
+        try { clearMappingIsFullscreen = localStorage.getItem(STORAGE_CLEAR_MAPPING_FULLSCREEN) === "true"; } catch (e) {}
+        function applyClearMappingFullscreen() {
+            var popupElement = popup.element;
+            if (!popupElement) return;
+            if (clearMappingIsFullscreen) {
+                if (!clearMappingOriginalStyles.width) {
+                    clearMappingOriginalStyles.width = popupElement.style.width;
+                    clearMappingOriginalStyles.maxWidth = popupElement.style.maxWidth;
+                    clearMappingOriginalStyles.height = popupElement.style.height;
+                    clearMappingOriginalStyles.maxHeight = popupElement.style.maxHeight;
+                    clearMappingOriginalStyles.top = popupElement.style.top;
+                    clearMappingOriginalStyles.left = popupElement.style.left;
+                    clearMappingOriginalStyles.transform = popupElement.style.transform;
+                    clearMappingOriginalStyles.borderRadius = popupElement.style.borderRadius;
+                }
+                popupElement.style.width = "100vw";
+                popupElement.style.maxWidth = "100vw";
+                popupElement.style.height = "100vh";
+                popupElement.style.maxHeight = "100vh";
+                popupElement.style.top = "0";
+                popupElement.style.left = "0";
+                popupElement.style.transform = "none";
+                popupElement.style.borderRadius = "0";
+                container.style.height = "100%";
+                list.style.maxHeight = "none";
+                if (popupElement.children[1]) popupElement.children[1].style.overflow = "hidden";
+                fullscreenBtn.textContent = "\u2716\u26F6";
+                fullscreenBtn.title = "Exit Full Screen";
+            } else {
+                popupElement.style.width = clearMappingOriginalStyles.width || "780px";
+                popupElement.style.maxWidth = clearMappingOriginalStyles.maxWidth || "90%";
+                popupElement.style.height = clearMappingOriginalStyles.height || "auto";
+                popupElement.style.maxHeight = clearMappingOriginalStyles.maxHeight || "85%";
+                popupElement.style.top = clearMappingOriginalStyles.top || "50%";
+                popupElement.style.left = clearMappingOriginalStyles.left || "50%";
+                popupElement.style.transform = clearMappingOriginalStyles.transform || "translate(-50%, -50%)";
+                popupElement.style.borderRadius = clearMappingOriginalStyles.borderRadius || "8px";
+                container.style.height = "";
+                list.style.maxHeight = "460px";
+                if (popupElement.children[1]) popupElement.children[1].style.overflow = "auto";
+                fullscreenBtn.textContent = "\u26F6";
+                fullscreenBtn.title = "Toggle Full Screen";
+            }
+        }
+        fullscreenBtn.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+        fullscreenBtn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            clearMappingIsFullscreen = !clearMappingIsFullscreen;
+            try { localStorage.setItem(STORAGE_CLEAR_MAPPING_FULLSCREEN, String(clearMappingIsFullscreen)); } catch (err) {}
+            applyClearMappingFullscreen();
+        });
+        var popupHeader = popup.element.firstElementChild;
+        if (popupHeader) {
+            popupHeader.style.position = "relative";
+            popupHeader.appendChild(fullscreenBtn);
+        } else {
+            popup.element.appendChild(fullscreenBtn);
+        }
+        function applyClearMappingSearch() {
+            var query = searchInput.value || "";
+            var visible = 0;
+            for (var si = 0; si < checkRows.length; si++) {
+                var rowData = checkRows[si].data;
+                var searchable = [rowData.itemCode, rowData.itemType, rowData.checkItem, rowData.scheduledActivity, rowData.operator, rowData.value].join(" ");
+                var matches = matchesCommaSeparatedSearch(searchable, query);
+                checkRows[si].row.style.display = matches ? "flex" : "none";
+                if (matches) visible++;
+            }
+            searchInput.title = query.trim() ? String(visible) + " matching mapping(s)" : "";
+        }
+        searchInput.addEventListener("input", applyClearMappingSearch);
+        applyClearMappingSearch();
+        applyClearMappingFullscreen();
         selectAllBtn.addEventListener("click", function() {
             var i = 0;
             while (i < checks.length) { checks[i].checked = true; i = i + 1; }
@@ -24167,6 +24316,7 @@
                 }
                 i = i + 1;
             }
+            clearMappingSelectionContinuing = true;
             showClearMappingWarning(selectedRows, popup);
         });
         updateCount();
@@ -24207,21 +24357,24 @@
     async function processClearMappingQueue(queue) {
         if (CLEAR_MAPPING_CANCELED) {
             log("ClearMapping: process queue cancelled");
+            clearClearMappingQueue();
             clearRunMode();
             return;
         }
         log("ClearMapping: process queue started count=" + String(queue.length));
         var remaining = queue.slice();
+        var results = [];
         while (remaining.length > 0) {
             if (CLEAR_MAPPING_CANCELED) {
                 log("ClearMapping: cancelled during selected delete queue");
-                setClearMappingQueue(remaining);
+                clearClearMappingQueue();
                 clearRunMode();
                 return;
             }
             setClearMappingQueue(remaining);
             var item = remaining[0];
             var ok = await deleteEligibilityRowByUrl(item.deleteUrl);
+            results.push({ item: item, ok: ok });
             if (!ok) {
                 log("ClearMapping: failed to delete selected item url=" + String(item.deleteUrl));
             }
@@ -24232,7 +24385,45 @@
         log("ClearMapping: selected queue complete");
         clearClearMappingQueue();
         clearRunMode();
-        showWarningPopup("Clear Mapping", "Selected eligibility mappings were removed.");
+        showClearMappingResults(results);
+    }
+
+    function showClearMappingResults(results) {
+        var completed = 0;
+        var failed = 0;
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:10px;color:#fff;font-size:13px;line-height:1.4;min-width:520px;";
+        for (var i = 0; i < results.length; i++) {
+            if (results[i].ok) completed++; else failed++;
+        }
+        var summary = document.createElement("div");
+        summary.style.cssText = "padding:9px 10px;border:1px solid #34495e;border-radius:5px;background:#17212b;color:#d6eaff;font-weight:600;";
+        summary.textContent = "Completed: " + completed + " | Failed: " + failed + " | Total: " + results.length;
+        wrap.appendChild(summary);
+        var list = document.createElement("div");
+        list.style.cssText = "max-height:430px;overflow-y:auto;border:1px solid #333;border-radius:5px;background:#141414;";
+        for (var ri = 0; ri < results.length; ri++) {
+            var result = results[ri];
+            var item = result.item || {};
+            var row = document.createElement("div");
+            row.style.cssText = "padding:9px 10px;border-bottom:1px solid #252525;";
+            var title = document.createElement("div");
+            title.style.cssText = "font-weight:700;color:" + (result.ok ? "#9f9" : "#ff9b9b") + ";";
+            title.textContent = (result.ok ? "SUCCESS - " : "FAILED - ") + (item.itemCode || item.checkItem || "Eligibility item");
+            var details = document.createElement("div");
+            details.style.cssText = "margin-top:3px;color:#bbb;font-size:11px;word-break:break-word;";
+            details.textContent = (item.itemType || "Mapping") + " | " + (item.scheduledActivity || "") + " | Check: " + (item.checkItem || "") + " | " + (item.operator || "") + " " + (item.value || "");
+            row.appendChild(title);
+            row.appendChild(details);
+            list.appendChild(row);
+        }
+        wrap.appendChild(list);
+        var close = document.createElement("button");
+        close.textContent = "Close";
+        close.style.cssText = "align-self:flex-end;background:#444;color:#fff;border:none;padding:7px 18px;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600;";
+        wrap.appendChild(close);
+        var popup = createPopup({ title: "Clear Mapping - Results", content: wrap, width: "620px", height: "auto", maxHeight: "85%" });
+        close.addEventListener("click", function() { popup.close(); });
     }
 
     async function deleteEligibilityRowByUrl(deleteUrl) {
@@ -38289,6 +38480,7 @@
                             try {
                                 localStorage.removeItem(STORAGE_RUN_MODE);
                                 localStorage.removeItem(STORAGE_CLEAR_MAPPING_POPUP);
+                                clearClearMappingQueue();
                             } catch (e) {}
                             CLEAR_MAPPING_POPUP_REF = null;
                         }
@@ -42606,6 +42798,7 @@
         clearMappingBtn.addEventListener("click", function () {
             log("ClearMapping: button clicked");
             CLEAR_MAPPING_CANCELED = false;
+            clearClearMappingQueue();
             if (CLEAR_MAPPING_PAUSE == true) {
                 log("ClearMapping: Paused");
                 return;
@@ -42644,6 +42837,7 @@
                     try {
                         localStorage.removeItem(STORAGE_RUN_MODE);
                         localStorage.removeItem(STORAGE_CLEAR_MAPPING_POPUP);
+                        clearClearMappingQueue();
                     } catch (e) {}
                     CLEAR_MAPPING_POPUP_REF = null;
                     CLEAR_MAPPING_CANCELED = true;
@@ -43202,7 +43396,7 @@
                 if (CLEAR_MAPPING_CANCELED) {
                     return;
                 }
-                logger("CLEAR_MAPPING_CANCELED: " + CLEAR_MAPPING_CANCELED)
+                log("ClearMapping: canceled state=" + CLEAR_MAPPING_CANCELED);
                 executeClearMappingAutomation();
             }, 4000);
             return;
@@ -43212,6 +43406,24 @@
             processFindCombinedOnList();
         }
 
+    }
+
+    // Create the dock and reserve page space as soon as the body exists. The
+    // full feature initialization remains on DOMContentLoaded below.
+    var earlyPanelBootstrapped = false;
+    function bootstrapDockedPanelEarly() {
+        if (earlyPanelBootstrapped || !document.body || !document.head) return earlyPanelBootstrapped;
+        try {
+            makePanel();
+            earlyPanelBootstrapped = true;
+        } catch (e) {}
+        return earlyPanelBootstrapped;
+    }
+    if (!bootstrapDockedPanelEarly() && typeof MutationObserver !== "undefined" && document.documentElement) {
+        var earlyPanelObserver = new MutationObserver(function() {
+            if (bootstrapDockedPanelEarly()) earlyPanelObserver.disconnect();
+        });
+        earlyPanelObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     if (document.readyState === "loading") {
