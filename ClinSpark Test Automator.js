@@ -33317,6 +33317,9 @@
         return null;
     }
 
+    function getSubjectGenderFromFormModal() { var link = document.querySelector(".modal-header a[href*='/volunteers/manage/show/']"), text = getText(link); if (!text) return ""; var initials = text.match(/^[^,]+,\s*([MF])(?:\s*,|$)/i); if (initials) return initials[1].toLowerCase() === "f" ? "female" : "male"; var n = text.toLowerCase(); if (/\b(?:female|woman|women|girl)\b/.test(n)) return "female"; if (/\b(?:male|man|men|boy)\b/.test(n)) return "male"; return ""; }
+    function findGenderRangeSpecForRow(tr, gender) { if (!tr || !gender) return null; var td = getItemTextCellFromRow(tr), source = getRangeTextFromItemText(td) + " " + getRangeTextFromHelp(td), parts = source.split(/[,;|]/), specs = [], totalRanges = 0; for (var gi = 0; gi < parts.length; gi++) { var part = parts[gi], parsedAll = parseRangeSpecFromText(part); if (parsedAll) totalRanges++; var male = /(?:\[\s*m(?:ale)?s?\s*\]|\b(?:male|males)\b)/i.test(part), female = /(?:\[\s*f(?:emale)?s?\s*\]|\b(?:female|females)\b)/i.test(part); if ((gender === "male" && !male) || (gender === "female" && !female)) continue; if (parsedAll) specs.push(parsedAll); } return totalRanges >= 2 && specs.length ? specs[0] : null; }
+
     function randomIntInInclusiveRange(a, b) {
         var min = Math.ceil(a);
         var max = Math.floor(b);
@@ -33876,10 +33879,12 @@
             if (ta.disabled === true) {
                 ta.disabled = false;
             }
-            ta.value = "Test";
+            var taValue = "Test";
+            if (getFormValueMode() === "highOor" || getFormValueMode() === "highNorm") { var taSpec = findGenderRangeSpecForRow(controlTd.closest("tr[id^=\"itemDataCollectRow_\"]"), getSubjectGenderFromFormModal()); var taPick = pickDecimalForSpec(taSpec, getFormValueMode(), 0); if (taPick !== null && taPick !== undefined) taValue = String(taPick); }
+            ta.value = taValue;
             var evt = new Event("input", { bubbles: true });
             ta.dispatchEvent(evt);
-            log("Run Form: textarea filled");
+            log("Run Form: textarea filled value=" + taValue);
             return;
         }
         var textBox = controlTd.querySelector("input.collectInput.text");
@@ -33890,10 +33895,12 @@
             if (textBox.disabled === true) {
                 textBox.disabled = false;
             }
-            textBox.value = "Test";
+            var textValue = "Test";
+            if (getFormValueMode() === "highOor" || getFormValueMode() === "highNorm") { var textSpec = findGenderRangeSpecForRow(controlTd.closest("tr[id^=\"itemDataCollectRow_\"]"), getSubjectGenderFromFormModal()); var textPick = pickDecimalForSpec(textSpec, getFormValueMode(), 0); if (textPick !== null && textPick !== undefined) textValue = String(textPick); }
+            textBox.value = textValue;
             var evtX = new Event("input", { bubbles: true });
             textBox.dispatchEvent(evtX);
-            log("Run Form: text input set value=Test");
+            log("Run Form: text input set value=" + textValue);
             return;
         }
         var intBox = controlTd.querySelector("input.collectInput.integer");
@@ -33908,7 +33915,7 @@
             var n = null;
             if (modeInt === "oor" || modeInt === "ir" || modeInt === "oorA" || modeInt === "oorB" || modeInt === "lowOor" || modeInt === "lowNorm" || modeInt === "highNorm" || modeInt === "highOor" || modeInt === "randomIr") {
                 var trI = controlTd.closest("tr[id^=\"itemDataCollectRow_\"]");
-                var specI = findRangeSpecForRow(trI);
+                var specI = (modeInt === "highOor" || modeInt === "highNorm") ? (findGenderRangeSpecForRow(trI, getSubjectGenderFromFormModal()) || findRangeSpecForRow(trI)) : findRangeSpecForRow(trI);
                 if (specI) {
                     var pickI = pickIntegerForSpec(specI, modeInt);
                     if (pickI !== null && pickI !== undefined) {
@@ -33938,7 +33945,7 @@
             var d = null;
             if (modeDec === "oor" || modeDec === "ir" || modeDec === "oorA" || modeDec === "oorB" || modeDec === "lowOor" || modeDec === "lowNorm" || modeDec === "highNorm" || modeDec === "highOor" || modeDec === "randomIr") {
                 var trD = controlTd.closest("tr[id^=\"itemDataCollectRow_\"]");
-                var specD = findRangeSpecForRow(trD);
+                var specD = (modeDec === "highOor" || modeDec === "highNorm") ? (findGenderRangeSpecForRow(trD, getSubjectGenderFromFormModal()) || findRangeSpecForRow(trD)) : findRangeSpecForRow(trD);
                 if (specD) {
                     var pickD = pickDecimalForSpec(specD, modeDec, p);
                     if (pickD !== null && pickD !== undefined) {
