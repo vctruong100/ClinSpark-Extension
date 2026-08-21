@@ -5212,9 +5212,9 @@
         addTitle.style.marginBottom = "2px";
         addBox.appendChild(addTitle);
 
-        var addInput = document.createElement("input");
-        addInput.type = "text";
-        addInput.placeholder = "Study Event Name";
+        var addInput = document.createElement("textarea");
+        addInput.rows = 4;
+        addInput.placeholder = "Study Event Name (one per line)";
         addInput.style.padding = "6px 10px";
         addInput.style.borderRadius = "6px";
         addInput.style.border = "1px solid " + (glass ? "rgba(255,255,255,0.25)" : "#555");
@@ -5521,35 +5521,31 @@
         // Add
         function doAdd() {
             if (locked) return;
-            var val = addInput.value.trim();
-            if (!val) { addError.textContent = "Name cannot be empty"; return; }
-            // check duplicate
-            for (var ai = 0; ai < rows.length; ai++) {
-                if (rows[ai].name.trim().toLowerCase() === val.toLowerCase()) {
-                    addError.textContent = "Duplicate: \"" + val + "\" already exists";
-                    return;
-                }
-            }
+            var names = addInput.value.replace(/\r\n/g, "\n").split("\n").map(function(name) { return name.trim(); }).filter(Boolean);
+            if (!names.length) { addError.textContent = "Enter at least one study event name"; return; }
             addError.textContent = "";
-            var newRow = { name: val, href: null, originalName: null, status: "added", reason: "" };
-            rows.push(newRow);
+            var existing = {}; for (var ei = 0; ei < rows.length; ei++) existing[rows[ei].name.trim().toLowerCase()] = true;
+            var addedRows = [];
+            for (var ni = 0; ni < names.length; ni++) { var normalized = names[ni].toLowerCase(); if (existing[normalized]) continue; var newRow = { name: names[ni], href: null, originalName: null, status: "added", reason: "" }; rows.push(newRow); addedRows.push(newRow); existing[normalized] = true; }
+            if (!addedRows.length) { addError.textContent = "All entered study events already exist"; return; }
             // sort using natural order (Day 2 before Day 11)
             rows.sort(function(a, b) {
                 return editSE_naturalSort(a.name, b.name);
             });
             selectedIdx = -1;
             for (var fi = 0; fi < rows.length; fi++) {
-                if (rows[fi] === newRow) { selectedIdx = fi; break; }
+                if (rows[fi] === addedRows[0]) { selectedIdx = fi; break; }
             }
             renderTable();
             showEditPanel(selectedIdx);
             validate();
-            log("[EditSE] Added new study event: " + val);
+            addInput.value = "";
+            log("[EditSE] Added " + addedRows.length + " new study event(s)");
         }
 
         addBtn.addEventListener("click", doAdd);
         addInput.addEventListener("keydown", function(e) {
-            if (e.key === "Enter") doAdd();
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doAdd();
         });
 
         // Edit name live
@@ -20295,6 +20291,28 @@
 
                 if (BPL_CANCELLED) {
                     break;
+                }
+
+                var formSel = document.getElementById("form");
+                var formChosenEl = document.querySelector("#s2id_form .select2-chosen");
+                var formChosenText = formChosenEl ? normalizeSAText(formChosenEl.textContent || "").trim() : "";
+                var formNeedsSelection = !formSel || !String(formSel.value || "").trim() || !formChosenText;
+                if (formNeedsSelection && item.formText) {
+                    var formOptions = formSel ? formSel.querySelectorAll("option") : [];
+                    var formMatchValue = "";
+                    var targetFormText = normalizeSAText(item.formText).trim().toLowerCase();
+                    for (var foi = 0; foi < formOptions.length; foi++) {
+                        if (normalizeSAText(formOptions[foi].textContent || "").trim().toLowerCase() === targetFormText) { formMatchValue = formOptions[foi].value; break; }
+                    }
+                    if (formMatchValue) {
+                        log("BPL Update: Form dropdown was blank; selecting existing form '" + item.formText + "'");
+                        await selectBPLSelect2Value("form", formMatchValue);
+                        formChosenEl = document.querySelector("#s2id_form .select2-chosen");
+                        formChosenText = formChosenEl ? normalizeSAText(formChosenEl.textContent || "").trim() : "";
+                        log("BPL Update: Form selection restored as '" + formChosenText + "'");
+                    } else {
+                        log("BPL Update: could not find Form option matching '" + item.formText + "'");
+                    }
                 }
 
                 // Check if studyEvent or form dropdowns are disabled — if so, skip this form
@@ -43005,7 +43023,24 @@
 
 
     // Initialize the panel, register APS_AddButton, and route to the appropriate processing function.
+    function initStudySwitcherHotkey() {
+        if (window.__CLINSPARK_STUDY_SWITCHER_BOUND) return;
+        window.__CLINSPARK_STUDY_SWITCHER_BOUND = true;
+        document.addEventListener("keydown", function(e) {
+            if (!e.altKey || (e.key !== "a" && e.key !== "A" && e.code !== "KeyA")) return;
+            e.preventDefault(); e.stopPropagation();
+            try {
+                if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) { window.jQuery("#studyIdChanger").select2("open"); return; }
+            } catch (err) {}
+            var choice = document.querySelector("#s2id_studyIdChanger .select2-choice");
+            if (choice) { choice.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })); choice.click(); return; }
+            var select = document.getElementById("studyIdChanger");
+            if (select) { select.focus(); select.click(); }
+        }, true);
+    }
+
     function init() {
+        initStudySwitcherHotkey();
         makePanel();
         window.APS_AddButton = function (label, handler) {
             addButtonToPanel(label, handler);

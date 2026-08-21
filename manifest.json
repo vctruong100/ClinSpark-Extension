@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClinSpark Extension",
-  "version": "4.4.9",
+  "version": "4.5.2",
   "description": "Runs the matching ClinSpark automator on production, test, and validation ClinSpark environments.",
   "icons": {
     "16": "icons/icon16.png",
