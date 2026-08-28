@@ -13960,7 +13960,7 @@
         function draw() { list.innerHTML = ""; draft.forEach(function (row, i) { var line = document.createElement("div"); line.style.cssText = "display:grid;grid-template-columns:minmax(150px,1.2fr) minmax(120px,1fr) minmax(220px,1.7fr) 76px;gap:9px;margin:8px 0;align-items:center;min-width:0"; [row.name, row.keywords.join(", "), row.path].forEach(function (value, col) { var input = document.createElement("input"); input.value=value; input.placeholder=col===0?"Name":col===1?"Keywords":"Path or link"; input.style.cssText="box-sizing:border-box;min-width:0;width:100%;padding:9px 10px;border:1px solid #555;border-radius:5px;background:#202124;color:#fff;outline:2px solid transparent;outline-offset:1px"; input.onfocus=function(){input.style.borderColor="#9b82ff";input.style.outlineColor="rgba(155,130,255,.45)";}; input.onblur=function(){input.style.borderColor="#555";input.style.outlineColor="transparent";}; input.oninput=function(){ if(col===0)row.name=input.value; else if(col===1)row.keywords=input.value.split(",").map(function(v){return v.trim().toUpperCase();}).filter(Boolean); else row.path=input.value; }; line.appendChild(input); }); if(row.custom){var remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove"; remove.style.cssText="box-sizing:border-box;width:76px;padding:8px 6px;border:1px solid rgba(255,110,110,.55);border-radius:5px;background:rgba(125,30,40,.72);color:#fff;font-weight:600;cursor:pointer"; remove.onmouseenter=function(){remove.style.background="rgba(170,45,55,.9)";}; remove.onmouseleave=function(){remove.style.background="rgba(125,30,40,.72)";}; remove.onclick=function(){draft.splice(i,1);draw();}; line.appendChild(remove);} else {var badge=document.createElement("span"); badge.textContent="Default"; badge.style.cssText="display:block;color:#c9bbff;font-size:12px;font-weight:600;text-align:center;white-space:nowrap"; line.appendChild(badge);} list.appendChild(line); }); }
         var actions=document.createElement("div"); actions.style.cssText="display:flex;gap:8px;margin-top:14px;justify-content:flex-end"; var add=document.createElement("button"); add.textContent="Add Navigation"; add.onclick=function(){draft.push({name:"",keywords:[],path:"/secure/",custom:true});draw();}; var reset=document.createElement("button"); reset.textContent="Reset Defaults"; reset.onclick=function(){draft=smartNavCloneRows(SMART_NAV_DEFAULTS).concat(config.custom.map(function(r){return{name:r.name,keywords:r.keywords.slice(),path:r.path,custom:true};}));status.textContent="Default pages restored. Save to keep this change.";draw();}; var save=document.createElement("button"); save.textContent="Save"; save.onclick=function(){var seen={};try{draft.forEach(function(r){if(!r.name.trim()||!r.keywords.length)throw new Error("Every page needs a name and at least one keyword.");r.path=smartNavPath(r.path);r.keywords.forEach(function(k){var n=smartNavNormalize(k);if(!n||seen[n])throw new Error("Keywords must be unique: "+k);seen[n]=true;});});localStorage.setItem(SMART_NAV_STORAGE,JSON.stringify({defaults:draft.filter(function(r){return !r.custom;}).map(function(r){return{name:r.name.trim(),keywords:r.keywords,path:r.path};}),custom:draft.filter(function(r){return r.custom;}).map(function(r){return{name:r.name.trim(),keywords:r.keywords,path:r.path};})}));popup.close();}catch(err){status.textContent=err.message;status.style.color="#ff9a9a";}}; [add,reset,save].forEach(function(b){b.style.cssText="padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer";actions.appendChild(b);}); panel.appendChild(status);panel.appendChild(actions);draw();var popup=createPopup({title:"Smart Navigation",content:panel,width:"900px",height:"auto"});
     }
-    function initSmartPageLocator() { if(window.__CLINSPARK_SMART_NAV_BOUND)return;window.__CLINSPARK_SMART_NAV_BOUND=true;var overlay=null,input=null,menu=null,matches=[],selected=0;function close(){if(overlay){overlay.remove();overlay=null;input=null;menu=null;}}function render(){matches=smartNavMatches(input.value).slice(0,8);menu.innerHTML="";if(!matches.length){menu.textContent="No matching page";return;}matches.forEach(function(match,i){var option=document.createElement("div");option.textContent=match.item.name+"  ["+match.item.keywords.join(", ")+"]";option.style.cssText="padding:10px 12px;cursor:pointer;color:#eee;background:"+(i===selected?"#4f35a8":"transparent");option.onclick=function(){selected=i;input.focus();render();};menu.appendChild(option);});}function open(){if(overlay){close();return;}overlay=document.createElement("div");overlay.style.cssText="position:fixed;z-index:100005;top:18%;left:50%;transform:translateX(-50%);width:min(620px,calc(100vw - 32px));padding:10px;background:#151515;border:1px solid #7658d4;border-radius:8px;box-shadow:0 12px 40px #000b";input=document.createElement("input");input.type="search";input.placeholder="Navigate to a page...";input.autocomplete="off";input.style.cssText="box-sizing:border-box;width:100%;padding:13px 14px;background:#222;color:#fff;border:1px solid #666;border-radius:5px;font-size:16px";menu=document.createElement("div");menu.style.cssText="margin-top:6px;max-height:310px;overflow:auto";overlay.appendChild(input);overlay.appendChild(menu);document.body.appendChild(overlay);input.oninput=function(){selected=0;render();};input.onkeydown=function(e){if(e.key==="Escape"){e.preventDefault();close();}else if(e.key==="ArrowDown"){e.preventDefault();selected=Math.min(selected+1,Math.max(matches.length-1,0));render();}else if(e.key==="ArrowUp"){e.preventDefault();selected=Math.max(selected-1,0);render();}else if(e.key==="Enter"&&matches[selected]){e.preventDefault();var target=smartNavPath(matches[selected].item.path);close();location.href=location.origin+target;}};render();input.focus();}document.addEventListener("keydown",function(e){if(e.altKey&&(e.key==="s"||e.key==="S")){e.preventDefault();e.stopPropagation();open();}},true); }
+    function initSmartPageLocator() { if(window.__CLINSPARK_SMART_NAV_BOUND)return;window.__CLINSPARK_SMART_NAV_BOUND=true;var overlay=null,input=null,menu=null,matches=[],selected=0;function close(){if(overlay){overlay.remove();overlay=null;input=null;menu=null;}}function render(){matches=smartNavMatches(input.value).slice(0,8);menu.innerHTML="";if(!matches.length){menu.textContent="No matching page";return;}matches.forEach(function(match,i){var option=document.createElement("div");option.textContent=match.item.name+"  ["+match.item.keywords.join(", ")+"]";option.style.cssText="padding:10px 12px;cursor:pointer;color:#eee;background:"+(i===selected?"#4f35a8":"transparent");option.onclick=function(e){e.preventDefault();e.stopPropagation();selected=i;var target=smartNavPath(match.item.path);close();location.href=location.origin+target;};menu.appendChild(option);});}function open(){if(overlay){close();return;}overlay=document.createElement("div");overlay.style.cssText="position:fixed;z-index:100005;top:18%;left:50%;transform:translateX(-50%);width:min(620px,calc(100vw - 32px));padding:10px;background:#151515;border:1px solid #7658d4;border-radius:8px;box-shadow:0 12px 40px #000b";input=document.createElement("input");input.type="search";input.placeholder="Navigate to a page...";input.autocomplete="off";input.style.cssText="box-sizing:border-box;width:100%;padding:13px 14px;background:#222;color:#fff;border:1px solid #666;border-radius:5px;font-size:16px";menu=document.createElement("div");menu.style.cssText="margin-top:6px;max-height:310px;overflow:auto";overlay.appendChild(input);overlay.appendChild(menu);document.body.appendChild(overlay);input.oninput=function(){selected=0;render();};input.onkeydown=function(e){if(e.key==="Escape"){e.preventDefault();close();}else if(e.key==="ArrowDown"){e.preventDefault();selected=Math.min(selected+1,Math.max(matches.length-1,0));render();}else if(e.key==="ArrowUp"){e.preventDefault();selected=Math.max(selected-1,0);render();}else if(e.key==="Enter"&&matches[selected]){e.preventDefault();var target=smartNavPath(matches[selected].item.path);close();location.href=location.origin+target;}};render();input.focus();}document.addEventListener("keydown",function(e){if(e.altKey&&(e.key==="s"||e.key==="S")){e.preventDefault();e.stopPropagation();open();}},true); }
 
     document.addEventListener("click", function (e) { var overlay = document.querySelector('div[style*="z-index:100005"]'); if (overlay && !overlay.contains(e.target)) overlay.remove(); }, true);
     document.addEventListener("keydown", function(e) { if(!e.altKey || (e.key !== "a" && e.key !== "A" && e.code !== "KeyA")) return; e.preventDefault(); e.stopPropagation(); try { if(window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) { window.jQuery("#studyIdChanger").select2("open"); return; } } catch(err) {} var choice=document.querySelector("#s2id_studyIdChanger .select2-choice"); if(choice){choice.dispatchEvent(new MouseEvent("mousedown",{bubbles:true,cancelable:true,view:window}));choice.click();return;} var select=document.getElementById("studyIdChanger"); if(select){select.focus();select.click();} }, true);
@@ -20698,6 +20698,60 @@
                         showCopyToast("Copied " + copiedAllForms.length + " form" + (copiedAllForms.length !== 1 ? "s" : "") + "!", e);
                     };
                 })(seg.value));
+                var deleteAllBtn = document.createElement("button");
+                deleteAllBtn.textContent = "\u2715 Delete All";
+                deleteAllBtn.title = "Remove newly-added forms and mark existing forms in this segment for archive/removal";
+                deleteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #8e44ad;background:#2b1838;color:#d39cff;font-size:11px;font-weight:600;cursor:pointer;";
+                deleteAllBtn.dataset.segmentValue = seg.value;
+                deleteAllBtn.addEventListener("mouseenter", function() {
+                    this.style.background = "#3a204c";
+                    this.style.borderColor = "#b45cff";
+                });
+                deleteAllBtn.addEventListener("mouseleave", function() {
+                    this.style.background = "#2b1838";
+                    this.style.borderColor = "#8e44ad";
+                });
+                deleteAllBtn.addEventListener("click", (function(segVal) {
+                    return function(e) {
+                        e.stopPropagation();
+                        var forms = segmentFormMap[segVal] || [];
+                        if (forms.length === 0) {
+                            log("BPL: delete all attempted but segment " + segVal + " has no forms");
+                            return;
+                        }
+                        var kept = [];
+                        var removedNew = 0;
+                        var markedExisting = 0;
+                        for (var di = 0; di < forms.length; di++) {
+                            var entry = forms[di];
+                            var fk = getFormDataKey(segVal, entry.value, entry.index);
+                            var fd = formDataStore[fk] || getDefaultFormData();
+                            var isExisting = entry.autoPopulated || fd.autoPopulated || false;
+                            if (isExisting) {
+                                if (!entry.archiveRequested) {
+                                    entry.archiveRequested = true;
+                                    markedExisting++;
+                                }
+                                kept.push(entry);
+                            } else {
+                                delete formDataStore[fk];
+                                if (selectedFormKey === fk) {
+                                    selectedFormKey = null;
+                                }
+                                removedNew++;
+                            }
+                        }
+                        segmentFormMap[segVal] = kept;
+                        if (!selectedFormKey) {
+                            renderTimePanel({}, null);
+                        }
+                        saveSession();
+                        renderCenterPanel(centerSearch.value);
+                        runAutoValidation();
+                        log("BPL: delete all in segment " + segVal + " - removed " + removedNew + " new form(s), marked " + markedExisting + " existing form(s)");
+                        showCopyToast("Delete All: removed " + removedNew + ", marked " + markedExisting, e);
+                    };
+                })(seg.value));
                 var pasteAllBtn = document.createElement("button");
                 pasteAllBtn.textContent = "\u{1F4CB} Paste All";
                 pasteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:11px;cursor:pointer;";
@@ -20920,6 +20974,7 @@
                 segHeaderDiv.appendChild(segLabel);
                 segHeaderDiv.appendChild(undoBtn);
                 segHeaderDiv.appendChild(copyAllBtn);
+                segHeaderDiv.appendChild(deleteAllBtn);
                 segHeaderDiv.appendChild(pasteAllBtn);
                 segHeaderDiv.appendChild(sortBtn);
                 segHeaderDiv.appendChild(collapseBtn);
@@ -33250,6 +33305,18 @@
         return t;
     }
 
+    function getRangeTextFromItemMeta(tr) {
+        if (!tr) return "";
+        var meta = tr.querySelector("td.itemMeta");
+        if (!meta) return "";
+        var items = meta.querySelectorAll("li");
+        for (var i = 0; i < items.length; i++) {
+            var text = getText(items[i]);
+            if (/^Range\s*:/i.test(text)) return text.replace(/^Range\s*:/i, "").trim();
+        }
+        return "";
+    }
+
     function parseRangeSpecFromText(t) {
         if (typeof t !== "string") {
             return null;
@@ -33314,11 +33381,14 @@
         if (spec2) {
             return spec2;
         }
+        var metaText = getRangeTextFromItemMeta(tr);
+        var spec3 = parseRangeSpecFromText(metaText);
+        if (spec3) return spec3;
         return null;
     }
 
     function getSubjectGenderFromFormModal() { var link = document.querySelector(".modal-header a[href*='/volunteers/manage/show/']"), text = getText(link); if (!text) return ""; var initials = text.match(/^[^,]+,\s*([MF])(?:\s*,|$)/i); if (initials) return initials[1].toLowerCase() === "f" ? "female" : "male"; var n = text.toLowerCase(); if (/\b(?:female|woman|women|girl)\b/.test(n)) return "female"; if (/\b(?:male|man|men|boy)\b/.test(n)) return "male"; return ""; }
-    function findGenderRangeSpecForRow(tr, gender) { if (!tr || !gender) return null; var td = getItemTextCellFromRow(tr), source = getRangeTextFromItemText(td) + " " + getRangeTextFromHelp(td), parts = source.split(/[,;|]/), specs = [], totalRanges = 0; for (var gi = 0; gi < parts.length; gi++) { var part = parts[gi], parsedAll = parseRangeSpecFromText(part); if (parsedAll) totalRanges++; var male = /(?:\[\s*m(?:ale)?s?\s*\]|\b(?:male|males)\b)/i.test(part), female = /(?:\[\s*f(?:emale)?s?\s*\]|\b(?:female|females)\b)/i.test(part); if ((gender === "male" && !male) || (gender === "female" && !female)) continue; if (parsedAll) specs.push(parsedAll); } return totalRanges >= 2 && specs.length ? specs[0] : null; }
+    function findGenderRangeSpecForRow(tr, gender) { if (!tr || !gender) return null; var td = getItemTextCellFromRow(tr), textSource = getRangeTextFromItemText(td) + " " + getRangeTextFromHelp(td), source = textSource; if (!parseRangeSpecFromText(getRangeTextFromItemText(td)) && !parseRangeSpecFromText(getRangeTextFromHelp(td))) source = getRangeTextFromItemMeta(tr); var parts = source.split(/[,;|]/), specs = [], totalRanges = 0; for (var gi = 0; gi < parts.length; gi++) { var part = parts[gi], parsedAll = parseRangeSpecFromText(part); if (parsedAll) totalRanges++; var male = /(?:\[\s*m(?:ale)?s?\s*\]|\b(?:male|males)\b)/i.test(part), female = /(?:\[\s*f(?:emale)?s?\s*\]|\b(?:female|females)\b)/i.test(part); if ((gender === "male" && !male) || (gender === "female" && !female)) continue; if (parsedAll) specs.push(parsedAll); } return totalRanges >= 2 && specs.length ? specs[0] : null; }
 
     function randomIntInInclusiveRange(a, b) {
         var min = Math.ceil(a);
@@ -34619,7 +34689,8 @@
         }
         var skippedApprovalUrls = approvalState && approvalState.skippedUrls ? approvalState.skippedUrls : [];
         var completedApprovalUrls = approvalState && approvalState.completedUrls ? approvalState.completedUrls : [];
-        log("processLockSamplePathsPage: excluding completed=" + completedApprovalUrls.length + " skipped=" + skippedApprovalUrls.length);
+        var failedApprovalUrls = approvalState && approvalState.failedUrls ? approvalState.failedUrls : [];
+        log("processLockSamplePathsPage: excluding completed=" + completedApprovalUrls.length + " skipped=" + skippedApprovalUrls.length + " failed=" + failedApprovalUrls.length);
 
         var tbody = await waitForSelector("tbody#deviceTbody", 10000);
         if (!tbody) {
@@ -34651,10 +34722,10 @@
                         var href = link.getAttribute("href") + "";
                         if (href.length > 0) {
                             var fullUrl = location.origin + href;
-                            if (skippedApprovalUrls.indexOf(fullUrl) === -1 && completedApprovalUrls.indexOf(fullUrl) === -1) {
+                            if (skippedApprovalUrls.indexOf(fullUrl) === -1 && completedApprovalUrls.indexOf(fullUrl) === -1 && failedApprovalUrls.indexOf(fullUrl) === -1) {
                                 unlockedPaths.push({ url: fullUrl, name: pathName });
                             } else {
-                                log("Skipping previously unavailable approval path: " + pathName);
+                                log("Skipping previously handled approval path: " + pathName);
                             }
                         }
                     }
@@ -34668,7 +34739,7 @@
 
         var progressState = approvalState && approvalState.progress ? approvalState.progress : { total: 0, success: 0, skipped: 0, failed: 0, current: "" };
         if (!progressState.total) {
-            progressState.total = unlockedPaths.length + completedApprovalUrls.length + skippedApprovalUrls.length;
+            progressState.total = unlockedPaths.length + completedApprovalUrls.length + skippedApprovalUrls.length + failedApprovalUrls.length;
         }
         progressState.current = "";
         approvalState = approvalState || {};
@@ -41858,7 +41929,20 @@
 
     function samplePathNavigate(url) {
         try { localStorage.setItem(STORAGE_SAMPLE_PATH_NAVIGATION, "1"); } catch (e) {}
-        location.href = url;
+        // Replace the approval route so a delayed ClinSpark redirect cannot
+        // return the browser to the already-completed approval page.
+        try { location.replace(url); } catch (e) { location.href = url; }
+    }
+
+    function samplePathResumeListFromApprovalRoute() {
+        var state = samplePathApprovalLoad();
+        if (!state) return false;
+        if (state.phase === "return-list" || state.phase === "list") {
+            log("Sample Path workflow: approval already finished; resuming the sample path list");
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return true;
+        }
+        return false;
     }
 
     function samplePathApprovalUsername(rootDoc) {
@@ -42043,7 +42127,54 @@
     async function processSamplePathApprovalPage() {
         if (samplePathStopOnReload()) return;
         var state = samplePathApprovalLoad();
-        if (!state || state.phase !== "approval") return;
+        if (state && (state.phase === "return-list" || state.phase === "list")) {
+            log("Sample Path workflow: approval route reached after completion; returning to list");
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return;
+        }
+        if (state && state.phase === "approval-processing") {
+            // Clicking the electronic-signature OK button can reload the
+            // approval route before the original page watcher saves its
+            // return-list state. Recover from that reload without clicking
+            // Approve a second time.
+            log("Sample Path workflow: recovering approval-processing state for " + state.name);
+            var recoveryStarted = Date.now();
+            var recoveryApproveButton = null;
+            var recoveryInvalidWarning = null;
+            while (Date.now() - recoveryStarted < 8000) {
+                recoveryInvalidWarning = document.querySelector(".note.note-danger");
+                recoveryApproveButton = document.querySelector('button[onclick*="initiateApproval"], button.btn.green');
+                if (recoveryInvalidWarning || recoveryApproveButton) break;
+                await sleep(250);
+            }
+            var recoveryInvalidText = recoveryInvalidWarning ? (recoveryInvalidWarning.textContent || "").toLowerCase() : "";
+            state.progress = state.progress || { total: 0, success: 0, skipped: 0, failed: 0, current: "" };
+            if (recoveryInvalidText.indexOf("sample path not valid") !== -1) {
+                log("Sample Path workflow: approval-processing recovery found invalid path; skipping " + state.name);
+                state.skippedUrls = state.skippedUrls || [];
+                if (state.skippedUrls.indexOf(state.pathUrl) === -1) state.skippedUrls.push(state.pathUrl);
+                state.progress.skipped = (state.progress.skipped || 0) + 1;
+            } else if (!recoveryApproveButton) {
+                log("Sample Path workflow: approval-processing recovery confirmed approval for " + state.name);
+                state.completedUrls = state.completedUrls || [];
+                if (state.completedUrls.indexOf(state.pathUrl) === -1) state.completedUrls.push(state.pathUrl);
+                state.progress.success = (state.progress.success || 0) + 1;
+            } else {
+                log("Sample Path workflow: approval-processing recovery found Approve still available; recording failure without retrying " + state.name);
+                state.failedUrls = state.failedUrls || [];
+                if (state.failedUrls.indexOf(state.pathUrl) === -1) state.failedUrls.push(state.pathUrl);
+                state.progress.failed = (state.progress.failed || 0) + 1;
+            }
+            state.progress.current = "";
+            state.phase = "return-list";
+            samplePathApprovalSave(state);
+            samplePathNavigate(location.origin + "/secure/samples/configure/paths");
+            return;
+        }
+        if (!state || state.phase !== "approval") {
+            log("Sample Path workflow: approval page ignored because phase is " + (state && state.phase ? state.phase : "missing"));
+            return;
+        }
         samplePathInstallRefreshGuard();
         // Persist the action lock before any click events. A duplicate userscript
         // initialization or refresh must never click Approve again.
@@ -46465,6 +46596,7 @@
         }
         if (earlySamplePath.indexOf("/secure/samples/configure/paths/approve/") === 0) {
             log("Sample Path workflow: early approval-page dispatch for " + location.pathname);
+            if (samplePathResumeListFromApprovalRoute()) return;
             processSamplePathApprovalPage();
             return;
         }

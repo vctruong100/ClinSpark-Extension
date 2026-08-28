@@ -18468,6 +18468,60 @@
                         showCopyToast("Copied " + copiedAllForms.length + " form" + (copiedAllForms.length !== 1 ? "s" : "") + "!", e);
                     };
                 })(seg.value));
+                var deleteAllBtn = document.createElement("button");
+                deleteAllBtn.textContent = "\u2715 Delete All";
+                deleteAllBtn.title = "Remove newly-added forms and mark existing forms in this segment for archive/removal";
+                deleteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #8e44ad;background:#2b1838;color:#d39cff;font-size:11px;font-weight:600;cursor:pointer;";
+                deleteAllBtn.dataset.segmentValue = seg.value;
+                deleteAllBtn.addEventListener("mouseenter", function() {
+                    this.style.background = "#3a204c";
+                    this.style.borderColor = "#b45cff";
+                });
+                deleteAllBtn.addEventListener("mouseleave", function() {
+                    this.style.background = "#2b1838";
+                    this.style.borderColor = "#8e44ad";
+                });
+                deleteAllBtn.addEventListener("click", (function(segVal) {
+                    return function(e) {
+                        e.stopPropagation();
+                        var forms = segmentFormMap[segVal] || [];
+                        if (forms.length === 0) {
+                            log("BPL: delete all attempted but segment " + segVal + " has no forms");
+                            return;
+                        }
+                        var kept = [];
+                        var removedNew = 0;
+                        var markedExisting = 0;
+                        for (var di = 0; di < forms.length; di++) {
+                            var entry = forms[di];
+                            var fk = getFormDataKey(segVal, entry.value, entry.index);
+                            var fd = formDataStore[fk] || getDefaultFormData();
+                            var isExisting = entry.autoPopulated || fd.autoPopulated || false;
+                            if (isExisting) {
+                                if (!entry.archiveRequested) {
+                                    entry.archiveRequested = true;
+                                    markedExisting++;
+                                }
+                                kept.push(entry);
+                            } else {
+                                delete formDataStore[fk];
+                                if (selectedFormKey === fk) {
+                                    selectedFormKey = null;
+                                }
+                                removedNew++;
+                            }
+                        }
+                        segmentFormMap[segVal] = kept;
+                        if (!selectedFormKey) {
+                            renderTimePanel({}, null);
+                        }
+                        saveSession();
+                        renderCenterPanel(centerSearch.value);
+                        runAutoValidation();
+                        log("BPL: delete all in segment " + segVal + " - removed " + removedNew + " new form(s), marked " + markedExisting + " existing form(s)");
+                        showCopyToast("Delete All: removed " + removedNew + ", marked " + markedExisting, e);
+                    };
+                })(seg.value));
                 var pasteAllBtn = document.createElement("button");
                 pasteAllBtn.textContent = "\u{1F4CB} Paste All";
                 pasteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:11px;cursor:pointer;";
@@ -18678,6 +18732,7 @@
                 segHeaderDiv.appendChild(segLabel);
                 segHeaderDiv.appendChild(undoBtn);
                 segHeaderDiv.appendChild(copyAllBtn);
+                segHeaderDiv.appendChild(deleteAllBtn);
                 segHeaderDiv.appendChild(pasteAllBtn);
                 segHeaderDiv.appendChild(sortBtn);
                 segHeaderDiv.appendChild(collapseBtn);
@@ -30805,6 +30860,18 @@
         return t;
     }
 
+    function getRangeTextFromItemMeta(tr) {
+        if (!tr) return "";
+        var meta = tr.querySelector("td.itemMeta");
+        if (!meta) return "";
+        var items = meta.querySelectorAll("li");
+        for (var i = 0; i < items.length; i++) {
+            var text = getText(items[i]);
+            if (/^Range\s*:/i.test(text)) return text.replace(/^Range\s*:/i, "").trim();
+        }
+        return "";
+    }
+
     function parseRangeSpecFromText(t) {
         if (typeof t !== "string") {
             return null;
@@ -30869,6 +30936,9 @@
         if (spec2) {
             return spec2;
         }
+        var metaText = getRangeTextFromItemMeta(tr);
+        var spec3 = parseRangeSpecFromText(metaText);
+        if (spec3) return spec3;
         return null;
     }
 
@@ -30887,7 +30957,12 @@
     function findGenderRangeSpecForRow(tr, gender) {
         if (!tr || !gender) return null;
         var td = getItemTextCellFromRow(tr);
-        var source = getRangeTextFromItemText(td) + " " + getRangeTextFromHelp(td);
+        var itemText = getRangeTextFromItemText(td);
+        var helpText = getRangeTextFromHelp(td);
+        var source = itemText + " " + helpText;
+        if (!parseRangeSpecFromText(itemText) && !parseRangeSpecFromText(helpText)) {
+            source = getRangeTextFromItemMeta(tr);
+        }
         var parts = source.split(/[,;|]/);
         var specs = [];
         var totalRanges = 0;

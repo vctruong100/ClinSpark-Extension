@@ -9769,6 +9769,60 @@
                         showCopyToast("Copied " + copiedAllForms.length + " form" + (copiedAllForms.length !== 1 ? "s" : "") + "!", e);
                     };
                 })(seg.value));
+                var deleteAllBtn = document.createElement("button");
+                deleteAllBtn.textContent = "\u2715 Delete All";
+                deleteAllBtn.title = "Remove newly-added forms and mark existing forms in this segment for archive/removal";
+                deleteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #8e44ad;background:#2b1838;color:#d39cff;font-size:11px;font-weight:600;cursor:pointer;";
+                deleteAllBtn.dataset.segmentValue = seg.value;
+                deleteAllBtn.addEventListener("mouseenter", function() {
+                    this.style.background = "#3a204c";
+                    this.style.borderColor = "#b45cff";
+                });
+                deleteAllBtn.addEventListener("mouseleave", function() {
+                    this.style.background = "#2b1838";
+                    this.style.borderColor = "#8e44ad";
+                });
+                deleteAllBtn.addEventListener("click", (function(segVal) {
+                    return function(e) {
+                        e.stopPropagation();
+                        var forms = segmentFormMap[segVal] || [];
+                        if (forms.length === 0) {
+                            log("BPL: delete all attempted but segment " + segVal + " has no forms");
+                            return;
+                        }
+                        var kept = [];
+                        var removedNew = 0;
+                        var markedExisting = 0;
+                        for (var di = 0; di < forms.length; di++) {
+                            var entry = forms[di];
+                            var fk = getFormDataKey(segVal, entry.value, entry.index);
+                            var fd = formDataStore[fk] || getDefaultFormData();
+                            var isExisting = entry.autoPopulated || fd.autoPopulated || false;
+                            if (isExisting) {
+                                if (!entry.archiveRequested) {
+                                    entry.archiveRequested = true;
+                                    markedExisting++;
+                                }
+                                kept.push(entry);
+                            } else {
+                                delete formDataStore[fk];
+                                if (selectedFormKey === fk) {
+                                    selectedFormKey = null;
+                                }
+                                removedNew++;
+                            }
+                        }
+                        segmentFormMap[segVal] = kept;
+                        if (!selectedFormKey) {
+                            renderTimePanel({}, null);
+                        }
+                        saveSession();
+                        renderCenterPanel(centerSearch.value);
+                        runAutoValidation();
+                        log("BPL: delete all in segment " + segVal + " - removed " + removedNew + " new form(s), marked " + markedExisting + " existing form(s)");
+                        showCopyToast("Delete All: removed " + removedNew + ", marked " + markedExisting, e);
+                    };
+                })(seg.value));
                 var pasteAllBtn = document.createElement("button");
                 pasteAllBtn.textContent = "\u{1F4CB} Paste All";
                 pasteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:11px;cursor:pointer;";
@@ -9991,6 +10045,7 @@
                 segHeaderDiv.appendChild(segLabel);
                 segHeaderDiv.appendChild(undoBtn);
                 segHeaderDiv.appendChild(copyAllBtn);
+                segHeaderDiv.appendChild(deleteAllBtn);
                 segHeaderDiv.appendChild(pasteAllBtn);
                 segHeaderDiv.appendChild(sortBtn);
                 segHeaderDiv.appendChild(collapseBtn);
@@ -14079,7 +14134,8 @@
 
     // Check if on correct page for Copy Forms
     function isOnCopyFormsPage() {
-        return location.href.indexOf("https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/") === 0;
+        return location.hostname === "cenexel.clinspark.com" &&
+            /^\/secure\/crfdesign\/activityplans\/show\/\d+/.test(location.pathname);
     }
 
     // Rebuild scheduled activity with target study event
@@ -14710,7 +14766,7 @@
         if (!isOnCopyFormsPage()) {
             createPopup({
                 title: "Copy Forms - Error",
-                content: '<div style="text-align:center;padding:20px;"><p style="color:#ff6b6b;font-size:16px;margin-bottom:12px;">⚠️ Wrong Page</p><p>Navigate to the Activity Plans Show page first.</p><p style="margin-top:12px;font-size:12px;color:#ffffffff;">Required URL: https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/{id}</p></div>',
+                content: '<div style="text-align:center;padding:20px;"><p style="color:#ff6b6b;font-size:16px;margin-bottom:12px;">⚠️ Wrong Page</p><p>Navigate to the Activity Plans Show page first.</p><p style="margin-top:12px;font-size:12px;color:#ffffffff;">Required URL: https://cenexel.clinspark.com/secure/crfdesign/activityplans/show/{id}</p></div>',
                 width: "450px",
                 height: "auto"
             });
@@ -19531,6 +19587,39 @@
         return keywords;
     }
 
+    function parseDeviationClickElement(el, label) {
+        if (!el) return false;
+        var href = "";
+        try {
+            href = (el.getAttribute && el.getAttribute("href") || "").trim();
+        } catch (e) {}
+
+        if (/^javascript\s*:/i.test(href)) {
+            var preventJavascriptNavigation = function(evt) {
+                evt.preventDefault();
+            };
+            try {
+                el.addEventListener("click", preventJavascriptNavigation, true);
+                el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                log("[ParseDeviation] Clicked " + (label || "element") + " without running javascript: href");
+                return true;
+            } catch (err) {
+                log("[ParseDeviation] Safe click failed for " + (label || "element") + ": " + err);
+                return false;
+            } finally {
+                try { el.removeEventListener("click", preventJavascriptNavigation, true); } catch (ignore) {}
+            }
+        }
+
+        try {
+            el.click();
+            return true;
+        } catch (err2) {
+            log("[ParseDeviation] Click failed for " + (label || "element") + ": " + err2);
+            return false;
+        }
+    }
+
     async function parseDeviationProcessPage(popup, statusText, progressText, spinner, keywords) {
         log("[ParseDeviation] Processing data list page");
 
@@ -19560,7 +19649,7 @@
             var formSelect2Choices = formSelect2Container.querySelectorAll(".select2-search-choice");
             for (var fci = 0; fci < formSelect2Choices.length; fci++) {
                 var formCloseBtn = formSelect2Choices[fci].querySelector(".select2-search-choice-close");
-                if (formCloseBtn) formCloseBtn.click();
+                if (formCloseBtn) parseDeviationClickElement(formCloseBtn, "form select2 clear");
             }
         }
 
@@ -19626,7 +19715,7 @@
             var select2Choices = select2Container.querySelectorAll(".select2-search-choice");
             for (var sci = 0; sci < select2Choices.length; sci++) {
                 var closeBtn = select2Choices[sci].querySelector(".select2-search-choice-close");
-                if (closeBtn) closeBtn.click();
+                if (closeBtn) parseDeviationClickElement(closeBtn, "subject select2 clear");
             }
         }
 
@@ -19720,7 +19809,14 @@
 
             var nextPage = parseDeviationGetNextPage();
             if (nextPage) {
-                nextPage.click();
+                var nextHref = "";
+                try { nextHref = nextPage.getAttribute("href") || ""; } catch (e) {}
+                log("[ParseDeviation] Moving to next page using pager href='" + nextHref + "'");
+                if (!parseDeviationClickElement(nextPage, "next page")) {
+                    log("[ParseDeviation] Could not click next page safely; stopping pagination");
+                    hasMorePages = false;
+                    continue;
+                }
                 await sleep(1500);
                 pageNum++;
             } else {
@@ -20122,6 +20218,7 @@
         var colO = parseDeviationSanitizeValue(item.category);
         var colP = "";
         var colQ = "";
+        var colR = "";
         var colS = "";
         var colT = "";
         var colU = "";
@@ -20135,6 +20232,55 @@
             colQ + TAB + colR + TAB + colS + TAB + colT + TAB + colU + TAB + colV + TAB + colW;
 
         return row;
+    }
+
+    function parseDeviationCopyToClipboard(text) {
+        function fallbackCopy() {
+            var ta = document.createElement("textarea");
+            ta.value = text || "";
+            ta.setAttribute("readonly", "readonly");
+            ta.style.position = "fixed";
+            ta.style.top = "0";
+            ta.style.left = "-9999px";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            ta.setSelectionRange(0, ta.value.length);
+
+            var ok = false;
+            try {
+                ok = document.execCommand("copy");
+            } catch (err) {
+                log("[ParseDeviation] Clipboard fallback failed: " + err);
+            }
+
+            document.body.removeChild(ta);
+            return ok;
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text || "").then(function() {
+                log("[ParseDeviation] Copied to clipboard");
+                return true;
+            }).catch(function(err) {
+                log("[ParseDeviation] Clipboard API failed, trying fallback: " + err);
+                var copied = fallbackCopy();
+                if (!copied) throw err;
+                log("[ParseDeviation] Copied to clipboard (fallback)");
+                return true;
+            });
+        }
+
+        return new Promise(function(resolve, reject) {
+            var copied = fallbackCopy();
+            if (copied) {
+                log("[ParseDeviation] Copied to clipboard (fallback)");
+                resolve(true);
+            } else {
+                reject(new Error("Clipboard copy was rejected"));
+            }
+        });
     }
 
     function parseDeviationShowResults(popup, results) {
@@ -20180,9 +20326,13 @@
                 allRows.push(parseDeviationFormatRow(results[i]));
             }
             var allText = allRows.join("\n");
-            navigator.clipboard.writeText(allText).then(function() {
+            parseDeviationCopyToClipboard(allText).then(function() {
                 copyAllBtn.textContent = "Copied!";
                 setTimeout(function() { copyAllBtn.textContent = "Copy All"; }, 1500);
+            }).catch(function(err) {
+                log("[ParseDeviation] Copy All failed: " + err);
+                copyAllBtn.textContent = "Copy Failed";
+                setTimeout(function() { copyAllBtn.textContent = "Copy All"; }, 1800);
             });
         });
         headerDiv.appendChild(copyAllBtn);
@@ -20235,9 +20385,13 @@
                 (function(btn, itemData) {
                     btn.addEventListener("click", function() {
                         var formattedRow = parseDeviationFormatRow(itemData);
-                        navigator.clipboard.writeText(formattedRow).then(function() {
+                        parseDeviationCopyToClipboard(formattedRow).then(function() {
                             btn.textContent = "Copied!";
                             setTimeout(function() { btn.textContent = "Copy"; }, 1500);
+                        }).catch(function(err) {
+                            log("[ParseDeviation] Copy failed: " + err);
+                            btn.textContent = "Copy Failed";
+                            setTimeout(function() { btn.textContent = "Copy"; }, 1800);
                         });
                     });
                 })(copyBtn, item);
@@ -20804,7 +20958,7 @@
         if (window.__CLINSPARK_SMART_NAV_BOUND) return; window.__CLINSPARK_SMART_NAV_BOUND = true;
         var overlay = null, input = null, menu = null, matches = [], selected = 0;
         function close() { if (overlay) { overlay.remove(); overlay = null; input = null; menu = null; } }
-        function render() { matches = smartNavMatches(input.value).slice(0, 8); menu.innerHTML = ""; if (!matches.length) { menu.textContent = "No matching page"; return; } matches.forEach(function (match, i) { var option = document.createElement("div"); option.textContent = match.item.name + "  [" + match.item.keywords.join(", ") + "]"; option.style.cssText = "padding:10px 12px;cursor:pointer;color:#eee;background:" + (i === selected ? "#4f35a8" : "transparent"); option.onclick = function () { selected = i; input.focus(); render(); }; menu.appendChild(option); }); }
+        function render() { matches = smartNavMatches(input.value).slice(0, 8); menu.innerHTML = ""; if (!matches.length) { menu.textContent = "No matching page"; return; } matches.forEach(function (match, i) { var option = document.createElement("div"); option.textContent = match.item.name + "  [" + match.item.keywords.join(", ") + "]"; option.style.cssText = "padding:10px 12px;cursor:pointer;color:#eee;background:" + (i === selected ? "#4f35a8" : "transparent"); option.onclick = function (e) { e.preventDefault(); e.stopPropagation(); selected = i; var target = smartNavPath(match.item.path); close(); location.href = location.origin + target; }; menu.appendChild(option); }); }
         function open() { if (overlay) { close(); return; } overlay = document.createElement("div"); overlay.style.cssText = "position:fixed;z-index:100005;top:18%;left:50%;transform:translateX(-50%);width:min(620px,calc(100vw - 32px));padding:10px;background:#151515;border:1px solid #7658d4;border-radius:8px;box-shadow:0 12px 40px #000b"; input = document.createElement("input"); input.type = "search"; input.placeholder = "Navigate to a page..."; input.autocomplete = "off"; input.style.cssText = "box-sizing:border-box;width:100%;padding:13px 14px;background:#222;color:#fff;border:1px solid #666;border-radius:5px;font-size:16px"; menu = document.createElement("div"); menu.style.cssText = "margin-top:6px;max-height:310px;overflow:auto"; overlay.appendChild(input); overlay.appendChild(menu); document.body.appendChild(overlay); input.oninput = function () { selected = 0; render(); }; input.onkeydown = function (e) { if (e.key === "Escape") { e.preventDefault(); close(); } else if (e.key === "ArrowDown") { e.preventDefault(); selected = Math.min(selected + 1, Math.max(matches.length - 1, 0)); render(); } else if (e.key === "ArrowUp") { e.preventDefault(); selected = Math.max(selected - 1, 0); render(); } else if (e.key === "Enter" && matches[selected]) { e.preventDefault(); var target = smartNavPath(matches[selected].item.path); close(); location.href = location.origin + target; } }; render(); input.focus(); }
         document.addEventListener("keydown", function (e) { if (e.altKey && (e.key === "s" || e.key === "S")) { e.preventDefault(); e.stopPropagation(); open(); } }, true);
         document.addEventListener("keydown", function (e) {
