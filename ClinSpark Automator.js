@@ -12675,6 +12675,2425 @@
 
 
     //==========================
+    // COPY A-PLAN FEATURE
+    //==========================
+    // Dedicated workflow for copying scheduled activity plan contents between
+    // Activity Plans. This intentionally keeps its own GUI, state, and clipboard.
+    //==========================
+
+    function CopyAPlanFunctions() {}
+
+    var CAP_ROOT_ID = "copy-aplan-root";
+    var CAP_STYLE_ID = "copy-aplan-style";
+    var STORAGE_CAP_WORKFLOW = "activityPlanState.copyAPlan.workflow";
+    var CAP_SELECTION_POPUP_REF = null;
+    var CAP_PROGRESS_POPUP_REF = null;
+    var CAP_CANCELLED = false;
+    var CAP_BUSY = false;
+
+    function capLog(msg) {
+        log("Copy A-Plan: " + msg);
+    }
+
+    function capClone(obj) {
+        try {
+            return JSON.parse(JSON.stringify(obj || null));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function capNormalizeKey(text) {
+        return normalizeSAText(String(text || "")).toLowerCase();
+    }
+
+    function capCompactKey(text) {
+        return capNormalizeKey(text).replace(/[^a-z0-9]+/g, "");
+    }
+
+    function capGetEnvironment() {
+        if (location.hostname === "cenexel.clinspark.com") {
+            return {
+                host: "cenexel.clinspark.com",
+                origin: "https://cenexel.clinspark.com",
+                listUrl: "https://cenexel.clinspark.com/secure/crfdesign/activityplans/list",
+                showPrefix: "https://cenexel.clinspark.com/secure/crfdesign/activityplans/show/"
+            };
+        }
+        if (location.hostname === "cenexeltest.clinspark.com") {
+            return {
+                host: "cenexeltest.clinspark.com",
+                origin: "https://cenexeltest.clinspark.com",
+                listUrl: "https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/list",
+                showPrefix: "https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/"
+            };
+        }
+        return null;
+    }
+
+    function capIsActivityPlanListPage() {
+        var env = capGetEnvironment();
+        if (!env) return false;
+        var path = String(location.pathname || "").replace(/\/+$/, "");
+        return path === "/secure/crfdesign/activityplans/list";
+    }
+
+    function capIsExpectedPlanPage(plan) {
+        if (!plan || !plan.id) return false;
+        var path = String(location.pathname || "").replace(/\/+$/, "");
+        return path === "/secure/crfdesign/activityplans/show/" + String(plan.id);
+    }
+
+    function capShowWrongPageWarning() {
+        var env = capGetEnvironment();
+        var targetUrl = env ? env.listUrl : "https://cenexel.clinspark.com/secure/crfdesign/activityplans/list";
+        var box = document.createElement("div");
+        box.style.cssText = "padding:20px;text-align:center;color:#fff;";
+        var title = document.createElement("div");
+        title.textContent = "Copy A-Plan must start from the Activity Plans list.";
+        title.style.cssText = "color:#ff8a8a;font-size:16px;font-weight:700;margin-bottom:10px;";
+        var current = document.createElement("div");
+        current.textContent = "Current page: " + location.href;
+        current.style.cssText = "font-size:12px;color:#aaa;line-height:1.4;margin-bottom:8px;word-break:break-word;";
+        var required = document.createElement("div");
+        required.textContent = "Required page: " + targetUrl;
+        required.style.cssText = "font-size:12px;color:#aaa;line-height:1.4;margin-bottom:18px;word-break:break-word;";
+        var actions = document.createElement("div");
+        actions.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;";
+        var closeBtn = capMakeButton("Close", "#444");
+        var goBtn = capMakeButton("Go to Activity Plans", "#28a745");
+        box.appendChild(title);
+        box.appendChild(current);
+        box.appendChild(required);
+        actions.appendChild(closeBtn);
+        actions.appendChild(goBtn);
+        box.appendChild(actions);
+        var popup = createPopup({ title: "Copy A-Plan - Page Warning", content: box, width: "470px", height: "auto" });
+        closeBtn.addEventListener("click", function() { popup.close(); });
+        goBtn.addEventListener("click", function() {
+            popup.close();
+            window.location.href = targetUrl;
+        });
+    }
+
+    function capSaveWorkflow(state) {
+        try {
+            sessionStorage.setItem(STORAGE_CAP_WORKFLOW, JSON.stringify(state || {}));
+        } catch (e) {
+            capLog("could not save workflow state: " + String(e));
+        }
+    }
+
+    function capLoadWorkflow() {
+        try {
+            var raw = sessionStorage.getItem(STORAGE_CAP_WORKFLOW);
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch (e) {
+            capLog("could not load workflow state: " + String(e));
+            return null;
+        }
+    }
+
+    function capClearWorkflow() {
+        try {
+            sessionStorage.removeItem(STORAGE_CAP_WORKFLOW);
+        } catch (e) {}
+    }
+
+    function capMakeButton(text, bg) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = text;
+        btn.style.cssText = "border:none;border-radius:6px;background:" + (bg || "#5b43c7") + ";color:#fff;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;";
+        btn.addEventListener("mouseenter", function() { btn.style.filter = "brightness(1.12)"; });
+        btn.addEventListener("mouseleave", function() { btn.style.filter = "none"; });
+        return btn;
+    }
+
+    function capMakeIconButton(iconClass, title, label) {
+        var btn = capMakeButton(label || "", "#30333b");
+        btn.title = title || "";
+        btn.setAttribute("aria-label", title || label || "button");
+        btn.style.padding = label ? "6px 9px" : "6px";
+        btn.style.minWidth = label ? "auto" : "28px";
+        btn.style.height = "28px";
+        btn.style.display = "inline-flex";
+        btn.style.alignItems = "center";
+        btn.style.justifyContent = "center";
+        btn.style.gap = "5px";
+        if (iconClass) {
+            var i = document.createElement("i");
+            i.className = iconClass;
+            btn.insertBefore(i, btn.firstChild);
+        }
+        return btn;
+    }
+
+    function capShowError(titleText, lines, keepState) {
+        var box = document.createElement("div");
+        box.style.cssText = "padding:18px;color:#fff;display:flex;flex-direction:column;gap:12px;";
+        var title = document.createElement("div");
+        title.textContent = titleText || "Copy A-Plan error";
+        title.style.cssText = "color:#ff8a8a;font-size:16px;font-weight:700;";
+        box.appendChild(title);
+        var list = document.createElement("div");
+        list.style.cssText = "display:flex;flex-direction:column;gap:6px;font-size:13px;line-height:1.45;";
+        var arr = Array.isArray(lines) ? lines : [String(lines || "An unknown error occurred.")];
+        for (var i = 0; i < arr.length; i++) {
+            var row = document.createElement("div");
+            row.textContent = arr[i];
+            list.appendChild(row);
+        }
+        box.appendChild(list);
+        var actions = document.createElement("div");
+        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        if (keepState) {
+            var retry = capMakeButton("Retry", "#5b43c7");
+            retry.addEventListener("click", function() {
+                popup.close();
+                CAP_BUSY = false;
+                capResumeWorkflowIfNeeded();
+            });
+            actions.appendChild(retry);
+        }
+        var startOver = capMakeButton("Start Over", "#c0392b");
+        startOver.addEventListener("click", function() {
+            capClearWorkflow();
+            CAP_CANCELLED = true;
+            popup.close();
+        });
+        actions.appendChild(startOver);
+        box.appendChild(actions);
+        var popup = createPopup({ title: "Copy A-Plan", content: box, width: "560px", height: "auto" });
+    }
+
+    function capSetOverlayMessage(overlay, text) {
+        if (overlay && overlay.setMessage) overlay.setMessage(text);
+    }
+
+    function capInjectStyles() {
+        if (document.getElementById(CAP_STYLE_ID)) return;
+        var style = document.createElement("style");
+        style.id = CAP_STYLE_ID;
+        style.textContent = [
+            "#" + CAP_ROOT_ID + " { position:fixed; inset:0; z-index:999997; background:#101217; color:#f5f7fb; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; display:flex; flex-direction:column; box-sizing:border-box; }",
+            "#" + CAP_ROOT_ID + " * { box-sizing:border-box; }",
+            "#" + CAP_ROOT_ID + " .cap-header { height:54px; flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid #2e3440; background:#171b23; }",
+            "#" + CAP_ROOT_ID + " .cap-title { display:flex; flex-direction:column; min-width:0; }",
+            "#" + CAP_ROOT_ID + " .cap-title strong { font-size:16px; }",
+            "#" + CAP_ROOT_ID + " .cap-title span { color:#aab2c0; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70vw; }",
+            "#" + CAP_ROOT_ID + " .cap-main { min-height:0; flex:1 1 auto; display:grid; grid-template-columns:minmax(170px, 0.7fr) minmax(260px, 1.25fr) minmax(320px, 1.45fr); grid-template-rows:minmax(0, 1fr) minmax(190px, 0.45fr); gap:10px; padding:10px; }",
+            "#" + CAP_ROOT_ID + " .cap-panel { min-height:0; min-width:0; border:1px solid #303847; border-radius:8px; background:#151922; display:flex; flex-direction:column; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 10px; border-bottom:1px solid #303847; background:#1c2230; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-title { font-size:12px; font-weight:800; letter-spacing:0; text-transform:uppercase; color:#dce4f2; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-body { min-height:0; flex:1 1 auto; overflow:auto; padding:8px; }",
+            "#" + CAP_ROOT_ID + " .cap-study-panel { grid-row:1 / span 2; }",
+            "#" + CAP_ROOT_ID + " .cap-config-panel { grid-column:2 / span 2; }",
+            "#" + CAP_ROOT_ID + " .cap-segment { border:1px solid #2e3440; border-radius:7px; background:#11151d; margin-bottom:8px; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-segment-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 8px; background:#202737; border-bottom:1px solid #2e3440; }",
+            "#" + CAP_ROOT_ID + " .cap-segment-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:800; font-size:12px; }",
+            "#" + CAP_ROOT_ID + " .cap-segment-actions { display:inline-flex; align-items:center; gap:5px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(126px,0.65fr) auto; align-items:center; gap:7px; padding:7px 8px; border-top:1px solid rgba(255,255,255,0.06); min-height:42px; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row:first-child { border-top:none; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row.cap-selected { outline:1px solid #7b8cff; background:#1c2240; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row.cap-deleted { opacity:.55; text-decoration:line-through; }",
+            "#" + CAP_ROOT_ID + " .cap-form-main { min-width:0; display:flex; flex-direction:column; gap:3px; }",
+            "#" + CAP_ROOT_ID + " .cap-form-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-form-meta { font-size:11px; color:#aeb7c7; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-row-actions { display:inline-flex; gap:4px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }",
+            "#" + CAP_ROOT_ID + " select, #" + CAP_ROOT_ID + " input[type='text'], #" + CAP_ROOT_ID + " input[type='number'] { width:100%; min-width:0; background:#0e1118; color:#f5f7fb; border:1px solid #343d4f; border-radius:5px; padding:6px 7px; font-size:12px; }",
+            "#" + CAP_ROOT_ID + " .cap-event-drop { display:flex; align-items:center; gap:4px; min-width:0; }",
+            "#" + CAP_ROOT_ID + " .cap-empty { color:#8d97a8; font-size:12px; padding:12px; text-align:center; }",
+            "#" + CAP_ROOT_ID + " .cap-chip { display:inline-flex; align-items:center; gap:4px; border:1px solid #3a4355; border-radius:999px; padding:2px 7px; font-size:11px; color:#cbd5e1; background:#1b2130; }",
+            "#" + CAP_ROOT_ID + " .cap-warning { color:#ffcb6b; font-size:12px; line-height:1.4; }",
+            "#" + CAP_ROOT_ID + " .cap-error { color:#ff8a8a; font-size:12px; line-height:1.4; }",
+            "#" + CAP_ROOT_ID + " .cap-footer { flex:0 0 auto; display:flex; justify-content:space-between; align-items:center; gap:10px; padding:9px 12px; border-top:1px solid #2e3440; background:#171b23; }",
+            "#" + CAP_ROOT_ID + " .cap-footer-left { min-width:0; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }",
+            "#" + CAP_ROOT_ID + " .cap-footer-status { color:#aeb7c7; font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-config-grid { display:grid; grid-template-columns:repeat(6, minmax(70px, 1fr)); gap:8px; align-items:end; }",
+            "#" + CAP_ROOT_ID + " .cap-field { display:flex; flex-direction:column; gap:4px; min-width:0; }",
+            "#" + CAP_ROOT_ID + " .cap-field label { color:#aeb7c7; font-size:11px; font-weight:700; }",
+            "#" + CAP_ROOT_ID + " .cap-checks { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }",
+            "#" + CAP_ROOT_ID + " .cap-checks label { display:inline-flex; gap:5px; align-items:center; font-size:12px; color:#d7deea; }",
+            "@media (max-width: 1100px) { #" + CAP_ROOT_ID + " .cap-main { grid-template-columns:1fr; grid-template-rows:auto auto auto auto; overflow:auto; } #" + CAP_ROOT_ID + " .cap-study-panel, #" + CAP_ROOT_ID + " .cap-config-panel { grid-column:auto; grid-row:auto; } #" + CAP_ROOT_ID + " .cap-panel { min-height:260px; } #" + CAP_ROOT_ID + " .cap-config-grid { grid-template-columns:repeat(2, minmax(90px, 1fr)); } }"
+        ].join("\n");
+        document.head.appendChild(style);
+    }
+
+    function capFindActivityPlanTable() {
+        var tables = document.querySelectorAll("table");
+        var best = null;
+        var bestScore = 0;
+        for (var i = 0; i < tables.length; i++) {
+            var ths = tables[i].querySelectorAll("thead th");
+            if (!ths || ths.length === 0) continue;
+            var keys = {};
+            for (var h = 0; h < ths.length; h++) {
+                keys[capCompactKey(ths[h].textContent)] = true;
+            }
+            var score = 0;
+            if (keys.name) score += 3;
+            if (keys.cohorttype) score += 2;
+            if (keys.timed) score += 1;
+            if (keys.enforcedatacollectionorder) score += 2;
+            if (keys.examplereference) score += 2;
+            if (keys.lastupdated) score += 1;
+            if (keys.state) score += 2;
+            if (score > bestScore) {
+                best = tables[i];
+                bestScore = score;
+            }
+        }
+        return bestScore >= 5 ? best : null;
+    }
+
+    function capBuildHeaderMap(table) {
+        var map = {};
+        var ths = table ? table.querySelectorAll("thead th") : [];
+        for (var i = 0; i < ths.length; i++) {
+            map[capCompactKey(ths[i].textContent)] = i;
+        }
+        return map;
+    }
+
+    function capHeaderIndex(map, names) {
+        for (var i = 0; i < names.length; i++) {
+            var key = capCompactKey(names[i]);
+            if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+        }
+        return -1;
+    }
+
+    function capCellText(cells, idx) {
+        if (idx < 0 || idx >= cells.length) return "";
+        return normalizeSAText(cells[idx].textContent || "");
+    }
+
+    function capScanActivityPlanList() {
+        var table = capFindActivityPlanTable();
+        if (!table) {
+            throw new Error("Activity Plan table was not found. Copy A-Plan expects the list table with Name, Cohort Type, Example Reference, and State headers.");
+        }
+        var headerMap = capBuildHeaderMap(table);
+        var nameIdx = capHeaderIndex(headerMap, ["Name"]);
+        if (nameIdx < 0) {
+            throw new Error("Activity Plan table is missing a Name column.");
+        }
+        var cohortIdx = capHeaderIndex(headerMap, ["Cohort Type"]);
+        var timedIdx = capHeaderIndex(headerMap, ["Timed?"]);
+        var enforceIdx = capHeaderIndex(headerMap, ["Enforce Data Collection Order?"]);
+        var exampleIdx = capHeaderIndex(headerMap, ["Example Reference"]);
+        var updatedIdx = capHeaderIndex(headerMap, ["Last Updated"]);
+        var stateIdx = capHeaderIndex(headerMap, ["State"]);
+        var rows = table.querySelectorAll("tbody tr");
+        var plans = [];
+        var seen = {};
+        for (var r = 0; r < rows.length; r++) {
+            var cells = rows[r].querySelectorAll("td");
+            if (!cells || cells.length <= nameIdx) continue;
+            var link = cells[nameIdx].querySelector("a[href*='/secure/crfdesign/activityplans/show/']");
+            if (!link) link = cells[nameIdx].querySelector("a[href*='/activityplans/show/']");
+            if (!link) continue;
+            var href = link.getAttribute("href") || "";
+            var abs = "";
+            try {
+                abs = new URL(href, location.origin).href;
+            } catch (e) {
+                continue;
+            }
+            var idMatch = abs.match(/\/activityplans\/show\/(\d+)(?:[/?#]|$)/);
+            var id = idMatch ? idMatch[1] : abs;
+            if (seen[id]) continue;
+            seen[id] = true;
+            plans.push({
+                id: id,
+                name: normalizeSAText(link.textContent || cells[nameIdx].textContent || ""),
+                href: href,
+                absoluteUrl: abs,
+                cohortType: capCellText(cells, cohortIdx),
+                timed: capCellText(cells, timedIdx),
+                enforceDataCollectionOrder: capCellText(cells, enforceIdx),
+                exampleReference: capCellText(cells, exampleIdx),
+                lastUpdated: capCellText(cells, updatedIdx),
+                state: capCellText(cells, stateIdx)
+            });
+        }
+        if (plans.length === 0) {
+            throw new Error("No Activity Plans were found in the list table.");
+        }
+        capLog("scanned " + plans.length + " Activity Plans");
+        return plans;
+    }
+
+    function capIsPlanLikelyLocked(plan) {
+        var state = capNormalizeKey(plan && plan.state);
+        if (!state) return false;
+        return state.indexOf("lock") !== -1 ||
+            state.indexOf("approved") !== -1 ||
+            state.indexOf("released") !== -1 ||
+            state.indexOf("archive") !== -1 ||
+            state.indexOf("retired") !== -1;
+    }
+
+    function capRenderPlanSelection(plans) {
+        if (CAP_SELECTION_POPUP_REF) {
+            try { CAP_SELECTION_POPUP_REF.close(); } catch (e) {}
+            CAP_SELECTION_POPUP_REF = null;
+        }
+        var selectedSource = null;
+        var selectedDestination = null;
+        var running = false;
+        var box = document.createElement("div");
+        box.style.cssText = "display:flex;flex-direction:column;gap:12px;color:#fff;min-height:0;";
+        var hint = document.createElement("div");
+        hint.textContent = "Choose exactly one source Activity Plan and one editable destination Activity Plan. Names can repeat, so IDs are shown on each row.";
+        hint.style.cssText = "font-size:12px;color:#b8c0cf;line-height:1.45;";
+        box.appendChild(hint);
+        var columns = document.createElement("div");
+        columns.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:12px;min-height:420px;";
+        box.appendChild(columns);
+        var message = document.createElement("div");
+        message.style.cssText = "min-height:18px;font-size:12px;color:#ffcb6b;";
+        box.appendChild(message);
+        var footer = document.createElement("div");
+        footer.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancelBtn = capMakeButton("Cancel", "#444");
+        var confirmBtn = capMakeButton("Confirm", "#28a745");
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = ".55";
+        footer.appendChild(cancelBtn);
+        footer.appendChild(confirmBtn);
+        box.appendChild(footer);
+
+        function makeColumn(titleText, side) {
+            var col = document.createElement("div");
+            col.style.cssText = "min-width:0;display:flex;flex-direction:column;border:1px solid #333b4b;border-radius:8px;overflow:hidden;background:#151922;";
+            var head = document.createElement("div");
+            head.textContent = titleText;
+            head.style.cssText = "font-weight:800;padding:10px;border-bottom:1px solid #333b4b;background:#1d2330;";
+            var search = document.createElement("input");
+            search.type = "text";
+            search.placeholder = "Filter Activity Plans";
+            search.style.cssText = "margin:8px;width:calc(100% - 16px);padding:8px;border-radius:5px;border:1px solid #333b4b;background:#0e1118;color:#fff;";
+            var list = document.createElement("div");
+            list.style.cssText = "flex:1;min-height:0;overflow:auto;padding:0 8px 8px;";
+            col.appendChild(head);
+            col.appendChild(search);
+            col.appendChild(list);
+            function render() {
+                list.innerHTML = "";
+                var filter = capNormalizeKey(search.value || "");
+                for (var i = 0; i < plans.length; i++) {
+                    var p = plans[i];
+                    var hay = capNormalizeKey([p.name, p.cohortType, p.state, p.id].join(" "));
+                    if (filter && hay.indexOf(filter) === -1) continue;
+                    var card = document.createElement("button");
+                    card.type = "button";
+                    card.style.cssText = "width:100%;text-align:left;margin-bottom:7px;padding:9px;border-radius:7px;border:1px solid #333b4b;background:#10141c;color:#fff;cursor:pointer;display:flex;flex-direction:column;gap:4px;";
+                    var current = side === "source" ? selectedSource : selectedDestination;
+                    if (current && current.id === p.id) {
+                        card.style.borderColor = "#7b8cff";
+                        card.style.background = "#202849";
+                    }
+                    var name = document.createElement("div");
+                    name.textContent = p.name || "(Unnamed Activity Plan)";
+                    name.style.cssText = "font-weight:800;font-size:13px;line-height:1.25;";
+                    var meta = document.createElement("div");
+                    meta.textContent = "ID " + p.id + " | " + (p.cohortType || "No cohort") + " | " + (p.state || "No state");
+                    meta.style.cssText = "font-size:11px;color:#aeb7c7;line-height:1.3;";
+                    var ex = document.createElement("div");
+                    ex.textContent = "Example Reference: " + (p.exampleReference || "blank");
+                    ex.style.cssText = "font-size:11px;color:#8893a4;line-height:1.3;";
+                    card.appendChild(name);
+                    card.appendChild(meta);
+                    card.appendChild(ex);
+                    if (side === "destination" && capIsPlanLikelyLocked(p)) {
+                        var locked = document.createElement("div");
+                        locked.textContent = "Destination appears locked or not editable";
+                        locked.style.cssText = "font-size:11px;color:#ff8a8a;";
+                        card.appendChild(locked);
+                    }
+                    card.addEventListener("click", (function(plan) {
+                        return function() {
+                            if (side === "source") selectedSource = plan;
+                            else selectedDestination = plan;
+                            renderColumns();
+                            updateConfirm();
+                        };
+                    })(p));
+                    list.appendChild(card);
+                }
+                if (!list.firstChild) {
+                    var empty = document.createElement("div");
+                    empty.textContent = "No Activity Plans match the filter.";
+                    empty.style.cssText = "color:#888;font-size:12px;text-align:center;padding:18px;";
+                    list.appendChild(empty);
+                }
+            }
+            search.addEventListener("input", render);
+            return { col: col, render: render };
+        }
+
+        var sourceCol = makeColumn("Copy From", "source");
+        var destinationCol = makeColumn("Copy To", "destination");
+        columns.appendChild(sourceCol.col);
+        columns.appendChild(destinationCol.col);
+
+        function renderColumns() {
+            sourceCol.render();
+            destinationCol.render();
+        }
+
+        function updateConfirm() {
+            var error = "";
+            if (!selectedSource || !selectedDestination) {
+                error = "Select a source and destination to continue.";
+            } else if (String(selectedSource.id) === String(selectedDestination.id)) {
+                error = "Source and destination must be different Activity Plans.";
+            } else if (capIsPlanLikelyLocked(selectedDestination)) {
+                error = "The selected destination appears to be locked or not editable. Pick a destination in design/editable state.";
+            }
+            message.textContent = error;
+            confirmBtn.disabled = !!error || running;
+            confirmBtn.style.opacity = confirmBtn.disabled ? ".55" : "1";
+        }
+
+        cancelBtn.addEventListener("click", function() {
+            CAP_CANCELLED = true;
+            capClearWorkflow();
+            if (CAP_SELECTION_POPUP_REF) CAP_SELECTION_POPUP_REF.close();
+        });
+
+        confirmBtn.addEventListener("click", function() {
+            if (confirmBtn.disabled || running) return;
+            running = true;
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = "Starting...";
+            var env = capGetEnvironment();
+            var state = {
+                version: 1,
+                runId: String(Date.now()) + "_" + String(Math.random()).slice(2),
+                host: env ? env.host : location.hostname,
+                phase: "scanSource",
+                createdAt: Date.now(),
+                navAttempts: {},
+                sourcePlan: capClone(selectedSource),
+                destinationPlan: capClone(selectedDestination)
+            };
+            capSaveWorkflow(state);
+            if (CAP_SELECTION_POPUP_REF) CAP_SELECTION_POPUP_REF.close();
+            window.location.href = selectedSource.absoluteUrl;
+        });
+
+        renderColumns();
+        updateConfirm();
+        CAP_SELECTION_POPUP_REF = createPopup({ title: "Copy A-Plan - Select Activity Plans", content: box, width: "92%", maxWidth: "1180px", height: "82%", maxHeight: "760px" });
+    }
+
+    function capNavigateForWorkflow(state, plan, phaseName) {
+        if (!state.navAttempts) state.navAttempts = {};
+        var key = phaseName || state.phase || "navigate";
+        state.navAttempts[key] = (state.navAttempts[key] || 0) + 1;
+        if (state.navAttempts[key] > 3) {
+            capShowError("Copy A-Plan navigation stopped", ["Navigation to " + (plan && plan.name ? plan.name : "the selected Activity Plan") + " did not land on the expected page after 3 attempts.", "Restart Copy A-Plan from the Activity Plans list."], false);
+            capClearWorkflow();
+            return;
+        }
+        capSaveWorkflow(state);
+        window.location.href = plan.absoluteUrl;
+    }
+
+    function capFindSegmentsUrl() {
+        var links = document.querySelectorAll("a[href*='/segment/']");
+        for (var i = 0; i < links.length; i++) {
+            var txt = normalizeSAText(links[i].textContent || "");
+            var href = links[i].getAttribute("href") || "";
+            if (txt.indexOf("Segments") !== -1 || href.indexOf("/activityplans/list/segment/") !== -1) {
+                try {
+                    return new URL(href, location.origin).href;
+                } catch (e) {}
+            }
+        }
+        return "";
+    }
+
+    function capFetchHtml(url) {
+        return new Promise(function(resolve, reject) {
+            if (!url) {
+                reject(new Error("Missing URL"));
+                return;
+            }
+            if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") {
+                GM.xmlHttpRequest({
+                    method: "GET",
+                    url: url,
+                    onload: function(response) {
+                        if (response.status >= 200 && response.status < 400) resolve(response.responseText || "");
+                        else reject(new Error("Request failed with status " + response.status));
+                    },
+                    onerror: function() { reject(new Error("Request failed")); }
+                });
+                return;
+            }
+            fetch(url, { credentials: "include" }).then(function(resp) {
+                if (!resp.ok) throw new Error("Request failed with status " + resp.status);
+                return resp.text();
+            }).then(resolve).catch(reject);
+        });
+    }
+
+    async function capCollectSegmentsFromSegmentsPage() {
+        var url = capFindSegmentsUrl();
+        var segments = [];
+        if (!url) return segments;
+        try {
+            var html = await capFetchHtml(url);
+            var tmp = document.createElement("div");
+            tmp.innerHTML = html;
+            var rows = tmp.querySelectorAll("table tbody tr");
+            var seen = {};
+            for (var i = 0; i < rows.length; i++) {
+                var cells = rows[i].querySelectorAll("td");
+                if (!cells || cells.length === 0) continue;
+                var link = cells[0].querySelector("a[href*='/segment/']");
+                var text = normalizeSAText((link ? link.textContent : cells[0].textContent) || "");
+                if (!text) continue;
+                var value = text;
+                if (link) {
+                    var href = link.getAttribute("href") || "";
+                    var m = href.match(/\/segment\/(\d+)/);
+                    if (m) value = m[1];
+                }
+                var key = String(value) + "|" + capNormalizeKey(text);
+                if (seen[key]) continue;
+                seen[key] = true;
+                segments.push({ value: String(value), text: text });
+            }
+        } catch (e) {
+            capLog("segment page scan failed: " + String(e));
+        }
+        return segments;
+    }
+
+    function capResolveOption(options, preferredValue, preferredText) {
+        options = options || [];
+        var value = String(preferredValue || "").trim();
+        var text = normalizeSAText(preferredText || "");
+        if (value) {
+            for (var i = 0; i < options.length; i++) {
+                if (String(options[i].value) === value) return { value: options[i].value, text: options[i].text };
+            }
+        }
+        if (text) {
+            var target = capNormalizeKey(text);
+            for (var j = 0; j < options.length; j++) {
+                if (capNormalizeKey(options[j].text) === target) return { value: options[j].value, text: options[j].text };
+            }
+        }
+        return text || value ? { value: value || text, text: text || value } : null;
+    }
+
+    function capFindDestinationOption(options, preferredValue, preferredText) {
+        var resolved = capResolveOption(options, preferredValue, preferredText);
+        if (!resolved) return null;
+        for (var i = 0; i < (options || []).length; i++) {
+            if (String(options[i].value) === String(resolved.value)) return resolved;
+        }
+        var target = capNormalizeKey(resolved.text);
+        for (var j = 0; j < (options || []).length; j++) {
+            if (capNormalizeKey(options[j].text) === target) return { value: options[j].value, text: options[j].text };
+        }
+        return null;
+    }
+
+    function capParseTimepointParts(timepointText, preReference) {
+        var result = { days: 0, hours: 0, minutes: 0, seconds: 0 };
+        var cleaned = String(timepointText || "").replace(/\(\d+\)\s*$/, "").replace(/[*+\-()]/g, "").trim();
+        if (!cleaned) return result;
+        var parts = cleaned.split(":");
+        var totalHours = parseInt(parts[0], 10) || 0;
+        result.days = Math.floor(totalHours / 24);
+        result.hours = totalHours % 24;
+        result.minutes = parts.length > 1 ? (parseInt(parts[1], 10) || 0) : 0;
+        result.seconds = parts.length > 2 ? (parseInt(parts[2], 10) || 0) : 0;
+        return result;
+    }
+
+    function capDefaultFormData() {
+        return {
+            days: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+            hidden: false,
+            mandatory: true,
+            enforce: false,
+            preWindow: "",
+            postWindow: "",
+            configurationSource: "",
+            prePostWindowCopied: true,
+            prePostWindowReviewNeeded: false,
+            sourceTableOnly: false,
+            refActivity: false,
+            preReference: false,
+            disableCollectionTime: false,
+            formOffsetSeconds: "",
+            collectionRoleRestriction: "",
+            studyEvents: [],
+            autoPopulated: false,
+            modified: false,
+            editHref: "",
+            scheduledActivityId: "",
+            saRowIndex: null,
+            visibilityAlreadySet: false,
+            visibilityMustBeSet: false,
+            timepointRaw: "",
+            timepointCleaned: "",
+            timepointDisplay: "",
+            segmentRefDateTime: "N/A",
+            exampleTime: "N/A",
+            originalValues: null
+        };
+    }
+
+    function capGetFormKey(segVal, formVal, index) {
+        return String(segVal) + "|" + String(formVal) + "|" + String(index);
+    }
+
+    function capSnapshotOriginal(fd) {
+        return {
+            days: fd.days || 0,
+            hours: fd.hours || 0,
+            minutes: fd.minutes || 0,
+            seconds: fd.seconds || 0,
+            hidden: !!fd.hidden,
+            mandatory: fd.mandatory !== false,
+            enforce: !!fd.enforce,
+            preWindow: fd.preWindow === null ? null : (fd.preWindow || ""),
+            postWindow: fd.postWindow === null ? null : (fd.postWindow || ""),
+            configurationSource: fd.configurationSource || "",
+            prePostWindowCopied: fd.prePostWindowCopied !== false,
+            prePostWindowReviewNeeded: !!fd.prePostWindowReviewNeeded,
+            sourceTableOnly: !!fd.sourceTableOnly,
+            refActivity: !!fd.refActivity,
+            preReference: !!fd.preReference,
+            disableCollectionTime: !!fd.disableCollectionTime,
+            formOffsetSeconds: fd.formOffsetSeconds || "",
+            collectionRoleRestriction: fd.collectionRoleRestriction || "",
+            studyEvents: capClone(fd.studyEvents || [])
+        };
+    }
+
+    function capParseStatusCell(cell) {
+        var result = { hidden: false, archived: false, roleRestriction: false, enforce: false, visibilityAlreadySet: false, visibilityMustBeSet: false };
+        if (!cell) return result;
+        var icons = cell.querySelectorAll("i");
+        for (var i = 0; i < icons.length; i++) {
+            var cls = icons[i].className || "";
+            if (cls.indexOf("fa-eye-slash") !== -1) {
+                result.hidden = true;
+                result.visibilityAlreadySet = true;
+            } else if (cls.indexOf("fa-eye") !== -1) {
+                result.hidden = true;
+                result.visibilityMustBeSet = true;
+            }
+            if (cls.indexOf("fa-archive") !== -1) result.archived = true;
+            if (cls.indexOf("fa-user-plus") !== -1) result.roleRestriction = true;
+            if (cls.indexOf("fa-list-ol") !== -1) result.enforce = true;
+        }
+        return result;
+    }
+
+    function capExtractIdFromHref(href, pattern) {
+        var match = String(href || "").match(pattern);
+        return match ? match[1] : "";
+    }
+
+    function capDetectSATableStatusIndex(cells) {
+        var timepointColIndex = bplDetectTimepointColumn();
+        var exampleTimeColIndex = bplDetectExampleTimeColumn();
+        if (exampleTimeColIndex !== -1) return exampleTimeColIndex + 1;
+        if (timepointColIndex !== -1) return timepointColIndex + 1;
+        return cells.length > 6 ? 6 : 4;
+    }
+
+    function capScanCurrentScheduledRows(dropdownData, segmentOffsets) {
+        var enhanced = scanExistingBPLTableEnhanced();
+        var enhancedByIndex = {};
+        var enhancedItems = enhanced.saTableItems || [];
+        for (var ei = 0; ei < enhancedItems.length; ei++) {
+            enhancedByIndex[String(enhancedItems[ei].saRowIndex)] = enhancedItems[ei];
+        }
+        var tbody = document.getElementById("saTableBody");
+        if (!tbody) {
+            throw new Error("Scheduled Activity table body was not found.");
+        }
+        var rows = tbody.rows;
+        var planRows = [];
+        var segments = dropdownData.segments || [];
+        var studyEvents = dropdownData.studyEvents || [];
+        var forms = dropdownData.forms || [];
+        for (var i = 0; i < rows.length; i++) {
+            var tr = rows[i];
+            var cells = tr.cells;
+            if (!cells || cells.length < 4) continue;
+            var saItem = enhancedByIndex[String(i)];
+            if (!saItem) {
+                continue;
+            }
+            var status = capParseStatusCell(cells[capDetectSATableStatusIndex(cells)]);
+            if (status.archived) continue;
+            var segmentLink = cells[1].querySelector("a[href*='/segment/']");
+            var eventLink = cells[2].querySelector("a[href*='/studyevent/']");
+            var formLink = cells[3].querySelector("a[href*='/form/']");
+            var editLink = tr.querySelector("a[href*='/update/scheduledactivity/']");
+            var segmentText = normalizeSAText(cells[1].textContent || saItem.segment || "");
+            var eventText = normalizeSAText(cells[2].textContent || saItem.studyEvent || "");
+            var formText = normalizeSAText(cells[3].textContent || saItem.form || "");
+            var segmentId = capExtractIdFromHref(segmentLink ? segmentLink.getAttribute("href") : "", /\/segment\/(\d+)/);
+            var eventId = capExtractIdFromHref(eventLink ? eventLink.getAttribute("href") : "", /\/studyevent\/(\d+)/);
+            var formId = capExtractIdFromHref(formLink ? formLink.getAttribute("href") : "", /\/form\/(\d+)/);
+            var segmentOpt = capResolveOption(segments, segmentId, segmentText);
+            var eventOpt = capResolveOption(studyEvents, eventId, eventText);
+            var formOpt = capResolveOption(forms, formId, formText);
+            if (!segmentOpt || !formOpt) continue;
+            var parts = capParseTimepointParts(saItem.timepointCleaned || saItem.timepointRaw || "", saItem.preReference);
+            var segRefDateTime = "N/A";
+            if (segmentOffsets && segmentOffsets[segmentText]) {
+                segRefDateTime = segmentOffsets[segmentText].referenceDateTime || "N/A";
+            }
+            var fd = capDefaultFormData();
+            fd.days = parts.days;
+            fd.hours = parts.hours;
+            fd.minutes = parts.minutes;
+            fd.seconds = parts.seconds;
+            fd.hidden = !!saItem.hidden || !!status.hidden;
+            fd.mandatory = true;
+            fd.enforce = !!status.enforce;
+            fd.refActivity = !!saItem.refActivity;
+            fd.preReference = !!saItem.preReference;
+            fd.studyEvents = eventOpt ? [{ value: eventOpt.value, text: eventOpt.text }] : [];
+            fd.autoPopulated = true;
+            fd.modified = false;
+            fd.editHref = editLink ? (editLink.getAttribute("href") || "") : (saItem.editHref || "");
+            fd.scheduledActivityId = capExtractIdFromHref(fd.editHref, /scheduledactivity\/(\d+)/);
+            fd.saRowIndex = i;
+            fd.visibilityAlreadySet = !!saItem.visibilityAlreadySet || !!status.visibilityAlreadySet;
+            fd.visibilityMustBeSet = !!saItem.visibilityMustBeSet || !!status.visibilityMustBeSet;
+            fd.timepointRaw = saItem.timepointRaw || "";
+            fd.timepointCleaned = saItem.timepointCleaned || "";
+            fd.timepointDisplay = saItem.timepointDisplay || "";
+            fd.segmentRefDateTime = segRefDateTime;
+            fd.exampleTime = saItem.exampleTime || bplComputeExampleTime(segRefDateTime, saItem.timepointCleaned || "", saItem.preReference || false);
+            fd.originalValues = capSnapshotOriginal(fd);
+            planRows.push({
+                segmentValue: segmentOpt.value,
+                segmentText: segmentOpt.text,
+                eventValue: eventOpt ? eventOpt.value : "",
+                eventText: eventOpt ? eventOpt.text : eventText,
+                formValue: formOpt.value,
+                formText: formOpt.text,
+                formIndex: i + 1,
+                rowIndex: i,
+                formData: fd
+            });
+        }
+        return planRows;
+    }
+
+    function capEnsureSegmentsFromRows(segments, rows) {
+        var result = capClone(segments || []) || [];
+        var seen = {};
+        for (var i = 0; i < result.length; i++) {
+            seen[String(result[i].value)] = true;
+            seen[capNormalizeKey(result[i].text)] = true;
+        }
+        for (var r = 0; r < (rows || []).length; r++) {
+            var row = rows[r];
+            if (!seen[String(row.segmentValue)] && !seen[capNormalizeKey(row.segmentText)]) {
+                result.push({ value: row.segmentValue, text: row.segmentText });
+                seen[String(row.segmentValue)] = true;
+                seen[capNormalizeKey(row.segmentText)] = true;
+            }
+        }
+        return result;
+    }
+
+    function capOptionsFromRows(rows, valueProp, textProp) {
+        var result = [];
+        var seen = {};
+        for (var r = 0; r < (rows || []).length; r++) {
+            var row = rows[r] || {};
+            var value = row[valueProp] || row[textProp] || "";
+            var text = row[textProp] || row[valueProp] || "";
+            if (!value && !text) continue;
+            var key = String(value) + "|" + capNormalizeKey(text);
+            if (seen[key]) continue;
+            seen[key] = true;
+            result.push({ value: value, text: text });
+        }
+        return result;
+    }
+
+    function capRowsToPlanData(plan, editable, dropdownData, rows, segmentOffsets, exampleReference, warnings) {
+        var segments = capEnsureSegmentsFromRows(dropdownData.segments || [], rows);
+        var segmentFormMap = {};
+        var formDataStore = {};
+        var counter = 0;
+        for (var s = 0; s < segments.length; s++) {
+            segmentFormMap[segments[s].value] = [];
+        }
+        for (var i = 0; i < rows.length; i++) {
+            counter++;
+            var row = rows[i];
+            var idx = counter;
+            var entry = {
+                value: row.formValue,
+                text: row.formText,
+                index: idx,
+                autoPopulated: true,
+                sourceRowIndex: row.rowIndex
+            };
+            if (!segmentFormMap[row.segmentValue]) segmentFormMap[row.segmentValue] = [];
+            segmentFormMap[row.segmentValue].push(entry);
+            var fd = row.formData || capDefaultFormData();
+            fd.autoPopulated = true;
+            fd.saRowIndex = row.rowIndex;
+            fd.originalValues = capSnapshotOriginal(fd);
+            formDataStore[capGetFormKey(row.segmentValue, row.formValue, idx)] = fd;
+        }
+        return {
+            plan: capClone(plan),
+            editable: !!editable,
+            segments: segments,
+            studyEvents: dropdownData.studyEvents || [],
+            forms: dropdownData.forms || [],
+            rows: rows,
+            segmentFormMap: segmentFormMap,
+            formDataStore: formDataStore,
+            formInstanceCounter: counter,
+            segmentOffsets: segmentOffsets || {},
+            exampleReference: exampleReference || "N/A",
+            warnings: warnings || []
+        };
+    }
+
+    async function capCollectDropdownData(editable) {
+        if (!editable) {
+            return { segments: await capCollectSegmentsFromSegmentsPage(), studyEvents: [], forms: [] };
+        }
+        if (!clickAddSaButton()) {
+            throw new Error("Could not open the Add Scheduled Activity modal.");
+        }
+        var modal = await waitForSAModal(12000);
+        if (!modal) {
+            throw new Error("The Add Scheduled Activity modal did not appear.");
+        }
+        try {
+            var dropdownData = await collectBPLModalDropdownData();
+            await capCloseActiveModal(modal);
+            return dropdownData;
+        } catch (e) {
+            await capCloseActiveModal(modal);
+            throw e;
+        }
+    }
+
+    function capMergeModalPropsIntoFormData(fd, props) {
+        if (!fd || !props) return fd;
+        fd.mandatory = !!props.mandatory;
+        fd.hidden = !!props.hidden;
+        fd.preWindow = props.preWindow || "";
+        fd.postWindow = props.postWindow || "";
+        fd.configurationSource = "editModal";
+        fd.prePostWindowCopied = true;
+        fd.prePostWindowReviewNeeded = false;
+        fd.sourceTableOnly = false;
+        fd.refActivity = !!props.referenceActivity;
+        fd.preReference = props.offsetPreReference === "checked";
+        if (!fd.refActivity) {
+            fd.days = parseInt(props.offsetDays, 10) || 0;
+            fd.hours = parseInt(props.offsetHours, 10) || 0;
+            fd.minutes = parseInt(props.offsetMinutes, 10) || 0;
+            fd.seconds = parseInt(props.offsetSeconds, 10) || 0;
+        }
+        fd.enforce = !!props.enforceDataCollectionOrder;
+        fd.disableCollectionTime = !!props.disableCollectionTime;
+        fd.formOffsetSeconds = props.formOffsetSeconds || "";
+        fd.collectionRoleRestriction = props.collectionRoleRestriction || "";
+        fd.originalValues = capSnapshotOriginal(fd);
+        return fd;
+    }
+
+    function capFindEditLink(editHref, scheduledActivityId) {
+        var links = document.querySelectorAll("a[href*='/update/scheduledactivity/']");
+        for (var i = 0; i < links.length; i++) {
+            var href = links[i].getAttribute("href") || "";
+            if (editHref && href === editHref) return links[i];
+            if (scheduledActivityId && href.indexOf("/scheduledactivity/" + scheduledActivityId) !== -1) return links[i];
+        }
+        return null;
+    }
+
+    async function capCloseActiveModal(modal) {
+        modal = modal || document.getElementById("ajaxModal");
+        if (!modal) return true;
+        var closeBtn = modal.querySelector(".close, button[data-dismiss='modal'], a[data-dismiss='modal']");
+        if (closeBtn) closeBtn.click();
+        else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        await waitForSAModalClose(8000);
+        await sleep(300);
+        return true;
+    }
+
+    async function capCollectRowModalConfigs(planData, overlay, roleLabel) {
+        var keys = [];
+        for (var segVal in planData.segmentFormMap) {
+            if (!planData.segmentFormMap.hasOwnProperty(segVal)) continue;
+            var list = planData.segmentFormMap[segVal] || [];
+            for (var i = 0; i < list.length; i++) {
+                keys.push({ segVal: segVal, entry: list[i], key: capGetFormKey(segVal, list[i].value, list[i].index) });
+            }
+        }
+        for (var k = 0; k < keys.length; k++) {
+            if (CAP_CANCELLED) return;
+            capSetOverlayMessage(overlay, "Reading " + roleLabel + " form configuration " + (k + 1) + " of " + keys.length);
+            var item = keys[k];
+            var fd = planData.formDataStore[item.key];
+            if (!fd || !fd.editHref) continue;
+            var link = capFindEditLink(fd.editHref, fd.scheduledActivityId);
+            if (!link) {
+                planData.warnings.push("Could not open configuration for " + item.entry.text + "; table values were kept.");
+                continue;
+            }
+            try {
+                link.click();
+                var modal = await waitForSAModal(12000);
+                if (!modal) {
+                    planData.warnings.push("Configuration modal did not open for " + item.entry.text + "; table values were kept.");
+                    continue;
+                }
+                var props = await collectEditModalProperties();
+                planData.formDataStore[item.key] = capMergeModalPropsIntoFormData(fd, props);
+                await capCloseActiveModal(modal);
+            } catch (e) {
+                planData.warnings.push("Could not read configuration for " + item.entry.text + ": " + String(e));
+                await capCloseActiveModal();
+            }
+        }
+    }
+
+    async function capScanCurrentActivityPlan(plan, requireEditable, overlay, roleLabel) {
+        if (!capIsExpectedPlanPage(plan)) {
+            throw new Error(roleLabel + " page did not match the selected Activity Plan ID " + plan.id + ".");
+        }
+        var tbody = await waitForSelector("#saTableBody", 15000);
+        if (!tbody) {
+            throw new Error(roleLabel + " Scheduled Activity table was not found.");
+        }
+        capSetOverlayMessage(overlay, "Reading example reference and segments");
+        var exampleReference = await bplCollectExampleReferenceTime();
+        var segmentOffsets = await bplCollectSegmentOffsets(exampleReference);
+        var editable = !isAddSaButtonDisabled();
+        if (requireEditable && !editable) {
+            throw new Error("Destination A-Plan is not editable. ClinSpark has disabled the Add Scheduled Activity button.");
+        }
+        capSetOverlayMessage(overlay, editable ? "Reading modal dropdown options" : "Reading visible rows");
+        var dropdownData = await capCollectDropdownData(editable);
+        capSetOverlayMessage(overlay, "Scanning Scheduled Activity table");
+        var rows = capScanCurrentScheduledRows(dropdownData, segmentOffsets);
+        dropdownData.segments = capEnsureSegmentsFromRows(dropdownData.segments || [], rows);
+        var planData = capRowsToPlanData(plan, editable, dropdownData, rows, segmentOffsets, exampleReference, []);
+        await capCollectRowModalConfigs(planData, overlay, roleLabel);
+        capLog(roleLabel + " scan complete: " + planData.segments.length + " segments, " + rows.length + " rows");
+        return planData;
+    }
+
+    function capMarkPrePostNotCopied(fd) {
+        fd = fd || capDefaultFormData();
+        fd.preWindow = null;
+        fd.postWindow = null;
+        fd.configurationSource = "activityPlanTable";
+        fd.prePostWindowCopied = false;
+        fd.prePostWindowReviewNeeded = true;
+        fd.sourceTableOnly = true;
+        return fd;
+    }
+
+    function capMarkSourceTableOnlyData(planData) {
+        var store = planData.formDataStore || {};
+        for (var key in store) {
+            if (!store.hasOwnProperty(key)) continue;
+            var fd = store[key] || capDefaultFormData();
+            capMarkPrePostNotCopied(fd);
+            fd.originalValues = capSnapshotOriginal(fd);
+            store[key] = fd;
+        }
+        planData.configurationSource = "activityPlanTable";
+        planData.sourceTableOnly = true;
+        planData.prePostWindowCopied = false;
+        return planData;
+    }
+
+    async function capScanSourceActivityPlanTableOnly(plan, overlay) {
+        if (!capIsExpectedPlanPage(plan)) {
+            throw new Error("Source A-Plan page did not match the selected Activity Plan ID " + plan.id + ".");
+        }
+        var tbody = await waitForSelector("#saTableBody", 15000);
+        if (!tbody) {
+            throw new Error("Source A-Plan Scheduled Activity table was not found.");
+        }
+        capSetOverlayMessage(overlay, "Parsing Source A-Plan table");
+        var dropdownData = { segments: [], studyEvents: [], forms: [] };
+        var rows = capScanCurrentScheduledRows(dropdownData, {});
+        dropdownData.segments = capEnsureSegmentsFromRows([], rows);
+        dropdownData.studyEvents = capOptionsFromRows(rows, "eventValue", "eventText");
+        dropdownData.forms = capOptionsFromRows(rows, "formValue", "formText");
+        var planData = capRowsToPlanData(plan, false, dropdownData, rows, {}, "N/A", []);
+        capMarkSourceTableOnlyData(planData);
+        capLog("Source A-Plan table-only scan complete: " + planData.segments.length + " segments, " + rows.length + " rows");
+        return planData;
+    }
+
+    function capBuildWorkspaceState(destinationData) {
+        return {
+            segments: capClone(destinationData.segments || []) || [],
+            studyEvents: capClone(destinationData.studyEvents || []) || [],
+            forms: capClone(destinationData.forms || []) || [],
+            segmentFormMap: capClone(destinationData.segmentFormMap || {}) || {},
+            formDataStore: capClone(destinationData.formDataStore || {}) || {},
+            formInstanceCounter: destinationData.formInstanceCounter || 0,
+            segmentCollapsed: {},
+            selectedFormKey: null,
+            clipboard: null,
+            warnings: capClone(destinationData.warnings || []) || [],
+            dirty: false
+        };
+    }
+
+    async function capResumeWorkflowIfNeeded() {
+        var state = capLoadWorkflow();
+        if (!state || !state.phase) return;
+        var env = capGetEnvironment();
+        if (!env || state.host !== env.host) {
+            capClearWorkflow();
+            capLog("cleared workflow because host changed");
+            return;
+        }
+        if (Date.now() - (state.createdAt || 0) > 21600000) {
+            capClearWorkflow();
+            capLog("cleared stale workflow");
+            return;
+        }
+        if (CAP_BUSY) return;
+        CAP_BUSY = true;
+        CAP_CANCELLED = false;
+        setTimeout(async function() {
+            var overlay = null;
+            try {
+                if (state.phase === "scanSource") {
+                    if (!capIsExpectedPlanPage(state.sourcePlan)) {
+                        CAP_BUSY = false;
+                        capNavigateForWorkflow(state, state.sourcePlan, "scanSource");
+                        return;
+                    }
+                    overlay = createCollectingOverlay("Copy A-Plan", "Scanning Source A-Plan");
+                    state.navAttempts.scanSource = 0;
+                    state.sourceData = await capScanSourceActivityPlanTableOnly(state.sourcePlan, overlay);
+                    state.phase = "scanDestination";
+                    capSaveWorkflow(state);
+                    overlay.close();
+                    CAP_BUSY = false;
+                    window.location.href = state.destinationPlan.absoluteUrl;
+                    return;
+                }
+                if (state.phase === "scanDestination") {
+                    if (!capIsExpectedPlanPage(state.destinationPlan)) {
+                        CAP_BUSY = false;
+                        capNavigateForWorkflow(state, state.destinationPlan, "scanDestination");
+                        return;
+                    }
+                    overlay = createCollectingOverlay("Copy A-Plan", "Scanning Destination A-Plan");
+                    state.navAttempts.scanDestination = 0;
+                    state.destinationData = await capScanCurrentActivityPlan(state.destinationPlan, true, overlay, "Destination A-Plan");
+                    state.workspace = capBuildWorkspaceState(state.destinationData);
+                    state.phase = "workspace";
+                    capSaveWorkflow(state);
+                    overlay.close();
+                    CAP_BUSY = false;
+                    capOpenWorkspace(state);
+                    return;
+                }
+                if (state.phase === "workspace") {
+                    if (!capIsExpectedPlanPage(state.destinationPlan)) {
+                        CAP_BUSY = false;
+                        capNavigateForWorkflow(state, state.destinationPlan, "workspace");
+                        return;
+                    }
+                    CAP_BUSY = false;
+                    capOpenWorkspace(state);
+                    return;
+                }
+                CAP_BUSY = false;
+            } catch (e) {
+                if (overlay) overlay.close();
+                CAP_BUSY = false;
+                capShowError("Copy A-Plan failed", [String(e && e.message ? e.message : e)], true);
+            }
+        }, 800);
+    }
+
+    async function runCopyAPlan() {
+        if (CAP_BUSY) return;
+        CAP_CANCELLED = false;
+        if (!capIsActivityPlanListPage()) {
+            capShowWrongPageWarning();
+            return;
+        }
+        var overlay = createCollectingOverlay("Copy A-Plan", "Loading Activity Plans");
+        try {
+            CAP_BUSY = true;
+            var plans = capScanActivityPlanList();
+            overlay.close();
+            CAP_BUSY = false;
+            capRenderPlanSelection(plans);
+        } catch (e) {
+            overlay.close();
+            CAP_BUSY = false;
+            capShowError("Could not scan Activity Plans", [String(e && e.message ? e.message : e)], false);
+        }
+    }
+
+    function capFindWorkspaceForm(ws, formKey) {
+        if (!ws || !formKey) return null;
+        for (var segVal in ws.segmentFormMap) {
+            if (!ws.segmentFormMap.hasOwnProperty(segVal)) continue;
+            var list = ws.segmentFormMap[segVal] || [];
+            for (var i = 0; i < list.length; i++) {
+                var key = capGetFormKey(segVal, list[i].value, list[i].index);
+                if (key === formKey) {
+                    return { segVal: segVal, entry: list[i], key: key, data: ws.formDataStore[key] || capDefaultFormData(), index: i };
+                }
+            }
+        }
+        return null;
+    }
+
+    function capGetSegmentText(ws, segVal) {
+        var segments = ws.segments || [];
+        for (var i = 0; i < segments.length; i++) {
+            if (String(segments[i].value) === String(segVal)) return segments[i].text;
+        }
+        return String(segVal || "");
+    }
+
+    function capGetTimeLabel(fd) {
+        fd = fd || {};
+        return bplFormatTimePoint(fd.days || 0, fd.hours || 0, fd.minutes || 0, fd.seconds || 0, !!fd.preReference);
+    }
+
+    function capFindMajorityStudyEvent(ws, segVal, excludeKey) {
+        var list = (ws.segmentFormMap && ws.segmentFormMap[segVal]) || [];
+        var counts = {};
+        var total = 0;
+        for (var i = 0; i < list.length; i++) {
+            var key = capGetFormKey(segVal, list[i].value, list[i].index);
+            if (excludeKey && key === excludeKey) continue;
+            var fd = ws.formDataStore[key] || {};
+            if (list[i].deleteRequested) continue;
+            var ev = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
+            if (!ev || !ev.text) continue;
+            var k = capNormalizeKey(ev.text);
+            if (!counts[k]) counts[k] = { value: ev.value || "", text: ev.text, count: 0 };
+            counts[k].count++;
+            total++;
+        }
+        var best = null;
+        for (var c in counts) {
+            if (counts.hasOwnProperty(c) && (!best || counts[c].count > best.count)) best = counts[c];
+        }
+        return best && best.count > total / 2 ? { value: best.value, text: best.text } : null;
+    }
+
+    function capResolveDestinationStudyEvent(ws, sourceEvent, targetSegVal) {
+        sourceEvent = sourceEvent || {};
+        var destinationEvents = ws.studyEvents || [];
+        var match = capFindDestinationOption(destinationEvents, sourceEvent.value, sourceEvent.text);
+        if (match) return { event: match, warning: "" };
+        var compactSource = capCompactKey(sourceEvent.text || "");
+        if (compactSource) {
+            var exactCompact = [];
+            for (var i = 0; i < destinationEvents.length; i++) {
+                if (capCompactKey(destinationEvents[i].text) === compactSource) exactCompact.push(destinationEvents[i]);
+            }
+            if (exactCompact.length === 1) {
+                return { event: { value: exactCompact[0].value, text: exactCompact[0].text }, warning: "" };
+            }
+        }
+        var majority = capFindMajorityStudyEvent(ws, targetSegVal, null);
+        if (majority) {
+            return { event: majority, warning: "Study Event '" + (sourceEvent.text || "blank") + "' was not found in the destination. Used the destination segment majority: " + majority.text + "." };
+        }
+        return { event: null, warning: "Study Event '" + (sourceEvent.text || "blank") + "' could not be mapped. Select it manually before applying." };
+    }
+
+    function capBuildFormSignature(segVal, entry, fd) {
+        var ev = fd && fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : {};
+        return [
+            String(segVal || ""),
+            String(entry && entry.value || ""),
+            capNormalizeKey(entry && entry.text || ""),
+            String(ev.value || ""),
+            capNormalizeKey(ev.text || ""),
+            String(fd && fd.days || 0),
+            String(fd && fd.hours || 0),
+            String(fd && fd.minutes || 0),
+            String(fd && fd.seconds || 0),
+            fd && fd.preReference ? "pre" : "post"
+        ].join("|");
+    }
+
+    function capHasDuplicate(ws, segVal, entry, fd, excludeKey) {
+        var sig = capBuildFormSignature(segVal, entry, fd);
+        var list = ws.segmentFormMap[segVal] || [];
+        for (var i = 0; i < list.length; i++) {
+            var key = capGetFormKey(segVal, list[i].value, list[i].index);
+            if (excludeKey && key === excludeKey) continue;
+            if (list[i].deleteRequested) continue;
+            var otherFd = ws.formDataStore[key] || {};
+            if (capBuildFormSignature(segVal, list[i], otherFd) === sig) return true;
+        }
+        return false;
+    }
+
+    function capPrepareSnapshotFormData(fd, origin) {
+        var data = capClone(fd) || capDefaultFormData();
+        if (origin === "sourceAPlan" || (!origin && data.configurationSource === "activityPlanTable" && data.prePostWindowCopied === false)) {
+            capMarkPrePostNotCopied(data);
+        } else {
+            data.prePostWindowCopied = data.prePostWindowCopied !== false;
+            data.prePostWindowReviewNeeded = !!data.prePostWindowReviewNeeded;
+        }
+        return data;
+    }
+
+    function capMakeFormSnapshot(planData, segVal, entry, origin) {
+        var snapshotOrigin = origin || "sourceAPlan";
+        var key = capGetFormKey(segVal, entry.value, entry.index);
+        var fd = planData.formDataStore[key] || capDefaultFormData();
+        return {
+            type: "form",
+            source: snapshotOrigin,
+            data: {
+                origin: snapshotOrigin,
+                segmentValue: segVal,
+                segmentText: capGetSegmentText(planData, segVal),
+                formEntry: capClone(entry),
+                formData: capPrepareSnapshotFormData(fd, snapshotOrigin)
+            }
+        };
+    }
+
+    function capMakeSegmentSnapshot(planData, segVal, origin) {
+        var snapshotOrigin = origin || "sourceAPlan";
+        var list = (planData.segmentFormMap && planData.segmentFormMap[segVal]) || [];
+        var forms = [];
+        for (var i = 0; i < list.length; i++) {
+            var entry = list[i];
+            var fd = planData.formDataStore[capGetFormKey(segVal, entry.value, entry.index)] || capDefaultFormData();
+            forms.push({ origin: snapshotOrigin, formEntry: capClone(entry), formData: capPrepareSnapshotFormData(fd, snapshotOrigin) });
+        }
+        return {
+            type: "segment",
+            source: snapshotOrigin,
+            data: {
+                origin: snapshotOrigin,
+                segmentValue: segVal,
+                segmentText: capGetSegmentText(planData, segVal),
+                forms: forms
+            }
+        };
+    }
+
+    function capMarkWorkspaceDirty(state) {
+        if (state && state.workspace) {
+            state.workspace.dirty = true;
+            capSaveWorkflow(state);
+        }
+    }
+
+    function capPasteFormSnapshot(state, targetSegVal, snapshot, warnings) {
+        var ws = state.workspace;
+        warnings = warnings || [];
+        if (!snapshot || !snapshot.formEntry || !snapshot.formData) return false;
+        var destForm = capFindDestinationOption(ws.forms, snapshot.formEntry.value, snapshot.formEntry.text);
+        if (!destForm) {
+            warnings.push("Form '" + (snapshot.formEntry.text || "blank") + "' is not available in the destination A-Plan.");
+            return false;
+        }
+        var sourceEvent = snapshot.formData.studyEvents && snapshot.formData.studyEvents[0] ? snapshot.formData.studyEvents[0] : null;
+        var eventResult = capResolveDestinationStudyEvent(ws, sourceEvent, targetSegVal);
+        if (eventResult.warning) warnings.push(eventResult.warning);
+        var data = capClone(snapshot.formData) || capDefaultFormData();
+        var hasSnapshotOrigin = !!(snapshot.origin || snapshot.source);
+        if (snapshot.origin === "sourceAPlan" || snapshot.source === "sourceAPlan" || (!hasSnapshotOrigin && data.configurationSource === "activityPlanTable" && data.prePostWindowCopied === false)) {
+            capMarkPrePostNotCopied(data);
+        } else {
+            data.prePostWindowCopied = data.prePostWindowCopied !== false;
+            data.prePostWindowReviewNeeded = !!data.prePostWindowReviewNeeded;
+        }
+        data.studyEvents = eventResult.event ? [{ value: eventResult.event.value, text: eventResult.event.text }] : [];
+        data.autoPopulated = false;
+        data.modified = false;
+        data.editHref = "";
+        data.scheduledActivityId = "";
+        data.saRowIndex = null;
+        data.originalValues = null;
+        data.copiedFrom = { source: "Copy A-Plan", formText: snapshot.formEntry.text || "", segmentText: snapshot.segmentText || "" };
+        var newEntry = { value: destForm.value, text: destForm.text, index: ws.formInstanceCounter + 1, autoPopulated: false };
+        if (capHasDuplicate(ws, targetSegVal, newEntry, data, null)) {
+            warnings.push("Skipped duplicate: " + destForm.text + " in " + capGetSegmentText(ws, targetSegVal) + ".");
+            return false;
+        }
+        ws.formInstanceCounter++;
+        newEntry.index = ws.formInstanceCounter;
+        if (!ws.segmentFormMap[targetSegVal]) ws.segmentFormMap[targetSegVal] = [];
+        ws.segmentFormMap[targetSegVal].push(newEntry);
+        ws.formDataStore[capGetFormKey(targetSegVal, newEntry.value, newEntry.index)] = data;
+        return true;
+    }
+
+    function capSortSegment(ws, segVal) {
+        var list = ws.segmentFormMap[segVal] || [];
+        list.sort(function(a, b) {
+            var ak = capGetFormKey(segVal, a.value, a.index);
+            var bk = capGetFormKey(segVal, b.value, b.index);
+            var ad = ws.formDataStore[ak] || {};
+            var bd = ws.formDataStore[bk] || {};
+            var at = ((ad.days || 0) * 86400) + ((ad.hours || 0) * 3600) + ((ad.minutes || 0) * 60) + (ad.seconds || 0);
+            var bt = ((bd.days || 0) * 86400) + ((bd.hours || 0) * 3600) + ((bd.minutes || 0) * 60) + (bd.seconds || 0);
+            if (ad.preReference) at = -at;
+            if (bd.preReference) bt = -bt;
+            return at !== bt ? at - bt : String(a.text || "").localeCompare(String(b.text || ""));
+        });
+    }
+
+    function capCreateProgressList(titleText, items) {
+        var box = document.createElement("div");
+        box.style.cssText = "display:flex;flex-direction:column;gap:10px;color:#fff;";
+        var status = document.createElement("div");
+        status.textContent = titleText || "Processing";
+        status.style.cssText = "font-size:13px;color:#cbd5e1;";
+        var list = document.createElement("div");
+        list.style.cssText = "max-height:360px;overflow:auto;border:1px solid #333b4b;border-radius:7px;background:#10141c;";
+        var rows = [];
+        for (var i = 0; i < items.length; i++) {
+            var row = document.createElement("div");
+            row.style.cssText = "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;border-top:1px solid rgba(255,255,255,0.06);font-size:12px;";
+            if (i === 0) row.style.borderTop = "none";
+            var label = document.createElement("div");
+            label.textContent = items[i].label || "";
+            label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+            var pill = document.createElement("div");
+            pill.textContent = items[i].status || "Pending";
+            pill.style.cssText = "border-radius:999px;padding:2px 8px;background:#343a46;color:#fff;font-size:11px;";
+            row.appendChild(label);
+            row.appendChild(pill);
+            list.appendChild(row);
+            rows.push(pill);
+        }
+        var closeBtn = capMakeButton("Close", "#444");
+        closeBtn.style.alignSelf = "flex-end";
+        closeBtn.style.display = "none";
+        box.appendChild(status);
+        box.appendChild(list);
+        box.appendChild(closeBtn);
+        return {
+            element: box,
+            setStatus: function(text) { status.textContent = text; },
+            setItem: function(index, stateText, color) {
+                if (!rows[index]) return;
+                rows[index].textContent = stateText;
+                rows[index].style.background = color || "#343a46";
+            },
+            showClose: function(popup) {
+                closeBtn.style.display = "block";
+                closeBtn.addEventListener("click", function() { if (popup) popup.close(); });
+            }
+        };
+    }
+
+    function capValidateWorkspace(state) {
+        var ws = state.workspace;
+        var errors = [];
+        var signatures = {};
+        for (var si = 0; si < ws.segments.length; si++) {
+            var segVal = ws.segments[si].value;
+            var list = ws.segmentFormMap[segVal] || [];
+            var refCount = 0;
+            for (var fi = 0; fi < list.length; fi++) {
+                var entry = list[fi];
+                if (entry.deleteRequested) continue;
+                var key = capGetFormKey(segVal, entry.value, entry.index);
+                var fd = ws.formDataStore[key] || capDefaultFormData();
+                if ((entry.autoPopulated || fd.autoPopulated) && entry.deleteRequested && !(fd.scheduledActivityId || capExtractIdFromHref(fd.editHref, /scheduledactivity\/(\d+)/))) {
+                    errors.push("Cannot delete " + entry.text + " in " + ws.segments[si].text + " because the Scheduled Activity ID was not found.");
+                    continue;
+                }
+                if (!(entry.autoPopulated || fd.autoPopulated) && !capFindDestinationOption(ws.forms, entry.value, entry.text)) {
+                    errors.push("Destination form option is missing for " + entry.text + ".");
+                }
+                if (!fd.studyEvents || !fd.studyEvents[0] || !fd.studyEvents[0].value) {
+                    errors.push("Study Event is missing for " + entry.text + " in " + ws.segments[si].text + ".");
+                }
+                if (fd.refActivity) refCount++;
+                var sig = capBuildFormSignature(segVal, entry, fd);
+                if (signatures[sig]) {
+                    errors.push("Duplicate detected in " + ws.segments[si].text + ": " + entry.text + ".");
+                } else {
+                    signatures[sig] = true;
+                }
+            }
+            if (refCount > 1) {
+                errors.push("Multiple Reference Activities are set in " + ws.segments[si].text + ".");
+            }
+        }
+        return errors;
+    }
+
+    function capBuildApplyItems(state) {
+        var ws = state.workspace;
+        var deletes = [];
+        var updates = [];
+        var adds = [];
+        for (var si = 0; si < ws.segments.length; si++) {
+            var seg = ws.segments[si];
+            var list = ws.segmentFormMap[seg.value] || [];
+            for (var fi = 0; fi < list.length; fi++) {
+                var entry = list[fi];
+                var key = capGetFormKey(seg.value, entry.value, entry.index);
+                var fd = ws.formDataStore[key] || capDefaultFormData();
+                var ev = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : { value: "", text: "" };
+                var label = seg.text + " - " + (ev.text || "[No Study Event]") + " - " + entry.text + " - " + capGetTimeLabel(fd);
+                if ((entry.autoPopulated || fd.autoPopulated) && entry.deleteRequested) {
+                    var deleteId = fd.scheduledActivityId || capExtractIdFromHref(fd.editHref, /scheduledactivity\/(\d+)/);
+                    deletes.push({
+                        id: deleteId,
+                        formKey: key,
+                        segment: seg.text,
+                        studyEvent: ev.text || "",
+                        form: entry.text,
+                        label: label,
+                        archived: false,
+                        visibilityAlreadySet: !!fd.visibilityAlreadySet,
+                        refActivity: !!fd.refActivity,
+                        saRowIndex: fd.saRowIndex
+                    });
+                } else if ((entry.autoPopulated || fd.autoPopulated) && fd.modified) {
+                    updates.push({
+                        segmentValue: seg.value,
+                        segmentText: seg.text,
+                        eventValue: ev.value || "",
+                        eventText: ev.text || "",
+                        formValue: entry.value,
+                        formText: entry.text,
+                        formIndex: entry.index,
+                        formKey: key,
+                        formData: fd,
+                        editHref: fd.editHref || "",
+                        label: label,
+                        status: "Pending"
+                    });
+                } else if (!(entry.autoPopulated || fd.autoPopulated)) {
+                    adds.push({
+                        segmentValue: seg.value,
+                        segmentText: seg.text,
+                        eventValue: ev.value || "",
+                        eventText: ev.text || "",
+                        formValue: entry.value,
+                        formText: entry.text,
+                        formKey: key,
+                        formData: fd,
+                        label: label,
+                        status: "Pending"
+                    });
+                }
+            }
+        }
+        return { deletes: deletes, updates: updates, adds: adds };
+    }
+
+    function capSetCheckboxState(input, desired) {
+        if (!input || input.disabled) return;
+        if (!!input.checked !== !!desired) {
+            input.click();
+        }
+    }
+
+    function capSetInputValue(input, value) {
+        if (!input || input.disabled) return;
+        input.value = String(value === undefined || value === null ? "" : value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    async function capSelect2Value(selectId, value, text) {
+        var sel = document.getElementById(selectId);
+        if (!sel) return false;
+        var options = collectSelectOptions(selectId);
+        var opt = capFindDestinationOption(options, value, text);
+        if (!opt) return false;
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        try {
+            if (window.jQuery && window.jQuery.fn.select2) {
+                window.jQuery("#" + selectId).val(opt.value).trigger("change");
+            }
+        } catch (e) {}
+        await sleep(450);
+        return true;
+    }
+
+    async function capApplyFormDataToModal(fd) {
+        await sleep(350);
+        capSetCheckboxState(document.getElementById("hidden"), !!fd.hidden);
+        capSetCheckboxState(document.getElementById("mandatory"), fd.mandatory !== false);
+        capSetCheckboxState(document.getElementById("enforceDataCollectionOrder"), !!fd.enforce);
+        capSetInputValue(document.getElementById("preWindow"), fd.preWindow || "");
+        capSetInputValue(document.getElementById("postWindow"), fd.postWindow || "");
+        capSetCheckboxState(document.getElementById("referenceActivity"), !!fd.refActivity);
+        await sleep(150);
+        capSetCheckboxState(document.getElementById("offset.preReference"), !!fd.preReference);
+        if (!fd.refActivity) {
+            capSetInputValue(document.querySelector("input[name='offset.days']"), fd.days || 0);
+            capSetInputValue(document.querySelector("input[name='offset.hours']"), fd.hours || 0);
+            capSetInputValue(document.querySelector("input[name='offset.minutes']"), fd.minutes || 0);
+            capSetInputValue(document.querySelector("input[name='offset.seconds']"), fd.seconds || 0);
+        }
+        capSetCheckboxState(document.getElementById("disableCollectionTime"), !!fd.disableCollectionTime);
+        capSetInputValue(document.getElementById("formOffsetSeconds"), fd.formOffsetSeconds || "");
+        if (fd.collectionRoleRestriction) {
+            await setSelect2ValueByText("dataCollectionApplicationUserRole", fd.collectionRoleRestriction);
+        }
+    }
+
+    function capGetVisibleModalError(modal) {
+        modal = modal || document.getElementById("ajaxModal");
+        if (!modal) return "";
+        var errors = modal.querySelectorAll(".alert-danger, .alert-error, .has-error .help-block, .has-error .control-label");
+        for (var i = 0; i < errors.length; i++) {
+            var err = errors[i];
+            var style = window.getComputedStyle(err);
+            if (style.display === "none" || style.visibility === "hidden") continue;
+            var text = normalizeSAText(err.textContent || "");
+            if (text) return text;
+        }
+        return "";
+    }
+
+    async function capExecuteUpdate(item) {
+        var link = capFindEditLink(item.editHref, capExtractIdFromHref(item.editHref, /scheduledactivity\/(\d+)/));
+        if (!link) throw new Error("Edit link not found.");
+        link.click();
+        var modal = await waitForSAModal(12000);
+        if (!modal) throw new Error("Edit modal did not open.");
+        await sleep(800);
+        var studyEventSel = document.getElementById("studyEvent");
+        var formSel = document.getElementById("form");
+        var formChosenEl = document.querySelector("#s2id_form .select2-chosen");
+        var formChosenText = formChosenEl ? normalizeSAText(formChosenEl.textContent || "").trim() : "";
+        var formNeedsSelection = !formSel || !String(formSel.value || "").trim() || !formChosenText;
+        if (formNeedsSelection && item.formText && formSel && !formSel.disabled) {
+            await capSelect2Value("form", item.formValue, item.formText);
+        }
+        if ((studyEventSel && studyEventSel.disabled) || (formSel && formSel.disabled)) {
+            capSetInputValue(document.getElementById("reasonForChange"), "Copy A-Plan update");
+        }
+        if (item.eventValue && studyEventSel && !studyEventSel.disabled) {
+            await capSelect2Value("studyEvent", item.eventValue, item.eventText);
+        }
+        await capApplyFormDataToModal(item.formData || {});
+        var save = document.getElementById("actionButton");
+        if (!save) throw new Error("Save button not found.");
+        save.click();
+        await sleep(600);
+        var modalError = capGetVisibleModalError(modal);
+        if (modalError) throw new Error(modalError);
+        var closed = await waitForSAModalClose(16000);
+        if (!closed) throw new Error(capGetVisibleModalError(modal) || "Edit modal did not close after Save.");
+    }
+
+    async function capExecuteAdd(item) {
+        if (!clickAddSaButton()) throw new Error("Add button could not be clicked.");
+        var modal = await waitForSAModal(12000);
+        if (!modal) throw new Error("Add modal did not open.");
+        await sleep(800);
+        if (!await capSelect2Value("segment", item.segmentValue, item.segmentText)) throw new Error("Could not select segment " + item.segmentText + ".");
+        if (!await capSelect2Value("studyEvent", item.eventValue, item.eventText)) throw new Error("Could not select study event " + item.eventText + ".");
+        if (!await capSelect2Value("form", item.formValue, item.formText)) throw new Error("Could not select form " + item.formText + ".");
+        await capApplyFormDataToModal(item.formData || {});
+        var save = document.getElementById("actionButton");
+        if (!save) throw new Error("Save button not found.");
+        save.click();
+        await sleep(600);
+        var modalError = capGetVisibleModalError(modal);
+        if (modalError) throw new Error(modalError);
+        var closed = await waitForSAModalClose(20000);
+        if (!closed) throw new Error(capGetVisibleModalError(modal) || "Add modal did not close after Save.");
+    }
+
+    async function capExecuteApply(state, applyItems, archiveReason) {
+        var all = [];
+        for (var d = 0; d < applyItems.deletes.length; d++) all.push({ label: "Delete: " + applyItems.deletes[d].label, status: "Pending", kind: "delete", item: applyItems.deletes[d] });
+        for (var u = 0; u < applyItems.updates.length; u++) all.push({ label: "Update: " + applyItems.updates[u].label, status: "Pending", kind: "update", item: applyItems.updates[u] });
+        for (var a = 0; a < applyItems.adds.length; a++) all.push({ label: "Add: " + applyItems.adds[a].label, status: "Pending", kind: "add", item: applyItems.adds[a] });
+        var progress = capCreateProgressList("Preparing Copy A-Plan changes", all);
+        CAP_PROGRESS_POPUP_REF = createPopup({ title: "Copy A-Plan - Applying Changes", content: progress.element, width: "760px", height: "auto", maxHeight: "86%" });
+        var failures = 0;
+        var cursor = 0;
+        if (applyItems.deletes.length > 0) {
+            progress.setStatus("Deleting selected existing forms first");
+            try {
+                for (var dr = 0; dr < applyItems.deletes.length; dr++) {
+                    applyItems.deletes[dr].archiveReason = archiveReason || "Copy A-Plan delete";
+                }
+                var deleteResults = await aprExecuteDeletion(applyItems.deletes);
+                for (var di = 0; di < applyItems.deletes.length; di++) {
+                    var ok = deleteResults && deleteResults[di] && deleteResults[di].status !== "Failed";
+                    progress.setItem(cursor + di, ok ? "Done" : "Failed", ok ? "#2e7d32" : "#b3261e");
+                    if (!ok) failures++;
+                }
+            } catch (e) {
+                for (var dx = 0; dx < applyItems.deletes.length; dx++) progress.setItem(cursor + dx, "Failed", "#b3261e");
+                failures += applyItems.deletes.length;
+            }
+            cursor += applyItems.deletes.length;
+        }
+        for (var ui = 0; ui < applyItems.updates.length; ui++) {
+            progress.setStatus("Updating existing form " + (ui + 1) + " of " + applyItems.updates.length);
+            progress.setItem(cursor + ui, "Processing", "#5b43c7");
+            try {
+                await capExecuteUpdate(applyItems.updates[ui]);
+                progress.setItem(cursor + ui, "Done", "#2e7d32");
+            } catch (e2) {
+                failures++;
+                progress.setItem(cursor + ui, "Failed", "#b3261e");
+                capLog("update failed: " + String(e2));
+                await capCloseActiveModal();
+            }
+        }
+        cursor += applyItems.updates.length;
+        for (var ai = 0; ai < applyItems.adds.length; ai++) {
+            progress.setStatus("Adding copied form " + (ai + 1) + " of " + applyItems.adds.length);
+            progress.setItem(cursor + ai, "Processing", "#5b43c7");
+            try {
+                await capExecuteAdd(applyItems.adds[ai]);
+                progress.setItem(cursor + ai, "Done", "#2e7d32");
+            } catch (e3) {
+                failures++;
+                progress.setItem(cursor + ai, "Failed", "#b3261e");
+                capLog("add failed: " + String(e3));
+                await capCloseActiveModal();
+            }
+        }
+        progress.setStatus(failures ? "Completed with " + failures + " failure(s). Review the rows above." : "Completed successfully.");
+        progress.showClose(CAP_PROGRESS_POPUP_REF);
+        if (!failures) {
+            capClearWorkflow();
+            var root = document.getElementById(CAP_ROOT_ID);
+            if (root) root.remove();
+        }
+    }
+
+    function capOpenApplyConfirm(state, applyItems, validationErrors) {
+        var box = document.createElement("div");
+        box.style.cssText = "display:flex;flex-direction:column;gap:12px;color:#fff;padding:6px;";
+        if (validationErrors && validationErrors.length) {
+            var errTitle = document.createElement("div");
+            errTitle.textContent = "Fix these issues before applying:";
+            errTitle.style.cssText = "color:#ff8a8a;font-weight:800;";
+            box.appendChild(errTitle);
+            for (var e = 0; e < validationErrors.length; e++) {
+                var er = document.createElement("div");
+                er.textContent = validationErrors[e];
+                er.style.cssText = "font-size:12px;color:#ffb4b4;";
+                box.appendChild(er);
+            }
+            var closeOnly = capMakeButton("Close", "#444");
+            closeOnly.style.alignSelf = "flex-end";
+            box.appendChild(closeOnly);
+            var errPopup = createPopup({ title: "Copy A-Plan - Validation", content: box, width: "620px", height: "auto" });
+            closeOnly.addEventListener("click", function() { errPopup.close(); });
+            return;
+        }
+        var summary = document.createElement("div");
+        summary.textContent = "Apply " + applyItems.adds.length + " add(s), " + applyItems.updates.length + " update(s), and " + applyItems.deletes.length + " delete(s) to the destination A-Plan?";
+        summary.style.cssText = "font-size:13px;line-height:1.45;";
+        box.appendChild(summary);
+        var reasonInput = null;
+        if (applyItems.deletes.length > 0) {
+            var field = document.createElement("label");
+            field.style.cssText = "display:flex;flex-direction:column;gap:5px;font-size:12px;color:#cbd5e1;font-weight:700;";
+            field.appendChild(document.createTextNode("Delete/archive reason"));
+            reasonInput = document.createElement("input");
+            reasonInput.type = "text";
+            reasonInput.value = "Copy A-Plan delete";
+            reasonInput.style.cssText = "width:100%;padding:8px;border-radius:5px;border:1px solid #444;background:#111;color:#fff;";
+            field.appendChild(reasonInput);
+            box.appendChild(field);
+        }
+        var actions = document.createElement("div");
+        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancel = capMakeButton("Cancel", "#444");
+        var apply = capMakeButton("Apply", "#28a745");
+        actions.appendChild(cancel);
+        actions.appendChild(apply);
+        box.appendChild(actions);
+        var popup = createPopup({ title: "Copy A-Plan - Confirm Apply", content: box, width: "540px", height: "auto" });
+        cancel.addEventListener("click", function() { popup.close(); });
+        apply.addEventListener("click", function() {
+            var reason = reasonInput ? normalizeSAText(reasonInput.value || "") : "";
+            if (reasonInput && !reason) {
+                reasonInput.style.borderColor = "#ff8a8a";
+                return;
+            }
+            popup.close();
+            capExecuteApply(state, applyItems, reason);
+        });
+    }
+
+    function capOpenWorkspace(state) {
+        capInjectStyles();
+        var existing = document.getElementById(CAP_ROOT_ID);
+        if (existing) existing.remove();
+        if (!state.workspace) state.workspace = capBuildWorkspaceState(state.destinationData || {});
+        var ws = state.workspace;
+        var root = document.createElement("div");
+        root.id = CAP_ROOT_ID;
+        var header = document.createElement("div");
+        header.className = "cap-header";
+        var title = document.createElement("div");
+        title.className = "cap-title";
+        var strong = document.createElement("strong");
+        strong.textContent = "Copy A-Plan";
+        var sub = document.createElement("span");
+        sub.textContent = "From: " + ((state.sourcePlan && state.sourcePlan.name) || "") + " (ID " + ((state.sourcePlan && state.sourcePlan.id) || "") + ") | To: " + ((state.destinationPlan && state.destinationPlan.name) || "") + " (ID " + ((state.destinationPlan && state.destinationPlan.id) || "") + ")";
+        title.appendChild(strong);
+        title.appendChild(sub);
+        var headerActions = document.createElement("div");
+        headerActions.style.cssText = "display:flex;gap:8px;align-items:center;";
+        var applyBtn = capMakeButton("Apply Changes", "#28a745");
+        var startOverBtn = capMakeButton("Start Over", "#8a3ffc");
+        var closeBtn = capMakeButton("Close", "#444");
+        headerActions.appendChild(startOverBtn);
+        headerActions.appendChild(applyBtn);
+        headerActions.appendChild(closeBtn);
+        header.appendChild(title);
+        header.appendChild(headerActions);
+        root.appendChild(header);
+
+        var main = document.createElement("div");
+        main.className = "cap-main";
+        var studyPanel = capWorkspacePanel("Destination Study Events", "cap-study-panel");
+        var sourcePanel = capWorkspacePanel("Source A-Plan", "");
+        var destPanel = capWorkspacePanel("Destination A-Plan", "");
+        var configPanel = capWorkspacePanel("Time Relative to Segment / Form Configuration", "cap-config-panel");
+        main.appendChild(studyPanel.panel);
+        main.appendChild(sourcePanel.panel);
+        main.appendChild(destPanel.panel);
+        main.appendChild(configPanel.panel);
+        root.appendChild(main);
+
+        var footer = document.createElement("div");
+        footer.className = "cap-footer";
+        var footerLeft = document.createElement("div");
+        footerLeft.className = "cap-footer-left";
+        var status = document.createElement("div");
+        status.className = "cap-footer-status";
+        footerLeft.appendChild(capChip("Existing"));
+        footerLeft.appendChild(capChip("New"));
+        footerLeft.appendChild(capChip("Modified"));
+        footerLeft.appendChild(capChip("Deleted"));
+        footerLeft.appendChild(capChip("Pre/Post Window not copied from Source"));
+        footerLeft.appendChild(status);
+        footer.appendChild(footerLeft);
+        root.appendChild(footer);
+
+        document.body.appendChild(root);
+        var dragInfo = null;
+
+        function persist() {
+            state.workspace = ws;
+            capSaveWorkflow(state);
+        }
+
+        function warn(text) {
+            if (!ws.warnings) ws.warnings = [];
+            ws.warnings.push(text);
+            status.textContent = text;
+            persist();
+        }
+
+        function markModified(key) {
+            var found = capFindWorkspaceForm(ws, key);
+            if (!found) return;
+            if (found.data.autoPopulated || found.entry.autoPopulated) {
+                found.data.modified = true;
+            }
+            ws.dirty = true;
+            ws.formDataStore[key] = found.data;
+            persist();
+        }
+
+        function renderAll() {
+            renderStudyEvents();
+            renderSource();
+            renderDestination();
+            renderConfig();
+            var items = capBuildApplyItems(state);
+            var warningText = "";
+            if (ws.warnings && ws.warnings.length) {
+                warningText = " Warnings: " + ws.warnings.length + " latest: " + ws.warnings[ws.warnings.length - 1];
+            }
+            status.textContent = "Staged: " + items.adds.length + " add(s), " + items.updates.length + " update(s), " + items.deletes.length + " delete(s)." + (ws.clipboard ? " Clipboard: " + ws.clipboard.type + "." : "") + warningText;
+            persist();
+        }
+
+        function renderStudyEvents() {
+            studyPanel.body.innerHTML = "";
+            var events = ws.studyEvents || [];
+            if (!events.length) {
+                studyPanel.body.appendChild(capEmpty("No destination Study Events were found."));
+                return;
+            }
+            for (var i = 0; i < events.length; i++) {
+                var ev = events[i];
+                var row = document.createElement("div");
+                row.className = "cap-form-row";
+                row.style.gridTemplateColumns = "minmax(0,1fr) auto";
+                var txt = document.createElement("div");
+                txt.className = "cap-form-main";
+                var nm = document.createElement("div");
+                nm.className = "cap-form-name";
+                nm.textContent = ev.text;
+                var meta = document.createElement("div");
+                meta.className = "cap-form-meta";
+                meta.textContent = "ID " + ev.value;
+                txt.appendChild(nm);
+                txt.appendChild(meta);
+                var copy = capMakeIconButton("fa fa-copy", "Copy Study Event");
+                copy.addEventListener("click", (function(eventData) {
+                    return function(e) {
+                        e.stopPropagation();
+                        ws.clipboard = { type: "studyEvent", source: "destinationAPlan", data: capClone(eventData) };
+                        ws.dirty = ws.dirty || false;
+                        renderAll();
+                    };
+                })(ev));
+                row.appendChild(txt);
+                row.appendChild(copy);
+                studyPanel.body.appendChild(row);
+            }
+        }
+
+        function renderSource() {
+            sourcePanel.body.innerHTML = "";
+            var sourceData = state.sourceData || {};
+            var segments = sourceData.segments || [];
+            if (!segments.length) {
+                sourcePanel.body.appendChild(capEmpty("No source segments were found."));
+                return;
+            }
+            for (var s = 0; s < segments.length; s++) {
+                sourcePanel.body.appendChild(renderSegmentBlock(sourceData, segments[s], false));
+            }
+        }
+
+        function renderDestination() {
+            destPanel.body.innerHTML = "";
+            var segments = ws.segments || [];
+            if (!segments.length) {
+                destPanel.body.appendChild(capEmpty("No destination segments were found."));
+                return;
+            }
+            for (var s = 0; s < segments.length; s++) {
+                destPanel.body.appendChild(renderSegmentBlock(ws, segments[s], true));
+            }
+        }
+
+        function renderSegmentBlock(planData, seg, editable) {
+            var segBox = document.createElement("div");
+            segBox.className = "cap-segment";
+            var head = document.createElement("div");
+            head.className = "cap-segment-head";
+            var name = document.createElement("div");
+            name.className = "cap-segment-name";
+            name.textContent = seg.text || String(seg.value);
+            var actions = document.createElement("div");
+            actions.className = "cap-segment-actions";
+            var copyAll = capMakeIconButton("fa fa-copy", editable ? "Copy destination segment" : "Copy source segment", "Copy All");
+            copyAll.addEventListener("click", function(e) {
+                e.stopPropagation();
+                ws.clipboard = capMakeSegmentSnapshot(planData, seg.value, editable ? "destinationAPlan" : "sourceAPlan");
+                renderAll();
+            });
+            actions.appendChild(copyAll);
+            if (editable) {
+                var undo = capMakeIconButton("fa fa-undo", "Undo this segment", "Undo");
+                undo.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    capRestoreDestinationSegment(state, seg.value);
+                    renderAll();
+                });
+                var paste = capMakeIconButton("fa fa-clipboard", "Paste clipboard into this segment", "Paste");
+                paste.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    var pasted = capPasteClipboard(state, seg.value, false);
+                    if (pasted.message) warn(pasted.message);
+                    renderAll();
+                });
+                var pasteAll = capMakeIconButton("fa fa-clipboard", "Paste copied segment into all destination segments", "Paste All");
+                pasteAll.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    var pasted = capPasteClipboard(state, seg.value, true);
+                    if (pasted.message) warn(pasted.message);
+                    renderAll();
+                });
+                var sort = capMakeIconButton("fa fa-sort", "Sort this segment", "Sort");
+                sort.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    capSortSegment(ws, seg.value);
+                    ws.dirty = true;
+                    renderAll();
+                });
+                var collapse = capMakeIconButton("fa fa-minus", "Collapse or expand", ws.segmentCollapsed[seg.value] ? "Expand" : "Collapse");
+                collapse.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    ws.segmentCollapsed[seg.value] = !ws.segmentCollapsed[seg.value];
+                    renderAll();
+                });
+                actions.insertBefore(undo, actions.firstChild);
+                actions.appendChild(paste);
+                actions.appendChild(pasteAll);
+                actions.appendChild(sort);
+                actions.appendChild(collapse);
+            }
+            head.appendChild(name);
+            head.appendChild(actions);
+            segBox.appendChild(head);
+            if (editable && ws.segmentCollapsed[seg.value]) return segBox;
+            var list = document.createElement("div");
+            list.addEventListener("dragover", function(e) {
+                if (editable && dragInfo) e.preventDefault();
+            });
+            list.addEventListener("drop", function(e) {
+                if (!editable || !dragInfo) return;
+                e.preventDefault();
+                capMoveWorkspaceForm(ws, dragInfo.key, seg.value, null, warn);
+                dragInfo = null;
+                renderAll();
+            });
+            var formsList = (planData.segmentFormMap && planData.segmentFormMap[seg.value]) || [];
+            if (!formsList.length) {
+                list.appendChild(capEmpty("No forms in this segment."));
+            }
+            for (var f = 0; f < formsList.length; f++) {
+                list.appendChild(renderFormRow(planData, seg.value, formsList[f], editable, f));
+            }
+            segBox.appendChild(list);
+            return segBox;
+        }
+
+        function renderFormRow(planData, segVal, entry, editable, rowIndex) {
+            var key = capGetFormKey(segVal, entry.value, entry.index);
+            var fd = planData.formDataStore[key] || capDefaultFormData();
+            var row = document.createElement("div");
+            row.className = "cap-form-row";
+            if (editable && ws.selectedFormKey === key) row.className += " cap-selected";
+            if (entry.deleteRequested) row.className += " cap-deleted";
+            if (editable) {
+                row.draggable = true;
+                row.addEventListener("dragstart", function(e) {
+                    dragInfo = { key: key, segVal: segVal };
+                    e.dataTransfer.effectAllowed = "move";
+                });
+                row.addEventListener("dragover", function(e) {
+                    if (dragInfo) e.preventDefault();
+                });
+                row.addEventListener("drop", function(e) {
+                    if (!dragInfo) return;
+                    e.preventDefault();
+                    capMoveWorkspaceForm(ws, dragInfo.key, segVal, rowIndex, warn);
+                    dragInfo = null;
+                    renderAll();
+                });
+                row.addEventListener("click", function() {
+                    ws.selectedFormKey = key;
+                    renderAll();
+                });
+            }
+            var main = document.createElement("div");
+            main.className = "cap-form-main";
+            var name = document.createElement("div");
+            name.className = "cap-form-name";
+            name.textContent = entry.text || "";
+            var ev = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
+            var meta = document.createElement("div");
+            meta.className = "cap-form-meta";
+            meta.textContent = (ev && ev.text ? ev.text : "[No Study Event]") + " | " + capGetTimeLabel(fd) + (fd.hidden ? " | Hidden" : "") + (fd.refActivity ? " | Reference" : "") + (fd.modified ? " | Modified" : "") + (!(entry.autoPopulated || fd.autoPopulated) ? " | New" : "") + (fd.prePostWindowReviewNeeded ? " | Pre/Post Window: Not copied" : "");
+            main.appendChild(name);
+            main.appendChild(meta);
+            row.appendChild(main);
+            if (editable) {
+                row.appendChild(renderEventDrop(key, fd));
+            } else {
+                var readOnly = document.createElement("div");
+                readOnly.className = "cap-form-meta";
+                readOnly.textContent = "Read-only";
+                row.appendChild(readOnly);
+            }
+            var actions = document.createElement("div");
+            actions.className = "cap-row-actions";
+            var copy = capMakeIconButton("fa fa-copy", "Copy form");
+            copy.addEventListener("click", function(e) {
+                e.stopPropagation();
+                ws.clipboard = capMakeFormSnapshot(planData, segVal, entry, editable ? "destinationAPlan" : "sourceAPlan");
+                renderAll();
+            });
+            actions.appendChild(copy);
+            if (editable) {
+                var up = capMakeIconButton("fa fa-arrow-up", "Move up");
+                up.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    capReorderWorkspaceForm(ws, key, -1);
+                    renderAll();
+                });
+                var down = capMakeIconButton("fa fa-arrow-down", "Move down");
+                down.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    capReorderWorkspaceForm(ws, key, 1);
+                    renderAll();
+                });
+                var del = capMakeIconButton(entry.deleteRequested ? "fa fa-undo" : "fa fa-times", entry.deleteRequested ? "Undo delete" : "Delete");
+                del.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    capToggleDeleteWorkspaceForm(ws, key);
+                    renderAll();
+                });
+                actions.appendChild(up);
+                actions.appendChild(down);
+                actions.appendChild(del);
+            }
+            row.appendChild(actions);
+            return row;
+        }
+
+        function renderEventDrop(key, fd) {
+            var wrap = document.createElement("div");
+            wrap.className = "cap-event-drop";
+            var select = document.createElement("select");
+            var blank = document.createElement("option");
+            blank.value = "";
+            blank.textContent = "Select Study Event";
+            select.appendChild(blank);
+            for (var i = 0; i < ws.studyEvents.length; i++) {
+                var opt = document.createElement("option");
+                opt.value = ws.studyEvents[i].value;
+                opt.textContent = ws.studyEvents[i].text;
+                select.appendChild(opt);
+            }
+            var current = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
+            select.value = current ? current.value : "";
+            select.addEventListener("click", function(e) { e.stopPropagation(); });
+            select.addEventListener("change", function() {
+                var found = capFindDestinationOption(ws.studyEvents, select.value, "");
+                fd.studyEvents = found ? [{ value: found.value, text: found.text }] : [];
+                markModified(key);
+                renderAll();
+            });
+            var copyEv = capMakeIconButton("fa fa-copy", "Copy this row's Study Event");
+            copyEv.addEventListener("click", function(e) {
+                e.stopPropagation();
+                if (fd.studyEvents && fd.studyEvents[0]) {
+                    ws.clipboard = { type: "studyEvent", source: "destinationAPlan", data: capClone(fd.studyEvents[0]) };
+                    renderAll();
+                }
+            });
+            var pasteEv = capMakeIconButton("fa fa-clipboard", "Paste copied Study Event");
+            pasteEv.addEventListener("click", function(e) {
+                e.stopPropagation();
+                if (!ws.clipboard || ws.clipboard.type !== "studyEvent") {
+                    warn("Copy a destination Study Event before pasting one.");
+                    return;
+                }
+                var ev = capFindDestinationOption(ws.studyEvents, ws.clipboard.data.value, ws.clipboard.data.text);
+                if (!ev) {
+                    warn("The copied Study Event is not available in the destination.");
+                    return;
+                }
+                fd.studyEvents = [{ value: ev.value, text: ev.text }];
+                markModified(key);
+                renderAll();
+            });
+            wrap.appendChild(select);
+            wrap.appendChild(copyEv);
+            wrap.appendChild(pasteEv);
+            return wrap;
+        }
+
+        function renderConfig() {
+            configPanel.body.innerHTML = "";
+            var found = capFindWorkspaceForm(ws, ws.selectedFormKey);
+            if (!found) {
+                configPanel.body.appendChild(capEmpty("Select a destination form to edit its configuration. Source forms are read-only."));
+                return;
+            }
+            var fd = found.data;
+            var banner = document.createElement("div");
+            banner.style.cssText = "display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px;";
+            var info = document.createElement("div");
+            info.className = "cap-form-main";
+            var name = document.createElement("div");
+            name.className = "cap-form-name";
+            name.textContent = found.entry.text;
+            var meta = document.createElement("div");
+            meta.className = "cap-form-meta";
+            meta.textContent = capGetSegmentText(ws, found.segVal);
+            info.appendChild(name);
+            info.appendChild(meta);
+            var copyConfig = capMakeIconButton("fa fa-copy", "Copy this destination form", "Copy Form");
+            copyConfig.addEventListener("click", function() {
+                ws.clipboard = capMakeFormSnapshot(ws, found.segVal, found.entry, "destinationAPlan");
+                renderAll();
+            });
+            banner.appendChild(info);
+            banner.appendChild(copyConfig);
+            configPanel.body.appendChild(banner);
+            if (fd.prePostWindowReviewNeeded) {
+                var prePostNote = document.createElement("div");
+                prePostNote.className = "cap-warning";
+                prePostNote.textContent = "Pre/Post Window values were not copied from the Source A-Plan. Review and configure them manually where required.";
+                prePostNote.style.marginBottom = "10px";
+                configPanel.body.appendChild(prePostNote);
+            }
+            var grid = document.createElement("div");
+            grid.className = "cap-config-grid";
+            grid.appendChild(capNumberField("Days", fd.days || 0, function(v) { fd.days = v; markModified(found.key); }));
+            grid.appendChild(capNumberField("Hours", fd.hours || 0, function(v) { fd.hours = v; markModified(found.key); }));
+            grid.appendChild(capNumberField("Minutes", fd.minutes || 0, function(v) { fd.minutes = v; markModified(found.key); }));
+            grid.appendChild(capNumberField("Seconds", fd.seconds || 0, function(v) { fd.seconds = v; markModified(found.key); }));
+            grid.appendChild(capTextField("Pre Window", fd.preWindow || "", function(v) { fd.preWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
+            grid.appendChild(capTextField("Post Window", fd.postWindow || "", function(v) { fd.postWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
+            grid.appendChild(capTextField("Form Offset Seconds", fd.formOffsetSeconds || "", function(v) { fd.formOffsetSeconds = v; markModified(found.key); }));
+            grid.appendChild(capTextField("Role Restriction", fd.collectionRoleRestriction || "", function(v) { fd.collectionRoleRestriction = v; markModified(found.key); }));
+            configPanel.body.appendChild(grid);
+            var checks = document.createElement("div");
+            checks.className = "cap-checks";
+            checks.style.marginTop = "10px";
+            checks.appendChild(capCheckboxField("Hidden", !!fd.hidden, function(v) { fd.hidden = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Mandatory", fd.mandatory !== false, function(v) { fd.mandatory = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Enforce Order", !!fd.enforce, function(v) { fd.enforce = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Reference Activity", !!fd.refActivity, function(v) { fd.refActivity = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Pre-reference", !!fd.preReference, function(v) { fd.preReference = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Disable Collection Time", !!fd.disableCollectionTime, function(v) { fd.disableCollectionTime = v; markModified(found.key); }));
+            configPanel.body.appendChild(checks);
+        }
+
+        closeBtn.addEventListener("click", function() {
+            if (ws.dirty && !window.confirm("Close Copy A-Plan and discard staged changes?")) return;
+            CAP_CANCELLED = true;
+            capClearWorkflow();
+            root.remove();
+        });
+        startOverBtn.addEventListener("click", function() {
+            if (ws.dirty && !window.confirm("Start over and discard staged changes?")) return;
+            CAP_CANCELLED = true;
+            capClearWorkflow();
+            root.remove();
+        });
+        applyBtn.addEventListener("click", function() {
+            var validation = capValidateWorkspace(state);
+            var items = capBuildApplyItems(state);
+            if (!validation.length && items.adds.length + items.updates.length + items.deletes.length === 0) {
+                validation.push("No destination changes are staged.");
+            }
+            capOpenApplyConfirm(state, items, validation);
+        });
+        renderAll();
+    }
+
+    function capWorkspacePanel(title, extraClass) {
+        var panel = document.createElement("div");
+        panel.className = "cap-panel" + (extraClass ? " " + extraClass : "");
+        var header = document.createElement("div");
+        header.className = "cap-panel-header";
+        var titleEl = document.createElement("div");
+        titleEl.className = "cap-panel-title";
+        titleEl.textContent = title;
+        header.appendChild(titleEl);
+        var body = document.createElement("div");
+        body.className = "cap-panel-body";
+        panel.appendChild(header);
+        panel.appendChild(body);
+        return { panel: panel, header: header, body: body };
+    }
+
+    function capChip(text) {
+        var chip = document.createElement("span");
+        chip.className = "cap-chip";
+        chip.textContent = text;
+        return chip;
+    }
+
+    function capEmpty(text) {
+        var empty = document.createElement("div");
+        empty.className = "cap-empty";
+        empty.textContent = text;
+        return empty;
+    }
+
+    function capNumberField(labelText, value, onChange) {
+        var field = document.createElement("div");
+        field.className = "cap-field";
+        var label = document.createElement("label");
+        label.textContent = labelText;
+        var input = document.createElement("input");
+        input.type = "number";
+        input.min = "0";
+        input.value = String(value || 0);
+        input.addEventListener("change", function() { onChange(parseInt(input.value, 10) || 0); });
+        field.appendChild(label);
+        field.appendChild(input);
+        return field;
+    }
+
+    function capTextField(labelText, value, onChange) {
+        var field = document.createElement("div");
+        field.className = "cap-field";
+        var label = document.createElement("label");
+        label.textContent = labelText;
+        var input = document.createElement("input");
+        input.type = "text";
+        input.value = value || "";
+        input.addEventListener("change", function() { onChange(input.value || ""); });
+        field.appendChild(label);
+        field.appendChild(input);
+        return field;
+    }
+
+    function capCheckboxField(labelText, checked, onChange) {
+        var label = document.createElement("label");
+        var input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = !!checked;
+        input.addEventListener("change", function() { onChange(!!input.checked); });
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(labelText));
+        return label;
+    }
+
+    function capRestoreDestinationSegment(state, segVal) {
+        var ws = state.workspace;
+        var original = state.destinationData || {};
+        var currentList = ws.segmentFormMap[segVal] || [];
+        for (var i = 0; i < currentList.length; i++) {
+            delete ws.formDataStore[capGetFormKey(segVal, currentList[i].value, currentList[i].index)];
+        }
+        ws.segmentFormMap[segVal] = capClone((original.segmentFormMap && original.segmentFormMap[segVal]) || []) || [];
+        var restored = ws.segmentFormMap[segVal] || [];
+        for (var r = 0; r < restored.length; r++) {
+            var key = capGetFormKey(segVal, restored[r].value, restored[r].index);
+            var data = original.formDataStore ? original.formDataStore[key] : null;
+            if (data) ws.formDataStore[key] = capClone(data);
+        }
+        if (ws.selectedFormKey && !capFindWorkspaceForm(ws, ws.selectedFormKey)) ws.selectedFormKey = null;
+        ws.dirty = true;
+    }
+
+    function capPasteClipboard(state, targetSegVal, allSegments) {
+        var ws = state.workspace;
+        var clip = ws.clipboard;
+        if (!clip) return { count: 0, message: "Copy a form or segment first." };
+        if (clip.type === "studyEvent") return { count: 0, message: "Paste Study Events onto a destination form row." };
+        if (allSegments && clip.type !== "segment") return { count: 0, message: "Paste All requires a copied segment." };
+        var targets = [];
+        if (allSegments && clip.type === "segment") {
+            for (var s = 0; s < ws.segments.length; s++) targets.push(ws.segments[s].value);
+        } else {
+            targets.push(targetSegVal);
+        }
+        var warnings = [];
+        var count = 0;
+        for (var t = 0; t < targets.length; t++) {
+            if (clip.type === "form") {
+                if (capPasteFormSnapshot(state, targets[t], clip.data, warnings)) count++;
+            } else if (clip.type === "segment") {
+                var forms = clip.data.forms || [];
+                for (var f = 0; f < forms.length; f++) {
+                    if (capPasteFormSnapshot(state, targets[t], forms[f], warnings)) count++;
+                }
+            }
+        }
+        ws.dirty = ws.dirty || count > 0;
+        var msg = count + " form(s) pasted.";
+        if (warnings.length) msg += " " + warnings.join(" ");
+        return { count: count, message: msg };
+    }
+
+    function capMoveWorkspaceForm(ws, formKey, targetSegVal, targetIndex, warnFn) {
+        var found = capFindWorkspaceForm(ws, formKey);
+        if (!found) return false;
+        if ((found.entry.autoPopulated || found.data.autoPopulated) && String(found.segVal) !== String(targetSegVal)) {
+            if (warnFn) warnFn("Existing destination forms cannot be moved to a different segment through Copy A-Plan. Copy and paste it as a new form instead.");
+            return false;
+        }
+        var oldList = ws.segmentFormMap[found.segVal] || [];
+        oldList.splice(found.index, 1);
+        var newList = ws.segmentFormMap[targetSegVal] || [];
+        var insertAt = targetIndex === null || targetIndex === undefined ? newList.length : Math.max(0, Math.min(targetIndex, newList.length));
+        newList.splice(insertAt, 0, found.entry);
+        ws.segmentFormMap[found.segVal] = oldList;
+        ws.segmentFormMap[targetSegVal] = newList;
+        if (String(found.segVal) !== String(targetSegVal)) {
+            delete ws.formDataStore[formKey];
+            var newKey = capGetFormKey(targetSegVal, found.entry.value, found.entry.index);
+            ws.formDataStore[newKey] = found.data;
+            ws.selectedFormKey = newKey;
+        }
+        ws.dirty = true;
+        return true;
+    }
+
+    function capReorderWorkspaceForm(ws, formKey, delta) {
+        var found = capFindWorkspaceForm(ws, formKey);
+        if (!found) return false;
+        var list = ws.segmentFormMap[found.segVal] || [];
+        var next = found.index + delta;
+        if (next < 0 || next >= list.length) return false;
+        var temp = list[found.index];
+        list[found.index] = list[next];
+        list[next] = temp;
+        ws.dirty = true;
+        return true;
+    }
+
+    function capToggleDeleteWorkspaceForm(ws, formKey) {
+        var found = capFindWorkspaceForm(ws, formKey);
+        if (!found) return false;
+        if (found.entry.autoPopulated || found.data.autoPopulated) {
+            found.entry.deleteRequested = !found.entry.deleteRequested;
+        } else {
+            var list = ws.segmentFormMap[found.segVal] || [];
+            list.splice(found.index, 1);
+            delete ws.formDataStore[formKey];
+            if (ws.selectedFormKey === formKey) ws.selectedFormKey = null;
+        }
+        ws.dirty = true;
+        return true;
+    }
+
+    //==========================
     // ACTIVITY PLAN REMOVAL FEATURE
     //==========================
     // This feature allows bulk deletion of scheduled activities from the
@@ -20801,6 +23220,7 @@
         { id: "Archive/Update Forms", label: "Archive/Update Forms" },
         { id: "Edit Forms", label: "Edit Forms" },
         { id: "Copy Activity Forms", label: "Copy Activity Forms" },
+        { id: "Copy A-Plan", label: "Copy A-Plan" },
         { id: "Search Methods", label: "Search Methods" },
         { id: "Parse Deviation", label: "Parse Deviation" },
         { id: "Import I/E", label: "Import I/E" },
@@ -20955,6 +23375,7 @@
                     { label: "Archive/Update Forms", desc: "Batch archives or renames forms in the study library across multiple studies. Useful when replacing forms, standardizing names, or retiring old versions." },
                     { label: "Edit Forms", desc: "Batch edits production form-library configuration, including form name, description, usage flags, barcode verification, ICF requirement, lock state, and form usage. Includes full-screen mode, resizable panels, reset controls, and safe edit/lock sequencing." },
                     { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study or activity plan context to another while preserving structure and settings where possible." },
+                    { label: "Copy A-Plan", desc: "Copies forms, segment placement, study-event mappings, and scheduled-activity configuration from one Activity Plan into an editable destination Activity Plan through an isolated full-screen workspace." },
                     { label: "Search Methods", desc: "Opens the method library that contains coded methods and edit checks." },
                     { label: "Parse Deviation", desc: "Navigates to subject data and deviation forms, extracts deviation details, and prepares the information for review or copying." },
                     { label: "Import I/E", desc: "Maps inclusion/exclusion check items to the correct Activity Plan forms and items. Shows expected eligibility defaults next to empty dropboxes and supports flexible eligibility mapping cleanup." },
@@ -45459,6 +47880,24 @@
             await runCopyFormsToStudyEvents();
         });
 
+        var copyAPlanBtn = document.createElement("button");
+        copyAPlanBtn.textContent = "Copy A-Plan";
+        copyAPlanBtn.style.background = "#2f80ed";
+        copyAPlanBtn.style.color = "#fff";
+        copyAPlanBtn.style.border = "none";
+        copyAPlanBtn.style.borderRadius = "6px";
+        copyAPlanBtn.style.padding = "8px";
+        copyAPlanBtn.style.cursor = "pointer";
+        copyAPlanBtn.style.fontWeight = "500";
+        copyAPlanBtn.style.transition = "background 0.2s";
+        copyAPlanBtn.onmouseenter = function() { this.style.background = "#1f6fd1"; };
+        copyAPlanBtn.onmouseleave = function() { this.style.background = "#2f80ed"; };
+        copyAPlanBtn.addEventListener("click", async function () {
+            CAP_CANCELLED = false;
+            capLog("button clicked");
+            await runCopyAPlan();
+        });
+
 
         var pullLabBarcodeBtn = document.createElement("button");
         pullLabBarcodeBtn.textContent = BARCODE_LABELS.featureButton;
@@ -45649,7 +48088,7 @@
 
         // Apply glassmorphism theme to all panel buttons if glass theme is active
         if (glass) {
-            var allPanelBtns = [svcBtn, runBarcodeBtn, pullLabBarcodeBtn, saBuilderBtn, importFromLibBtn, archiveUpdateFormsBtn, editFormsBtn, copyFormsBtn, searchMethodsBtn, parseDeviationBtn, bplBtn, aprBtn, importEligBtn, clearMappingBtn, findFormAndEventsBtn, parseMethodBtn, openEligBtn, subjectEligBtn, parseStudyEventBtn, parseFormsBtn, formPreviewBtn, editStudyEventsBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, downloadDtsBtn, printBarcodesBtn, autoResaverBtn, editItemRefBtn];
+            var allPanelBtns = [svcBtn, runBarcodeBtn, pullLabBarcodeBtn, saBuilderBtn, importFromLibBtn, archiveUpdateFormsBtn, editFormsBtn, copyFormsBtn, copyAPlanBtn, searchMethodsBtn, parseDeviationBtn, bplBtn, aprBtn, importEligBtn, clearMappingBtn, findFormAndEventsBtn, parseMethodBtn, openEligBtn, subjectEligBtn, parseStudyEventBtn, parseFormsBtn, formPreviewBtn, editStudyEventsBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, downloadDtsBtn, printBarcodesBtn, autoResaverBtn, editItemRefBtn];
             for (var gi = 0; gi < allPanelBtns.length; gi++) {
                 var gb = allPanelBtns[gi];
                 gb.className = "ie-btn-primary";
@@ -45676,6 +48115,7 @@
             { el: archiveUpdateFormsBtn, label: "Archive/Update Forms" },
             { el: editFormsBtn, label: "Edit Forms" },
             { el: copyFormsBtn, label: "Copy Activity Forms"},
+            { el: copyAPlanBtn, label: "Copy A-Plan" },
             { el: searchMethodsBtn, label: "Search Methods" },
             { el: parseDeviationBtn, label: "Parse Deviation" },
             { el: importEligBtn, label: "Import I/E" },
@@ -45974,6 +48414,7 @@
         makePanel();
         bindPanelHotkeyOnce();
         initSmartPageLocator();
+        capResumeWorkflowIfNeeded();
 
         // Resume Edit Study Events after page reload (Add Batch triggers reload)
         editSE_resumeAfterReload();

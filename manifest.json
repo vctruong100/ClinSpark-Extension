@@ -34,15 +34,6 @@
         "ClinSpark Test Automator.js"
       ],
       "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://cenexel-val.clinspark.com/*"
-      ],
-      "js": [
-        "ClinSpark Val Automator.js"
-      ],
-      "run_at": "document_idle"
     }
   ],
   "host_permissions": [
