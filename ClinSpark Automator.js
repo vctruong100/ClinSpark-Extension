@@ -7490,6 +7490,8 @@
                     autoData.timepointRaw = saItem.timepointRaw || autoData.timepointRaw || "";
                     autoData.timepointCleaned = saItem.timepointCleaned || autoData.timepointCleaned || "";
                     autoData.timepointDisplay = saItem.timepointDisplay || autoData.timepointDisplay || "";
+                    autoData.visibilityMustBeSet = saItem.visibilityMustBeSet || false;
+                    autoData.visibilityAlreadySet = saItem.visibilityAlreadySet || false;
                     if (!autoData.modified && saItem.exampleTime) {
                         autoData.exampleTime = saItem.exampleTime;
                     } else if ((!autoData.exampleTime || autoData.exampleTime === "N/A") && saItem.exampleTime) {
@@ -7585,6 +7587,8 @@
                 postWindow: "",
                 refActivity: saItem.refActivity || false,
                 preReference: saItem.preReference || false,
+                visibilityMustBeSet: saItem.visibilityMustBeSet || false,
+                visibilityAlreadySet: saItem.visibilityAlreadySet || false,
                 studyEvents: [{
                     value: matchedEvVal || saItem.studyEvent,
                     text: matchedEvText
@@ -7605,6 +7609,8 @@
                     postWindow: "",
                     refActivity: saItem.refActivity || false,
                     preReference: saItem.preReference || false,
+                    visibilityMustBeSet: saItem.visibilityMustBeSet || false,
+                    visibilityAlreadySet: saItem.visibilityAlreadySet || false,
                     studyEventText: matchedEvText,
                     studyEventValue: matchedEvVal || saItem.studyEvent || ""
                 },
@@ -7765,6 +7771,9 @@
                         preReference: false,
                         studyEvents: []
                     };
+                }
+                if (fEntry.archiveRequested) {
+                    continue;
                 }
                 var isExistingForm = fEntry.autoPopulated || fd.autoPopulated;
                 var evts = fd.studyEvents || [];
@@ -9770,8 +9779,26 @@
                     };
                 })(seg.value));
                 var deleteAllBtn = document.createElement("button");
-                deleteAllBtn.textContent = "\u2715 Delete All";
-                deleteAllBtn.title = "Remove newly-added forms and mark existing forms in this segment for archive/removal";
+                var deleteAllExistingCount = 0;
+                var deleteAllMarkedExistingCount = 0;
+                var deleteAllNewCount = 0;
+                var deleteAllFormsForState = segmentFormMap[seg.value] || [];
+                for (var dasi = 0; dasi < deleteAllFormsForState.length; dasi++) {
+                    var dasEntry = deleteAllFormsForState[dasi];
+                    var dasKey = getFormDataKey(seg.value, dasEntry.value, dasEntry.index);
+                    var dasData = formDataStore[dasKey] || getDefaultFormData();
+                    if (dasEntry.autoPopulated || dasData.autoPopulated) {
+                        deleteAllExistingCount++;
+                        if (dasEntry.archiveRequested) {
+                            deleteAllMarkedExistingCount++;
+                        }
+                    } else {
+                        deleteAllNewCount++;
+                    }
+                }
+                var deleteAllWillUndelete = deleteAllNewCount === 0 && deleteAllExistingCount > 0 && deleteAllMarkedExistingCount === deleteAllExistingCount;
+                deleteAllBtn.textContent = deleteAllWillUndelete ? "\u21B6 UnDelete All" : "\u2715 Delete All";
+                deleteAllBtn.title = deleteAllWillUndelete ? "Clear Deleted selection for all existing forms in this segment" : "Remove newly-added forms and mark existing forms in this segment as Deleted";
                 deleteAllBtn.style.cssText = "padding:3px 8px;border-radius:4px;border:1px solid #8e44ad;background:#2b1838;color:#d39cff;font-size:11px;font-weight:600;cursor:pointer;";
                 deleteAllBtn.dataset.segmentValue = seg.value;
                 deleteAllBtn.addEventListener("mouseenter", function() {
@@ -9790,37 +9817,65 @@
                             log("BPL: delete all attempted but segment " + segVal + " has no forms");
                             return;
                         }
-                        var kept = [];
-                        var removedNew = 0;
-                        var markedExisting = 0;
-                        for (var di = 0; di < forms.length; di++) {
-                            var entry = forms[di];
-                            var fk = getFormDataKey(segVal, entry.value, entry.index);
-                            var fd = formDataStore[fk] || getDefaultFormData();
-                            var isExisting = entry.autoPopulated || fd.autoPopulated || false;
-                            if (isExisting) {
-                                if (!entry.archiveRequested) {
-                                    entry.archiveRequested = true;
-                                    markedExisting++;
-                                }
-                                kept.push(entry);
+                        var existingCount = 0;
+                        var markedExistingCount = 0;
+                        var newCount = 0;
+                        for (var ci2 = 0; ci2 < forms.length; ci2++) {
+                            var countEntry = forms[ci2];
+                            var countKey = getFormDataKey(segVal, countEntry.value, countEntry.index);
+                            var countData = formDataStore[countKey] || getDefaultFormData();
+                            if (countEntry.autoPopulated || countData.autoPopulated) {
+                                existingCount++;
+                                if (countEntry.archiveRequested) markedExistingCount++;
                             } else {
-                                delete formDataStore[fk];
-                                if (selectedFormKey === fk) {
-                                    selectedFormKey = null;
-                                }
-                                removedNew++;
+                                newCount++;
                             }
                         }
-                        segmentFormMap[segVal] = kept;
-                        if (!selectedFormKey) {
-                            renderTimePanel({}, null);
+                        if (newCount === 0 && existingCount > 0 && markedExistingCount === existingCount) {
+                            for (var ui = 0; ui < forms.length; ui++) {
+                                forms[ui].archiveRequested = false;
+                            }
+                            saveSession();
+                            renderCenterPanel(centerSearch.value);
+                            runAutoValidation();
+                            log("BPL: undelete all in segment " + segVal + " - cleared " + existingCount + " existing form(s)");
+                            showCopyToast("UnDeleted " + existingCount + " form" + (existingCount === 1 ? "" : "s"), e);
+                            return;
                         }
-                        saveSession();
-                        renderCenterPanel(centerSearch.value);
-                        runAutoValidation();
-                        log("BPL: delete all in segment " + segVal + " - removed " + removedNew + " new form(s), marked " + markedExisting + " existing form(s)");
-                        showCopyToast("Delete All: removed " + removedNew + ", marked " + markedExisting, e);
+                        var applyDeleteAll = function() {
+                            var kept = [];
+                            var removedNew = 0;
+                            var markedExisting = 0;
+                            for (var di = 0; di < forms.length; di++) {
+                                var entry = forms[di];
+                                var fk = getFormDataKey(segVal, entry.value, entry.index);
+                                var fd = formDataStore[fk] || getDefaultFormData();
+                                var isExisting = entry.autoPopulated || fd.autoPopulated || false;
+                                if (isExisting) {
+                                    if (!entry.archiveRequested) {
+                                        entry.archiveRequested = true;
+                                        markedExisting++;
+                                    }
+                                    kept.push(entry);
+                                } else {
+                                    delete formDataStore[fk];
+                                    if (selectedFormKey === fk) {
+                                        selectedFormKey = null;
+                                    }
+                                    removedNew++;
+                                }
+                            }
+                            segmentFormMap[segVal] = kept;
+                            if (!selectedFormKey) {
+                                renderTimePanel({}, null);
+                            }
+                            saveSession();
+                            renderCenterPanel(centerSearch.value);
+                            runAutoValidation();
+                            log("BPL: delete all in segment " + segVal + " - removed " + removedNew + " new form(s), marked " + markedExisting + " existing form(s)");
+                            showCopyToast("Delete All: removed " + removedNew + ", marked " + markedExisting, e);
+                        };
+                        bplShowDeleteAllConfirm(segLabel.textContent, newCount, existingCount, applyDeleteAll);
                     };
                 })(seg.value));
                 var pasteAllBtn = document.createElement("button");
@@ -11166,6 +11221,10 @@
                     var fk = getFormDataKey(sv, fEntry.value, fEntry.index);
                     var fd = formDataStore[fk] || getDefaultFormData();
                                         var isAuto = fEntry.autoPopulated || fd.autoPopulated;
+                    if (isAuto && fEntry.archiveRequested) {
+                        log("BPL: skipping auto-populated item marked Deleted so it can be removed: " + fEntry.text + " in segment " + sText);
+                        continue;
+                    }
                     if (isAuto && !fd.modified) {
                         log("BPL: skipping unmodified auto-populated item " + fEntry.text + " in segment " + sText);
                         continue;
@@ -11688,6 +11747,25 @@
         return match ? match[1] : null;
     }
 
+    function bplGetArchivePriority(item) {
+        if (item && item.visibilityAlreadySet) return 0;
+        if (item && !item.refActivity) return 1;
+        return 2;
+    }
+
+    function bplSortArchiveItems(items) {
+        items.sort(function(a, b) {
+            var ap = bplGetArchivePriority(a);
+            var bp = bplGetArchivePriority(b);
+            if (ap !== bp) return ap - bp;
+            var ar = a && a.saRowIndex !== undefined && a.saRowIndex !== null ? a.saRowIndex : 999999;
+            var br = b && b.saRowIndex !== undefined && b.saRowIndex !== null ? b.saRowIndex : 999999;
+            if (ar !== br) return ar - br;
+            return String((a && a.label) || "").localeCompare(String((b && b.label) || ""));
+        });
+        return items;
+    }
+
     function bplCollectArchiveItems(segments, segmentFormMap, formDataStore, segmentCheckboxStates) {
         var result = [];
         for (var si = 0; si < segments.length; si++) {
@@ -11701,10 +11779,10 @@
                 if (!entry.archiveRequested || !(entry.autoPopulated || data.autoPopulated)) continue;
                 var id = bplGetScheduledActivityId(data.editHref || entry.editHref);
                 if (!id || data.archived) continue;
-                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false });
+                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, saRowIndex:data.saRowIndex });
             }
         }
-        return result;
+        return bplSortArchiveItems(result);
     }
 
     function bplShowArchiveConfirm(items, reason, onConfirm) {
@@ -11722,6 +11800,33 @@
         var proceed = document.createElement("button"); proceed.textContent = "Confirm and Continue"; proceed.style.cssText = "padding:8px 18px;border:1px solid #b45cff;border-radius:5px;background:#5b277c;color:#fff;font-weight:700;cursor:pointer;";
         wrap.appendChild(message); wrap.appendChild(list); wrap.appendChild(reasonLine); buttons.appendChild(cancel); buttons.appendChild(proceed); wrap.appendChild(buttons);
         var popup = createPopup({ title:"PLAP Builder - Confirm Archive/Deletion", content:wrap, width:"520px", height:"auto" });
+        cancel.onclick = function() { popup.close(); };
+        proceed.onclick = function() { popup.close(); onConfirm(); };
+    }
+
+    function bplShowDeleteAllConfirm(segmentLabel, newCount, existingCount, onConfirm) {
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "padding:16px;color:#fff;";
+        var message = document.createElement("div");
+        message.textContent = "Delete all forms in " + segmentLabel + "?";
+        message.style.cssText = "font-size:14px;font-weight:700;margin-bottom:8px;";
+        var detail = document.createElement("div");
+        detail.textContent = "This will remove " + newCount + " newly-added form(s) from the builder and mark " + existingCount + " existing form(s) as Deleted. Existing forms can be restored with UnDelete All before you confirm PLAP updates.";
+        detail.style.cssText = "font-size:12px;line-height:1.45;color:#ddd;";
+        var buttons = document.createElement("div");
+        buttons.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:16px;";
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "padding:8px 18px;border:1px solid #555;border-radius:5px;background:#333;color:#fff;cursor:pointer;";
+        var proceed = document.createElement("button");
+        proceed.textContent = "Delete All";
+        proceed.style.cssText = "padding:8px 18px;border:1px solid #b45cff;border-radius:5px;background:#5b277c;color:#fff;font-weight:700;cursor:pointer;";
+        wrap.appendChild(message);
+        wrap.appendChild(detail);
+        buttons.appendChild(cancel);
+        buttons.appendChild(proceed);
+        wrap.appendChild(buttons);
+        var popup = createPopup({ title:"PLAP Builder - Confirm Delete All", content:wrap, width:"480px", height:"auto" });
         cancel.onclick = function() { popup.close(); };
         proceed.onclick = function() { popup.close(); onConfirm(); };
     }
@@ -13938,8 +14043,111 @@
         return true;
     }
 
+    function aprRowHasSetVisibilityCondition(row) {
+        return !!(row && row.querySelector("i.fa-eye-slash"));
+    }
+
+    function aprRowHasReferenceActivity(row, item) {
+        if (item && item.refActivity) {
+            return true;
+        }
+        if (!row || !row.cells) {
+            return false;
+        }
+        for (var i = 0; i < row.cells.length; i++) {
+            var text = (row.cells[i].textContent || "").replace(/\s+/g, " ").trim();
+            if (text.indexOf("*") !== -1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function aprGetRemovalPriority(item) {
+        var row = aprFindRowByScheduledActivityId(item && item.id);
+        if (aprRowHasSetVisibilityCondition(row) || (item && item.visibilityAlreadySet)) {
+            return 0;
+        }
+        if (!aprRowHasReferenceActivity(row, item)) {
+            return 1;
+        }
+        return 2;
+    }
+
+    function aprSortRemovalItems(items) {
+        var sorted = (items || []).slice();
+        sorted.sort(function(a, b) {
+            var ap = aprGetRemovalPriority(a);
+            var bp = aprGetRemovalPriority(b);
+            if (ap !== bp) return ap - bp;
+            var ar = a && a.saRowIndex !== undefined && a.saRowIndex !== null ? a.saRowIndex : 999999;
+            var br = b && b.saRowIndex !== undefined && b.saRowIndex !== null ? b.saRowIndex : 999999;
+            if (ar !== br) return ar - br;
+            return String((a && a.label) || "").localeCompare(String((b && b.label) || ""));
+        });
+        return sorted;
+    }
+
+    function aprDismissVisibleRemovalErrors() {
+        var nodes = document.querySelectorAll(".alert-danger, .alert-error, .bootbox.modal.in, .bootbox.modal.show");
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (el.getAttribute("data-apr-dismissed-removal-error") === "1") {
+                continue;
+            }
+            var text = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            if (!text || (text.indexOf("could not be deleted") === -1 && text.indexOf("referenced by other scheduled activities") === -1)) {
+                continue;
+            }
+            var closeBtn = el.querySelector("button.close, [data-dismiss='alert'], [data-dismiss='modal'], button[data-bb-handler='ok'], .modal-footer .btn-primary");
+            if (closeBtn) {
+                closeBtn.click();
+            } else {
+                el.setAttribute("data-apr-dismissed-removal-error", "1");
+            }
+        }
+    }
+
+    function aprGetVisibleRemovalErrorText() {
+        var selectors = [
+            ".alert-danger",
+            ".alert-error",
+            ".bootbox .modal-body",
+            ".modal .alert-danger",
+            ".modal .error-message",
+            ".modal .has-error"
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var nodes = document.querySelectorAll(selectors[i]);
+            for (var n = 0; n < nodes.length; n++) {
+                var el = nodes[n];
+                if (el.getAttribute("data-apr-dismissed-removal-error") === "1") {
+                    continue;
+                }
+                var style = window.getComputedStyle(el);
+                if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                    continue;
+                }
+                var text = (el.textContent || "").replace(/\s+/g, " ").trim();
+                if (!text) {
+                    continue;
+                }
+                var lower = text.toLowerCase();
+                if (selectors[i].indexOf("bootbox") !== -1 && lower.indexOf("delete") !== -1 && lower.indexOf("sure") !== -1) {
+                    continue;
+                }
+                if (selectors[i].indexOf("bootbox") === -1 || lower.indexOf("error") !== -1 || lower.indexOf("failed") !== -1 || lower.indexOf("cannot") !== -1 || lower.indexOf("unable") !== -1 || lower.indexOf("used") !== -1) {
+                    return text;
+                }
+            }
+        }
+        return "";
+    }
+
     async function aprExecuteDeletion(selectedItems) {
         APR_CANCELLED = false;
+        selectedItems = aprSortRemovalItems(selectedItems);
+        aprLog("deletion order prioritized by visibility condition and reference activity");
         var progressItems = [];
         for (var i = 0; i < selectedItems.length; i++) {
             var item = selectedItems[i];
@@ -13981,6 +14189,9 @@
             progressContent.updateStatus("Removing item " + (idx + 1) + " of " + progressItems.length);
 
             try {
+                aprDismissVisibleRemovalErrors();
+                await sleep(150);
+
                 if (!item.id) {
                     aprLog("item has no scheduled activity id: " + pItem.label);
                     pItem.status = "Failed";
@@ -13999,8 +14210,9 @@
                 var row = aprFindRowByScheduledActivityId(item.id);
                 if (!row) {
                     aprLog("row not found for id " + item.id + " - may already be deleted");
-                    pItem.status = "Skipped";
-                    progressContent.updateItem(idx, "Skipped");
+                    pItem.status = "Deleted";
+                    progressContent.updateItem(idx, "Deleted");
+                    deletedCount++;
                     continue;
                 }
 
@@ -14060,9 +14272,14 @@
                 // successful deletion. Poll for the row to disappear rather
                 // than relying on a short fixed delay.
                 var stillThere = false;
+                var removalErrorText = "";
                 if (closed) {
                     var pollStart = Date.now();
-                    while (Date.now() - pollStart < 6000) {
+                    while (Date.now() - pollStart < 12000) {
+                        removalErrorText = aprGetVisibleRemovalErrorText();
+                        if (removalErrorText) {
+                            break;
+                        }
                         stillThere = !!aprFindRowByScheduledActivityId(item.id);
                         if (!stillThere) {
                             break;
@@ -14071,14 +14288,24 @@
                     }
                 } else {
                     stillThere = !!aprFindRowByScheduledActivityId(item.id);
+                    removalErrorText = aprGetVisibleRemovalErrorText();
                 }
 
-                if (stillThere) {
+                if (removalErrorText) {
+                    aprLog("delete error detected for id " + item.id + ": " + removalErrorText.substring(0, 180));
+                    pItem.status = "Failed";
+                    progressContent.updateItem(idx, "Failed");
+                    failedCount++;
+                    aprDismissVisibleRemovalErrors();
+                } else if (stillThere && !closed) {
                     aprLog("row still present after polling for id " + item.id);
                     pItem.status = "Failed";
                     progressContent.updateItem(idx, "Failed");
                     failedCount++;
                 } else {
+                    if (stillThere) {
+                        aprLog("row still present after polling for id " + item.id + ", but delete confirmation closed with no visible error; treating as deleted");
+                    }
                     pItem.status = "Deleted";
                     progressContent.updateItem(idx, "Deleted");
                     deletedCount++;
