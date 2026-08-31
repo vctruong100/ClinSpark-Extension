@@ -23653,10 +23653,12 @@
     var CAP_ROOT_ID = "copy-aplan-root";
     var CAP_STYLE_ID = "copy-aplan-style";
     var STORAGE_CAP_WORKFLOW = "activityPlanState.copyAPlan.workflow";
+    var STORAGE_CAP_PANEL_WIDTHS = "activityPlanState.copyAPlan.panelWidths";
     var CAP_SELECTION_POPUP_REF = null;
     var CAP_PROGRESS_POPUP_REF = null;
     var CAP_CANCELLED = false;
     var CAP_BUSY = false;
+    var CAP_CONFIG_LOADS = {};
 
     function capLog(msg) {
         log("Copy A-Plan: " + msg);
@@ -23772,19 +23774,20 @@
         var btn = document.createElement("button");
         btn.type = "button";
         btn.textContent = text;
-        btn.style.cssText = "border:none;border-radius:6px;background:" + (bg || "#5b43c7") + ";color:#fff;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;";
+        var background = bg || "#333";
+        btn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #555;background:" + background + ";color:#fff;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0;";
         btn.addEventListener("mouseenter", function() { btn.style.filter = "brightness(1.12)"; });
         btn.addEventListener("mouseleave", function() { btn.style.filter = "none"; });
         return btn;
     }
 
     function capMakeIconButton(iconClass, title, label) {
-        var btn = capMakeButton(label || "", "#30333b");
+        var btn = capMakeButton(label || "", "#333");
         btn.title = title || "";
         btn.setAttribute("aria-label", title || label || "button");
-        btn.style.padding = label ? "6px 9px" : "6px";
+        btn.style.padding = label ? "3px 8px" : "3px 6px";
         btn.style.minWidth = label ? "auto" : "28px";
-        btn.style.height = "28px";
+        btn.style.height = label ? "24px" : "24px";
         btn.style.display = "inline-flex";
         btn.style.alignItems = "center";
         btn.style.justifyContent = "center";
@@ -23795,6 +23798,80 @@
             btn.insertBefore(i, btn.firstChild);
         }
         return btn;
+    }
+
+    function capMakeDeleteButton(title, label) {
+        var btn = capMakeButton(label || "✕", "transparent");
+        btn.title = title || "Delete";
+        btn.setAttribute("aria-label", title || "Delete");
+        btn.style.padding = "2px 6px";
+        btn.style.border = "1px solid #ff6b6b";
+        btn.style.background = "rgba(255,107,107,0.14)";
+        btn.style.color = "#ff8585";
+        btn.style.fontSize = "14px";
+        btn.style.fontWeight = "bold";
+        return btn;
+    }
+
+    function capLoadPanelWidths() {
+        try {
+            var raw = localStorage.getItem(STORAGE_CAP_PANEL_WIDTHS);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function capSavePanelWidths(widths) {
+        try {
+            localStorage.setItem(STORAGE_CAP_PANEL_WIDTHS, JSON.stringify(widths || {}));
+        } catch (e) {}
+    }
+
+    function capApplyPanelWidth(panel, widths, key, fallback) {
+        var width = Math.max(parseInt(widths && widths[key], 10) || fallback, fallback);
+        panel.style.flex = "0 0 " + width + "px";
+    }
+
+    function capMakePanelResizeHandle(leftPanel, rightPanel, leftKey, rightKey, widths) {
+        var handle = document.createElement("div");
+        handle.className = "cap-resize-handle";
+        handle.title = "Drag to resize panels";
+        handle.addEventListener("mousedown", function(e) {
+            e.preventDefault();
+            var startX = e.clientX;
+            var leftStart = leftPanel.getBoundingClientRect().width;
+            var rightStart = rightPanel.getBoundingClientRect().width;
+            function onMove(ev) {
+                var dx = ev.clientX - startX;
+                var nextLeft = Math.max(90, leftStart + dx);
+                var nextRight = Math.max(120, rightStart - dx);
+                leftPanel.style.flex = "0 0 " + nextLeft + "px";
+                rightPanel.style.flex = "0 0 " + nextRight + "px";
+            }
+            function onUp() {
+                widths[leftKey] = Math.round(leftPanel.getBoundingClientRect().width);
+                widths[rightKey] = Math.round(rightPanel.getBoundingClientRect().width);
+                capSavePanelWidths(widths);
+                document.removeEventListener("mousemove", onMove);
+                document.removeEventListener("mouseup", onUp);
+            }
+            document.addEventListener("mousemove", onMove);
+            document.addEventListener("mouseup", onUp);
+        });
+        return handle;
+    }
+
+    function capMakeSearchInput(placeholder, onInput) {
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "cap-search";
+        input.placeholder = placeholder || "Search";
+        input.addEventListener("input", function() {
+            if (typeof onInput === "function") onInput(input.value || "");
+        });
+        input.addEventListener("click", function(e) { e.stopPropagation(); });
+        return input;
     }
 
     function capShowError(titleText, lines, keepState) {
@@ -23844,46 +23921,63 @@
         var style = document.createElement("style");
         style.id = CAP_STYLE_ID;
         style.textContent = [
-            "#" + CAP_ROOT_ID + " { position:fixed; inset:0; z-index:999997; background:#101217; color:#f5f7fb; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; display:flex; flex-direction:column; box-sizing:border-box; }",
+            "#" + CAP_ROOT_ID + " { position:fixed; inset:0; z-index:999997; background:#1a1a1a; color:#fff; font-family:Arial,sans-serif; display:flex; flex-direction:column; box-sizing:border-box; }",
             "#" + CAP_ROOT_ID + " * { box-sizing:border-box; }",
-            "#" + CAP_ROOT_ID + " .cap-header { height:54px; flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid #2e3440; background:#171b23; }",
+            "#" + CAP_ROOT_ID + " .cap-header { position:relative; flex:0 0 auto; display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px; min-height:50px; padding:8px 12px; border-bottom:1px solid #444; background:#292929; }",
             "#" + CAP_ROOT_ID + " .cap-title { display:flex; flex-direction:column; min-width:0; }",
-            "#" + CAP_ROOT_ID + " .cap-title strong { font-size:16px; }",
-            "#" + CAP_ROOT_ID + " .cap-title span { color:#aab2c0; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70vw; }",
-            "#" + CAP_ROOT_ID + " .cap-main { min-height:0; flex:1 1 auto; display:grid; grid-template-columns:minmax(170px, 0.7fr) minmax(260px, 1.25fr) minmax(320px, 1.45fr); grid-template-rows:minmax(0, 1fr) minmax(190px, 0.45fr); gap:10px; padding:10px; }",
-            "#" + CAP_ROOT_ID + " .cap-panel { min-height:0; min-width:0; border:1px solid #303847; border-radius:8px; background:#151922; display:flex; flex-direction:column; overflow:hidden; }",
-            "#" + CAP_ROOT_ID + " .cap-panel-header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 10px; border-bottom:1px solid #303847; background:#1c2230; }",
-            "#" + CAP_ROOT_ID + " .cap-panel-title { font-size:12px; font-weight:800; letter-spacing:0; text-transform:uppercase; color:#dce4f2; }",
+            "#" + CAP_ROOT_ID + " .cap-title strong { font-size:15px; font-weight:600; }",
+            "#" + CAP_ROOT_ID + " .cap-title span { color:#ccc; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70vw; }",
+            "#" + CAP_ROOT_ID + " .cap-main { min-height:0; flex:1 1 auto; display:flex; align-items:stretch; gap:0; padding:8px; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-panel { min-height:0; min-width:90px; border:1px solid #444; border-radius:4px; background:#1a1a1a; display:flex; flex-direction:column; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; border-bottom:1px solid #444; background:#292929; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-title { font-size:13px; font-weight:600; letter-spacing:0; text-transform:uppercase; color:#fff; }",
+            "#" + CAP_ROOT_ID + " .cap-panel-badge { color:#aaa; font-size:11px; font-weight:600; text-transform:none; }",
             "#" + CAP_ROOT_ID + " .cap-panel-body { min-height:0; flex:1 1 auto; overflow:auto; padding:8px; }",
-            "#" + CAP_ROOT_ID + " .cap-study-panel { grid-row:1 / span 2; }",
-            "#" + CAP_ROOT_ID + " .cap-config-panel { grid-column:2 / span 2; }",
-            "#" + CAP_ROOT_ID + " .cap-segment { border:1px solid #2e3440; border-radius:7px; background:#11151d; margin-bottom:8px; overflow:hidden; }",
-            "#" + CAP_ROOT_ID + " .cap-segment-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 8px; background:#202737; border-bottom:1px solid #2e3440; }",
+            "#" + CAP_ROOT_ID + " .cap-search { width:100%; max-width:none; padding:6px 8px; border-width:0 0 1px; border-style:none none solid; border-color:currentcolor currentcolor #333; border-radius:0; background:#1e1e1e; color:#fff; font-size:12px; outline:none; }",
+            "#" + CAP_ROOT_ID + " .cap-resize-handle { flex:0 0 7px; cursor:col-resize; background:#262626; border:1px solid #333; border-radius:4px; margin:0 5px; }",
+            "#" + CAP_ROOT_ID + " .cap-resize-handle:hover { background:#555; }",
+            "#" + CAP_ROOT_ID + " .cap-segment { border:1px solid #333; border-radius:4px; background:#1a1a1a; margin-bottom:8px; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-segment-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; background:#292929; border-bottom:1px solid #444; }",
             "#" + CAP_ROOT_ID + " .cap-segment-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:800; font-size:12px; }",
             "#" + CAP_ROOT_ID + " .cap-segment-actions { display:inline-flex; align-items:center; gap:5px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }",
-            "#" + CAP_ROOT_ID + " .cap-form-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(126px,0.65fr) auto; align-items:center; gap:7px; padding:7px 8px; border-top:1px solid rgba(255,255,255,0.06); min-height:42px; }",
-            "#" + CAP_ROOT_ID + " .cap-form-row:first-child { border-top:none; }",
-            "#" + CAP_ROOT_ID + " .cap-form-row.cap-selected { outline:1px solid #7b8cff; background:#1c2240; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row { display:grid; grid-template-columns:170px minmax(0,1fr) 72px 210px auto; align-items:center; gap:6px; padding:5px 8px; margin-bottom:4px; border-width:1px 1px 1px 3px; border-style:solid; border-color:#333 #333 #333 transparent; border-radius:5px; min-height:34px; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row:first-child { border-top:1px solid #333; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row.cap-selected { outline:1px solid #5dade2; background:#1a2a3a; }",
+            "#" + CAP_ROOT_ID + " .cap-form-row.cap-outline-danger { border-color:#7a3333 #7a3333 #7a3333 #ff6b6b; background:#2a1a1a; }",
             "#" + CAP_ROOT_ID + " .cap-form-row.cap-deleted { opacity:.55; text-decoration:line-through; }",
-            "#" + CAP_ROOT_ID + " .cap-form-main { min-width:0; display:flex; flex-direction:column; gap:3px; }",
-            "#" + CAP_ROOT_ID + " .cap-form-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
-            "#" + CAP_ROOT_ID + " .cap-form-meta { font-size:11px; color:#aeb7c7; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
-            "#" + CAP_ROOT_ID + " .cap-row-actions { display:inline-flex; gap:4px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }",
-            "#" + CAP_ROOT_ID + " select, #" + CAP_ROOT_ID + " input[type='text'], #" + CAP_ROOT_ID + " input[type='number'] { width:100%; min-width:0; background:#0e1118; color:#f5f7fb; border:1px solid #343d4f; border-radius:5px; padding:6px 7px; font-size:12px; }",
-            "#" + CAP_ROOT_ID + " .cap-event-drop { display:flex; align-items:center; gap:4px; min-width:0; }",
-            "#" + CAP_ROOT_ID + " .cap-empty { color:#8d97a8; font-size:12px; padding:12px; text-align:center; }",
-            "#" + CAP_ROOT_ID + " .cap-chip { display:inline-flex; align-items:center; gap:4px; border:1px solid #3a4355; border-radius:999px; padding:2px 7px; font-size:11px; color:#cbd5e1; background:#1b2130; }",
-            "#" + CAP_ROOT_ID + " .cap-warning { color:#ffcb6b; font-size:12px; line-height:1.4; }",
-            "#" + CAP_ROOT_ID + " .cap-error { color:#ff8a8a; font-size:12px; line-height:1.4; }",
-            "#" + CAP_ROOT_ID + " .cap-footer { flex:0 0 auto; display:flex; justify-content:space-between; align-items:center; gap:10px; padding:9px 12px; border-top:1px solid #2e3440; background:#171b23; }",
+            "#" + CAP_ROOT_ID + " .cap-form-main { min-width:0; flex:1 1 auto; display:flex; flex-direction:column; gap:3px; }",
+            "#" + CAP_ROOT_ID + " .cap-form-title-line { min-width:0; display:flex; align-items:center; gap:10px; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-form-name { flex:0 1 auto; font-size:12px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-form-time { width:210px; min-width:0; font-size:11px; color:#fff; white-space:pre; overflow:hidden; text-overflow:ellipsis; }",
+            "#" + CAP_ROOT_ID + " .cap-form-meta { flex:1 1 auto; min-width:0; font-size:11px; color:#aaa; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-row-actions { display:inline-flex; gap:4px; align-items:center; justify-content:flex-end; flex-wrap:nowrap; width:max-content; justify-self:end; }",
+            "#" + CAP_ROOT_ID + " select, #" + CAP_ROOT_ID + " input[type='text'], #" + CAP_ROOT_ID + " input[type='number'] { width:100%; min-width:0; background:#222; color:#fff; border:1px solid #444; border-radius:4px; padding:6px; font-size:12px; }",
+            "#" + CAP_ROOT_ID + " input.cap-search { width:100%; max-width:none; padding:6px 8px; border-width:0 0 1px; border-style:none none solid; border-color:currentcolor currentcolor #333; border-radius:0; background:#1e1e1e; color:#fff; font-size:12px; outline:none; }",
+            "#" + CAP_ROOT_ID + " input[type='checkbox'] { width:16px; height:16px; cursor:pointer; accent-color:#007bff; }",
+            "#" + CAP_ROOT_ID + " .cap-event-drop { width:170px; min-width:0; min-height:24px; padding:2px 4px; border:1px dashed #555; border-radius:3px; background:#1a1a1a; display:flex; flex-wrap:nowrap; gap:2px; align-items:center; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-source-event { width:170px; min-width:0; font-size:11px; color:#cfcfcf; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-event-chip { display:inline-flex; align-items:center; gap:2px; padding:1px 4px; background:#4a4a2a; border-radius:3px; font-size:9px; color:#ccc; max-width:148px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:grab; }",
+            "#" + CAP_ROOT_ID + " .cap-event-chip span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#" + CAP_ROOT_ID + " .cap-event-tool { cursor:pointer; font-size:9px; flex-shrink:0; opacity:.75; padding:1px 2px; border-radius:2px; }",
+            "#" + CAP_ROOT_ID + " .cap-status-icons { display:inline-grid; grid-template-columns:18px 18px 32px; align-items:center; justify-items:center; gap:2px; width:72px; min-width:72px; }",
+            "#" + CAP_ROOT_ID + " .cap-status-icons span { font-size:12px; line-height:1; }",
+            "#" + CAP_ROOT_ID + " .cap-status-slot { min-width:18px; min-height:14px; display:inline-flex; align-items:center; justify-content:center; }",
+            "#" + CAP_ROOT_ID + " .cap-status-slot-group { min-width:32px; min-height:14px; display:inline-flex; align-items:center; justify-content:center; gap:2px; }",
+            "#" + CAP_ROOT_ID + " .cap-empty { color:#aaa; font-size:12px; padding:12px; text-align:center; }",
+            "#" + CAP_ROOT_ID + " .cap-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; font-size:11px; color:#aaa; background:#1a1a1a; }",
+            "#" + CAP_ROOT_ID + " .cap-legend { display:flex; gap:16px; padding:8px 12px; border:1px solid #333; border-radius:6px; background:#1a1a1a; font-size:11px; color:#aaa; flex-wrap:wrap; align-items:center; }",
+            "#" + CAP_ROOT_ID + " .cap-warning { padding:6px 8px; background:#3a3500; border:1px solid #665500; border-radius:4px; color:#d4a017; font-size:11px; line-height:1.4; }",
+            "#" + CAP_ROOT_ID + " .cap-error { padding:6px 8px; background:#2a1a1a; border:1px solid #c0392b; border-radius:4px; color:#ff6b6b; font-size:11px; line-height:1.4; }",
+            "#" + CAP_ROOT_ID + " .cap-footer { flex:0 0 auto; display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 12px; border-top:1px solid #444; background:#292929; }",
             "#" + CAP_ROOT_ID + " .cap-footer-left { min-width:0; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }",
-            "#" + CAP_ROOT_ID + " .cap-footer-status { color:#aeb7c7; font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
-            "#" + CAP_ROOT_ID + " .cap-config-grid { display:grid; grid-template-columns:repeat(6, minmax(70px, 1fr)); gap:8px; align-items:end; }",
-            "#" + CAP_ROOT_ID + " .cap-field { display:flex; flex-direction:column; gap:4px; min-width:0; }",
-            "#" + CAP_ROOT_ID + " .cap-field label { color:#aeb7c7; font-size:11px; font-weight:700; }",
-            "#" + CAP_ROOT_ID + " .cap-checks { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }",
-            "#" + CAP_ROOT_ID + " .cap-checks label { display:inline-flex; gap:5px; align-items:center; font-size:12px; color:#d7deea; }",
-            "@media (max-width: 1100px) { #" + CAP_ROOT_ID + " .cap-main { grid-template-columns:1fr; grid-template-rows:auto auto auto auto; overflow:auto; } #" + CAP_ROOT_ID + " .cap-study-panel, #" + CAP_ROOT_ID + " .cap-config-panel { grid-column:auto; grid-row:auto; } #" + CAP_ROOT_ID + " .cap-panel { min-height:260px; } #" + CAP_ROOT_ID + " .cap-config-grid { grid-template-columns:repeat(2, minmax(90px, 1fr)); } }"
+            "#" + CAP_ROOT_ID + " .cap-footer-right { flex:0 0 auto; display:flex; align-items:center; gap:8px; justify-content:flex-end; }",
+            "#" + CAP_ROOT_ID + " .cap-footer-status { color:#ccc; font-size:11px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:42vw; }",
+            "#" + CAP_ROOT_ID + " .cap-config-body { flex:1 1 auto; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }",
+            "#" + CAP_ROOT_ID + " .cap-field { display:flex; flex-direction:column; gap:2px; min-width:0; }",
+            "#" + CAP_ROOT_ID + " .cap-field label { color:#aaa; font-size:11px; font-weight:400; }",
+            "#" + CAP_ROOT_ID + " .cap-checks { display:flex; flex-direction:column; gap:8px; align-items:stretch; }",
+            "#" + CAP_ROOT_ID + " .cap-checks label { display:flex; gap:6px; align-items:center; font-size:12px; font-weight:600; color:#fff; cursor:pointer; }",
+            "@media (max-width: 1250px) { #" + CAP_ROOT_ID + " .cap-main { flex-direction:column; overflow:auto; gap:8px; } #" + CAP_ROOT_ID + " .cap-resize-handle { display:none; } #" + CAP_ROOT_ID + " .cap-panel { flex:0 0 auto !important; min-height:260px; } }"
         ].join("\n");
         document.head.appendChild(style);
     }
@@ -24012,75 +24106,187 @@
         var selectedDestination = null;
         var running = false;
         var box = document.createElement("div");
-        box.style.cssText = "display:flex;flex-direction:column;gap:12px;color:#fff;min-height:0;";
-        var hint = document.createElement("div");
-        hint.textContent = "Choose exactly one source Activity Plan and one editable destination Activity Plan. Names can repeat, so IDs are shown on each row.";
-        hint.style.cssText = "font-size:12px;color:#b8c0cf;line-height:1.45;";
-        box.appendChild(hint);
-        var columns = document.createElement("div");
-        columns.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:12px;min-height:420px;";
-        box.appendChild(columns);
+        box.style.cssText = "display:flex;flex-direction:column;gap:12px;height:100%;min-height:550px;color:#fff;";
+
+        var topRow = document.createElement("div");
+        topRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:10px;flex-shrink:0;";
+        var sourceSummary = makeSummaryCard("Source A-Plan", "No source selected");
+        var destSummary = makeSummaryCard("Destination A-Plan", "No destination selected");
+        topRow.appendChild(sourceSummary.box);
+        topRow.appendChild(destSummary.box);
+        box.appendChild(topRow);
+
+        var contentRow = document.createElement("div");
+        contentRow.style.cssText = "display:flex;flex-direction:row;gap:0;flex:1;min-height:0;overflow:hidden;";
+        box.appendChild(contentRow);
+
         var message = document.createElement("div");
-        message.style.cssText = "min-height:18px;font-size:12px;color:#ffcb6b;";
-        box.appendChild(message);
+        message.style.cssText = "min-height:18px;font-size:12px;color:#ffcb6b;line-height:1.35;min-width:0;";
         var footer = document.createElement("div");
-        footer.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        footer.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:12px;flex-shrink:0;";
+        var footerLeft = document.createElement("div");
+        footerLeft.style.cssText = "display:flex;flex-direction:column;gap:2px;min-width:0;";
+        var footerHint = document.createElement("div");
+        footerHint.textContent = "Choose one source and one editable destination. Activity Plan IDs are shown for duplicate names.";
+        footerHint.style.cssText = "font-size:11px;color:#aaa;line-height:1.35;";
+        footerLeft.appendChild(footerHint);
+        footerLeft.appendChild(message);
+        var footerActions = document.createElement("div");
+        footerActions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;flex-shrink:0;";
         var cancelBtn = capMakeButton("Cancel", "#444");
-        var confirmBtn = capMakeButton("Confirm", "#28a745");
+        cancelBtn.style.cssText = "padding:8px 18px;border:1px solid #555;border-radius:5px;background:#333;color:#fff;font-weight:600;cursor:pointer;";
+        var confirmBtn = capMakeButton("Start Copy", "#28a745");
+        confirmBtn.style.cssText = "padding:8px 20px;border:1px solid #28a745;border-radius:5px;background:#28a745;color:#fff;font-weight:700;cursor:pointer;";
         confirmBtn.disabled = true;
         confirmBtn.style.opacity = ".55";
-        footer.appendChild(cancelBtn);
-        footer.appendChild(confirmBtn);
+        footerActions.appendChild(cancelBtn);
+        footerActions.appendChild(confirmBtn);
+        footer.appendChild(footerLeft);
+        footer.appendChild(footerActions);
         box.appendChild(footer);
+
+        function makeSummaryCard(labelText, emptyText) {
+            var card = document.createElement("div");
+            card.style.cssText = "border:1px solid #444;border-radius:6px;background:#1a1a1a;overflow:hidden;";
+            var head = document.createElement("div");
+            head.textContent = labelText;
+            head.style.cssText = "padding:8px 10px;font-weight:600;font-size:12px;border-bottom:1px solid #333;background:#222;text-align:center;";
+            var body = document.createElement("div");
+            body.style.cssText = "padding:8px 10px;display:flex;flex-direction:column;gap:3px;min-height:54px;";
+            var name = document.createElement("div");
+            name.textContent = emptyText;
+            name.style.cssText = "font-size:13px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+            var meta = document.createElement("div");
+            meta.textContent = "";
+            meta.style.cssText = "font-size:11px;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+            body.appendChild(name);
+            body.appendChild(meta);
+            card.appendChild(head);
+            card.appendChild(body);
+            return { box: card, name: name, meta: meta, emptyText: emptyText };
+        }
+
+        function updateSummary() {
+            sourceSummary.name.textContent = selectedSource ? (selectedSource.name || "(Unnamed Activity Plan)") : sourceSummary.emptyText;
+            sourceSummary.meta.textContent = selectedSource ? ("ID " + selectedSource.id + " | " + (selectedSource.state || "No state")) : "";
+            destSummary.name.textContent = selectedDestination ? (selectedDestination.name || "(Unnamed Activity Plan)") : destSummary.emptyText;
+            destSummary.meta.textContent = selectedDestination ? ("ID " + selectedDestination.id + " | " + (selectedDestination.state || "No state")) : "";
+        }
+
+        function planMatchesFilter(plan, filter) {
+            if (!filter) return true;
+            var hay = capNormalizeKey([
+                plan.name,
+                plan.cohortType,
+                plan.state,
+                plan.id,
+                plan.exampleReference,
+                plan.timed,
+                plan.enforceDataCollectionOrder
+            ].join(" "));
+            var parts = String(filter || "").toLowerCase().split(",");
+            for (var i = 0; i < parts.length; i++) {
+                var part = capNormalizeKey(parts[i]);
+                if (part && hay.indexOf(part) !== -1) return true;
+            }
+            return false;
+        }
+
+        function makeResizeHandle(leftEl, rightEl) {
+            var handle = document.createElement("div");
+            handle.style.cssText = "width:6px;cursor:col-resize;background:#333;border-radius:3px;flex-shrink:0;transition:background 0.15s;margin:0 6px;";
+            handle.addEventListener("mouseenter", function() { handle.style.background = "#555"; });
+            handle.addEventListener("mouseleave", function() { if (!handle.dataset.dragging) handle.style.background = "#333"; });
+            handle.addEventListener("mousedown", function(e) {
+                e.preventDefault();
+                handle.dataset.dragging = "1";
+                handle.style.background = "#7a7aff";
+                var startX = e.clientX;
+                var startLeftW = leftEl.getBoundingClientRect().width;
+                var startRightW = rightEl.getBoundingClientRect().width;
+                function onMove(ev) {
+                    var dx = ev.clientX - startX;
+                    var nextLeft = Math.max(220, startLeftW + dx);
+                    var nextRight = Math.max(220, startRightW - dx);
+                    leftEl.style.flex = "0 0 " + nextLeft + "px";
+                    rightEl.style.flex = "0 0 " + nextRight + "px";
+                }
+                function onUp() {
+                    delete handle.dataset.dragging;
+                    handle.style.background = "#333";
+                    document.removeEventListener("mousemove", onMove);
+                    document.removeEventListener("mouseup", onUp);
+                }
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+            });
+            return handle;
+        }
 
         function makeColumn(titleText, side) {
             var col = document.createElement("div");
-            col.style.cssText = "min-width:0;display:flex;flex-direction:column;border:1px solid #333b4b;border-radius:8px;overflow:hidden;background:#151922;";
+            col.style.cssText = "min-width:220px;display:flex;flex:1 1 0;flex-direction:column;border:1px solid #444;border-radius:6px;background:#1a1a1a;overflow:hidden;";
             var head = document.createElement("div");
             head.textContent = titleText;
-            head.style.cssText = "font-weight:800;padding:10px;border-bottom:1px solid #333b4b;background:#1d2330;";
+            head.style.cssText = "padding:10px;font-weight:600;font-size:13px;border-bottom:1px solid #333;background:#222;text-align:center;";
             var search = document.createElement("input");
             search.type = "text";
-            search.placeholder = "Filter Activity Plans";
-            search.style.cssText = "margin:8px;width:calc(100% - 16px);padding:8px;border-radius:5px;border:1px solid #333b4b;background:#0e1118;color:#fff;";
+            search.placeholder = "Search Activity Plans...";
+            search.style.cssText = "padding:6px 8px;border:none;border-bottom:1px solid #333;background:#1e1e1e;color:#fff;font-size:12px;outline:none;";
             var list = document.createElement("div");
-            list.style.cssText = "flex:1;min-height:0;overflow:auto;padding:0 8px 8px;";
+            list.style.cssText = "flex:1;min-height:0;overflow:auto;padding:6px;";
             col.appendChild(head);
             col.appendChild(search);
             col.appendChild(list);
             function render() {
                 list.innerHTML = "";
-                var filter = capNormalizeKey(search.value || "");
+                var filter = search.value || "";
+                var visibleCount = 0;
                 for (var i = 0; i < plans.length; i++) {
                     var p = plans[i];
-                    var hay = capNormalizeKey([p.name, p.cohortType, p.state, p.id].join(" "));
-                    if (filter && hay.indexOf(filter) === -1) continue;
+                    if (!planMatchesFilter(p, filter)) continue;
+                    visibleCount++;
                     var card = document.createElement("button");
                     card.type = "button";
-                    card.style.cssText = "width:100%;text-align:left;margin-bottom:7px;padding:9px;border-radius:7px;border:1px solid #333b4b;background:#10141c;color:#fff;cursor:pointer;display:flex;flex-direction:column;gap:4px;";
                     var current = side === "source" ? selectedSource : selectedDestination;
-                    if (current && current.id === p.id) {
-                        card.style.borderColor = "#7b8cff";
-                        card.style.background = "#202849";
-                    }
+                    var selected = current && current.id === p.id;
+                    card.dataset.selected = selected ? "1" : "0";
+                    card.style.cssText = "width:100%;text-align:left;margin-bottom:4px;padding:8px 10px;border-radius:5px;border:1px solid " + (selected ? "#7a7aff" : "#555") + ";background:" + (selected ? "#25274a" : "#2a2a2a") + ";color:#fff;cursor:pointer;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;font-size:13px;font-weight:500;transition:all 0.2s ease;box-shadow:0 1px 3px rgba(0,0,0,0.2);";
+                    card.addEventListener("mouseenter", function() {
+                        if (this.dataset.selected === "1") return;
+                        this.style.background = "#333";
+                        this.style.borderColor = "#666";
+                    });
+                    card.addEventListener("mouseleave", function() {
+                        if (this.dataset.selected === "1") return;
+                        this.style.background = "#2a2a2a";
+                        this.style.borderColor = "#555";
+                    });
+                    var textWrap = document.createElement("div");
+                    textWrap.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:3px;";
                     var name = document.createElement("div");
                     name.textContent = p.name || "(Unnamed Activity Plan)";
-                    name.style.cssText = "font-weight:800;font-size:13px;line-height:1.25;";
+                    name.style.cssText = "font-size:13px;font-weight:700;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
                     var meta = document.createElement("div");
                     meta.textContent = "ID " + p.id + " | " + (p.cohortType || "No cohort") + " | " + (p.state || "No state");
-                    meta.style.cssText = "font-size:11px;color:#aeb7c7;line-height:1.3;";
+                    meta.style.cssText = "font-size:11px;color:#aaa;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
                     var ex = document.createElement("div");
-                    ex.textContent = "Example Reference: " + (p.exampleReference || "blank");
-                    ex.style.cssText = "font-size:11px;color:#8893a4;line-height:1.3;";
-                    card.appendChild(name);
-                    card.appendChild(meta);
-                    card.appendChild(ex);
+                    ex.textContent = "Example Reference: " + (p.exampleReference || "blank") + " | Timed: " + (p.timed || "blank");
+                    ex.style.cssText = "font-size:11px;color:#888;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                    textWrap.appendChild(name);
+                    textWrap.appendChild(meta);
+                    textWrap.appendChild(ex);
                     if (side === "destination" && capIsPlanLikelyLocked(p)) {
                         var locked = document.createElement("div");
                         locked.textContent = "Destination appears locked or not editable";
-                        locked.style.cssText = "font-size:11px;color:#ff8a8a;";
-                        card.appendChild(locked);
+                        locked.style.cssText = "font-size:11px;color:#ff8a8a;line-height:1.3;";
+                        textWrap.appendChild(locked);
                     }
+                    var marker = document.createElement("div");
+                    marker.textContent = selected ? "Selected" : (side === "source" ? "Source" : "Destination");
+                    marker.style.cssText = "border-radius:999px;border:1px solid " + (selected ? "#28a745" : "#555") + ";background:" + (selected ? "#1d5d32" : "#333") + ";color:#fff;font-size:10px;font-weight:700;padding:3px 7px;white-space:nowrap;";
+                    card.appendChild(textWrap);
+                    card.appendChild(marker);
                     card.addEventListener("click", (function(plan) {
                         return function() {
                             if (side === "source") selectedSource = plan;
@@ -24097,6 +24303,7 @@
                     empty.style.cssText = "color:#888;font-size:12px;text-align:center;padding:18px;";
                     list.appendChild(empty);
                 }
+                head.textContent = titleText + " (" + visibleCount + ")";
             }
             search.addEventListener("input", render);
             return { col: col, render: render };
@@ -24104,8 +24311,9 @@
 
         var sourceCol = makeColumn("Copy From", "source");
         var destinationCol = makeColumn("Copy To", "destination");
-        columns.appendChild(sourceCol.col);
-        columns.appendChild(destinationCol.col);
+        contentRow.appendChild(sourceCol.col);
+        contentRow.appendChild(makeResizeHandle(sourceCol.col, destinationCol.col));
+        contentRow.appendChild(destinationCol.col);
 
         function renderColumns() {
             sourceCol.render();
@@ -24124,6 +24332,7 @@
             message.textContent = error;
             confirmBtn.disabled = !!error || running;
             confirmBtn.style.opacity = confirmBtn.disabled ? ".55" : "1";
+            updateSummary();
         }
 
         cancelBtn.addEventListener("click", function() {
@@ -24155,7 +24364,7 @@
 
         renderColumns();
         updateConfirm();
-        CAP_SELECTION_POPUP_REF = createPopup({ title: "Copy A-Plan - Select Activity Plans", content: box, width: "92%", maxWidth: "1180px", height: "82%", maxHeight: "760px" });
+        CAP_SELECTION_POPUP_REF = createPopup({ title: "Copy A-Plan - Select Activity Plans", content: box, width: "96%", maxWidth: "1600px", height: "88%", maxHeight: "900px" });
     }
 
     function capNavigateForWorkflow(state, plan, phaseName) {
@@ -24302,6 +24511,9 @@
             prePostWindowCopied: true,
             prePostWindowReviewNeeded: false,
             sourceTableOnly: false,
+            fullConfigLoaded: false,
+            configLoading: false,
+            configLoadError: "",
             refActivity: false,
             preReference: false,
             disableCollectionTime: false,
@@ -24343,6 +24555,7 @@
             prePostWindowCopied: fd.prePostWindowCopied !== false,
             prePostWindowReviewNeeded: !!fd.prePostWindowReviewNeeded,
             sourceTableOnly: !!fd.sourceTableOnly,
+            fullConfigLoaded: !!fd.fullConfigLoaded,
             refActivity: !!fd.refActivity,
             preReference: !!fd.preReference,
             disableCollectionTime: !!fd.disableCollectionTime,
@@ -24385,6 +24598,50 @@
         return cells.length > 6 ? 6 : 4;
     }
 
+    function capBuildLogicalTableRows(tbody) {
+        var result = [];
+        var active = [];
+        var rows = tbody ? tbody.rows : [];
+        for (var r = 0; r < rows.length; r++) {
+            var logical = [];
+            var col = 0;
+            function fillActive() {
+                while (active[col] && active[col].remaining > 0) {
+                    logical[col] = active[col].cell;
+                    active[col].remaining--;
+                    if (active[col].remaining <= 0) delete active[col];
+                    col++;
+                }
+            }
+            for (var c = 0; c < rows[r].cells.length; c++) {
+                fillActive();
+                var cell = rows[r].cells[c];
+                var rowSpan = parseInt(cell.getAttribute("rowspan"), 10) || 1;
+                var colSpan = parseInt(cell.getAttribute("colspan"), 10) || 1;
+                for (var span = 0; span < colSpan; span++) {
+                    logical[col + span] = cell;
+                    if (rowSpan > 1) active[col + span] = { cell: cell, remaining: rowSpan - 1 };
+                }
+                col += colSpan;
+            }
+            fillActive();
+            result.push({ row: rows[r], cells: logical });
+        }
+        return result;
+    }
+
+    function capFindLogicalCellWithLink(cells, hrefPart) {
+        for (var i = 0; i < (cells || []).length; i++) {
+            if (cells[i] && cells[i].querySelector && cells[i].querySelector("a[href*='" + hrefPart + "']")) return cells[i];
+        }
+        return null;
+    }
+
+    function capIsEmptyScheduledActivityMessage(text) {
+        var key = capNormalizeKey(text || "");
+        return key.indexOf("no scheduled activities") !== -1 && key.indexOf("add") !== -1;
+    }
+
     function capScanCurrentScheduledRows(dropdownData, segmentOffsets) {
         var enhanced = scanExistingBPLTableEnhanced();
         var enhancedByIndex = {};
@@ -24396,36 +24653,58 @@
         if (!tbody) {
             throw new Error("Scheduled Activity table body was not found.");
         }
-        var rows = tbody.rows;
+        var table = tbody.closest ? tbody.closest("table") : null;
+        var headerMap = capBuildHeaderMap(table);
+        var segmentIdx = capHeaderIndex(headerMap, ["Segment", "Activity Plan Segment"]);
+        var eventIdx = capHeaderIndex(headerMap, ["Study Event", "Study Events"]);
+        var formIdx = capHeaderIndex(headerMap, ["Form", "Forms"]);
+        var timepointIdx = bplDetectTimepointColumn();
+        var exampleTimeIdx = bplDetectExampleTimeColumn();
+        if (segmentIdx < 0) segmentIdx = 1;
+        if (eventIdx < 0) eventIdx = 2;
+        if (formIdx < 0) formIdx = 3;
+        var statusIdx = exampleTimeIdx !== -1 ? exampleTimeIdx + 1 : (timepointIdx !== -1 ? timepointIdx + 1 : 6);
+        var logicalRows = capBuildLogicalTableRows(tbody);
         var planRows = [];
         var segments = dropdownData.segments || [];
         var studyEvents = dropdownData.studyEvents || [];
         var forms = dropdownData.forms || [];
-        for (var i = 0; i < rows.length; i++) {
-            var tr = rows[i];
-            var cells = tr.cells;
+        for (var i = 0; i < logicalRows.length; i++) {
+            var tr = logicalRows[i].row;
+            var cells = logicalRows[i].cells;
             if (!cells || cells.length < 4) continue;
             var saItem = enhancedByIndex[String(i)];
-            if (!saItem) {
-                continue;
-            }
-            var status = capParseStatusCell(cells[capDetectSATableStatusIndex(cells)]);
+            var status = capParseStatusCell(cells[statusIdx] || cells[capDetectSATableStatusIndex(cells)]);
             if (status.archived) continue;
-            var segmentLink = cells[1].querySelector("a[href*='/segment/']");
-            var eventLink = cells[2].querySelector("a[href*='/studyevent/']");
-            var formLink = cells[3].querySelector("a[href*='/form/']");
+            var segmentCell = capFindLogicalCellWithLink(cells, "/segment/") || cells[segmentIdx];
+            var eventCell = capFindLogicalCellWithLink(cells, "/studyevent/") || cells[eventIdx];
+            var formCell = capFindLogicalCellWithLink(cells, "/form/") || cells[formIdx];
+            var segmentLink = segmentCell ? segmentCell.querySelector("a[href*='/segment/']") : null;
+            var eventLink = eventCell ? eventCell.querySelector("a[href*='/studyevent/']") : null;
+            var formLink = formCell ? formCell.querySelector("a[href*='/form/']") : null;
             var editLink = tr.querySelector("a[href*='/update/scheduledactivity/']");
-            var segmentText = normalizeSAText(cells[1].textContent || saItem.segment || "");
-            var eventText = normalizeSAText(cells[2].textContent || saItem.studyEvent || "");
-            var formText = normalizeSAText(cells[3].textContent || saItem.form || "");
+            var segmentText = normalizeSAText((segmentCell && segmentCell.textContent) || (saItem && saItem.segment) || "");
+            var eventText = normalizeSAText((eventCell && eventCell.textContent) || (saItem && saItem.studyEvent) || "");
+            var formText = normalizeSAText((formCell && formCell.textContent) || (saItem && saItem.form) || "");
+            if (!segmentLink || !eventLink || !formLink) continue;
+            if (capIsEmptyScheduledActivityMessage(segmentText) || capIsEmptyScheduledActivityMessage(eventText) || capIsEmptyScheduledActivityMessage(formText)) continue;
+            if (!segmentText || !eventText || !formText) continue;
             var segmentId = capExtractIdFromHref(segmentLink ? segmentLink.getAttribute("href") : "", /\/segment\/(\d+)/);
             var eventId = capExtractIdFromHref(eventLink ? eventLink.getAttribute("href") : "", /\/studyevent\/(\d+)/);
             var formId = capExtractIdFromHref(formLink ? formLink.getAttribute("href") : "", /\/form\/(\d+)/);
-            var segmentOpt = capResolveOption(segments, segmentId, segmentText);
+            var segmentValue = segmentText || segmentId;
+            var segmentOpt = capResolveOption(segments, "", segmentText);
             var eventOpt = capResolveOption(studyEvents, eventId, eventText);
             var formOpt = capResolveOption(forms, formId, formText);
             if (!segmentOpt || !formOpt) continue;
-            var parts = capParseTimepointParts(saItem.timepointCleaned || saItem.timepointRaw || "", saItem.preReference);
+            segmentOpt.value = segmentValue || segmentOpt.value;
+            segmentOpt.text = segmentText || segmentOpt.text || segmentOpt.value;
+            var timepointRaw = normalizeSAText((timepointIdx >= 0 && cells[timepointIdx] && cells[timepointIdx].textContent) || (saItem && saItem.timepointRaw) || "");
+            var exampleTimeRaw = normalizeSAText((exampleTimeIdx >= 0 && cells[exampleTimeIdx] && cells[exampleTimeIdx].textContent) || (saItem && saItem.exampleTime) || "");
+            var timepointCleaned = timepointRaw ? timepointRaw.replace(/\(\d+\)\s*$/, "").trim() : ((saItem && saItem.timepointCleaned) || "");
+            var preReference = timepointCleaned.indexOf("-") !== -1 || !!(saItem && saItem.preReference);
+            var refActivity = timepointCleaned.indexOf("*") !== -1 || !!(saItem && saItem.refActivity);
+            var parts = capParseTimepointParts(timepointCleaned || timepointRaw || "", preReference);
             var segRefDateTime = "N/A";
             if (segmentOffsets && segmentOffsets[segmentText]) {
                 segRefDateTime = segmentOffsets[segmentText].referenceDateTime || "N/A";
@@ -24435,24 +24714,33 @@
             fd.hours = parts.hours;
             fd.minutes = parts.minutes;
             fd.seconds = parts.seconds;
-            fd.hidden = !!saItem.hidden || !!status.hidden;
+            fd.hidden = !!(saItem && saItem.hidden) || !!status.hidden;
             fd.mandatory = true;
             fd.enforce = !!status.enforce;
-            fd.refActivity = !!saItem.refActivity;
-            fd.preReference = !!saItem.preReference;
+            fd.preWindow = null;
+            fd.postWindow = null;
+            fd.configurationSource = "activityPlanTable";
+            fd.prePostWindowCopied = true;
+            fd.prePostWindowReviewNeeded = false;
+            fd.sourceTableOnly = false;
+            fd.fullConfigLoaded = false;
+            fd.configLoading = false;
+            fd.configLoadError = "";
+            fd.refActivity = !!refActivity;
+            fd.preReference = !!preReference;
             fd.studyEvents = eventOpt ? [{ value: eventOpt.value, text: eventOpt.text }] : [];
             fd.autoPopulated = true;
             fd.modified = false;
-            fd.editHref = editLink ? (editLink.getAttribute("href") || "") : (saItem.editHref || "");
+            fd.editHref = editLink ? (editLink.getAttribute("href") || "") : ((saItem && saItem.editHref) || "");
             fd.scheduledActivityId = capExtractIdFromHref(fd.editHref, /scheduledactivity\/(\d+)/);
             fd.saRowIndex = i;
-            fd.visibilityAlreadySet = !!saItem.visibilityAlreadySet || !!status.visibilityAlreadySet;
-            fd.visibilityMustBeSet = !!saItem.visibilityMustBeSet || !!status.visibilityMustBeSet;
-            fd.timepointRaw = saItem.timepointRaw || "";
-            fd.timepointCleaned = saItem.timepointCleaned || "";
-            fd.timepointDisplay = saItem.timepointDisplay || "";
+            fd.visibilityAlreadySet = !!(saItem && saItem.visibilityAlreadySet) || !!status.visibilityAlreadySet;
+            fd.visibilityMustBeSet = !!(saItem && saItem.visibilityMustBeSet) || !!status.visibilityMustBeSet;
+            fd.timepointRaw = timepointRaw;
+            fd.timepointCleaned = timepointCleaned;
+            fd.timepointDisplay = timepointRaw;
             fd.segmentRefDateTime = segRefDateTime;
-            fd.exampleTime = saItem.exampleTime || bplComputeExampleTime(segRefDateTime, saItem.timepointCleaned || "", saItem.preReference || false);
+            fd.exampleTime = exampleTimeRaw || bplComputeExampleTime(segRefDateTime, timepointCleaned || "", preReference || false);
             fd.originalValues = capSnapshotOriginal(fd);
             planRows.push({
                 segmentValue: segmentOpt.value,
@@ -24577,6 +24865,9 @@
         fd.prePostWindowCopied = true;
         fd.prePostWindowReviewNeeded = false;
         fd.sourceTableOnly = false;
+        fd.fullConfigLoaded = true;
+        fd.configLoading = false;
+        fd.configLoadError = "";
         fd.refActivity = !!props.referenceActivity;
         fd.preReference = props.offsetPreReference === "checked";
         if (!fd.refActivity) {
@@ -24615,6 +24906,10 @@
     }
 
     async function capCollectRowModalConfigs(planData, overlay, roleLabel) {
+        var normalizedRole = String(roleLabel || "").toLowerCase();
+        if (normalizedRole.indexOf("source") !== -1 || normalizedRole.indexOf("destination") !== -1) {
+            throw new Error("Copy A-Plan Source/Destination scanning must use the table-only parser and must not open form configuration modals.");
+        }
         var keys = [];
         for (var segVal in planData.segmentFormMap) {
             if (!planData.segmentFormMap.hasOwnProperty(segVal)) continue;
@@ -24652,6 +24947,10 @@
     }
 
     async function capScanCurrentActivityPlan(plan, requireEditable, overlay, roleLabel) {
+        var normalizedRole = String(roleLabel || "").toLowerCase();
+        if (normalizedRole.indexOf("source") !== -1 || normalizedRole.indexOf("destination") !== -1) {
+            throw new Error("Copy A-Plan Source/Destination scanning must use table-only scan helpers.");
+        }
         if (!capIsExpectedPlanPage(plan)) {
             throw new Error(roleLabel + " page did not match the selected Activity Plan ID " + plan.id + ".");
         }
@@ -24677,6 +24976,28 @@
         return planData;
     }
 
+    function capMarkDestinationTableOnlyData(planData) {
+        var store = planData.formDataStore || {};
+        for (var key in store) {
+            if (!store.hasOwnProperty(key)) continue;
+            var fd = store[key] || capDefaultFormData();
+            fd.preWindow = null;
+            fd.postWindow = null;
+            fd.configurationSource = "activityPlanTable";
+            fd.prePostWindowCopied = true;
+            fd.prePostWindowReviewNeeded = false;
+            fd.sourceTableOnly = false;
+            fd.fullConfigLoaded = false;
+            fd.configLoading = false;
+            fd.configLoadError = "";
+            fd.originalValues = capSnapshotOriginal(fd);
+            store[key] = fd;
+        }
+        planData.configurationSource = "activityPlanTable";
+        planData.destinationTableOnly = true;
+        return planData;
+    }
+
     function capMarkPrePostNotCopied(fd) {
         fd = fd || capDefaultFormData();
         fd.preWindow = null;
@@ -24685,6 +25006,9 @@
         fd.prePostWindowCopied = false;
         fd.prePostWindowReviewNeeded = true;
         fd.sourceTableOnly = true;
+        fd.fullConfigLoaded = false;
+        fd.configLoading = false;
+        fd.configLoadError = "";
         return fd;
     }
 
@@ -24723,6 +25047,31 @@
         return planData;
     }
 
+    async function capScanDestinationActivityPlanTableOnly(plan, overlay) {
+        if (!capIsExpectedPlanPage(plan)) {
+            throw new Error("Destination A-Plan page did not match the selected Activity Plan ID " + plan.id + ".");
+        }
+        var tbody = await waitForSelector("#saTableBody", 15000);
+        if (!tbody) {
+            throw new Error("Destination A-Plan Scheduled Activity table was not found.");
+        }
+        capSetOverlayMessage(overlay, "Reading Destination A-Plan options");
+        var exampleReference = await bplCollectExampleReferenceTime();
+        var segmentOffsets = await bplCollectSegmentOffsets(exampleReference);
+        var editable = !isAddSaButtonDisabled();
+        if (!editable) {
+            throw new Error("Destination A-Plan is not editable. ClinSpark has disabled the Add Scheduled Activity button.");
+        }
+        var dropdownData = await capCollectDropdownData(editable);
+        capSetOverlayMessage(overlay, "Parsing Destination A-Plan table");
+        var rows = capScanCurrentScheduledRows(dropdownData, segmentOffsets);
+        dropdownData.segments = capEnsureSegmentsFromRows(dropdownData.segments || [], rows);
+        var planData = capRowsToPlanData(plan, editable, dropdownData, rows, segmentOffsets, exampleReference, []);
+        capMarkDestinationTableOnlyData(planData);
+        capLog("Destination A-Plan table-only scan complete: " + planData.segments.length + " segments, " + rows.length + " rows");
+        return planData;
+    }
+
     function capBuildWorkspaceState(destinationData) {
         return {
             segments: capClone(destinationData.segments || []) || [],
@@ -24737,6 +25086,120 @@
             warnings: capClone(destinationData.warnings || []) || [],
             dirty: false
         };
+    }
+
+    function capHasUnloadedDestinationConfig(found) {
+        if (!found) return false;
+        var fd = found.data || {};
+        if (!(found.entry.autoPopulated || fd.autoPopulated)) return false;
+        if (fd.fullConfigLoaded || fd.configurationSource === "editModal") return false;
+        return fd.configurationSource === "activityPlanTable";
+    }
+
+    function capNeedsDestinationConfigLoad(found) {
+        if (!capHasUnloadedDestinationConfig(found)) return false;
+        var fd = found.data || {};
+        return !!(fd.editHref || fd.scheduledActivityId);
+    }
+
+    function capMergeModalPropsPreservingWorkspaceState(fd, props, preserveStudyEvents) {
+        var wasModified = !!(fd && fd.modified);
+        var existingEvents = capClone(preserveStudyEvents || (fd && fd.studyEvents) || []) || [];
+        capMergeModalPropsIntoFormData(fd, props);
+        fd.studyEvents = existingEvents;
+        fd.modified = wasModified;
+        fd.fullConfigLoaded = true;
+        fd.configLoading = false;
+        fd.configLoadError = "";
+        return fd;
+    }
+
+    function capStoreLoadedDestinationOriginal(state, formKey, loadedData) {
+        if (!state || !state.destinationData || !state.destinationData.formDataStore) return;
+        var original = state.destinationData.formDataStore[formKey];
+        if (!original) return;
+        var copy = capClone(loadedData) || capDefaultFormData();
+        copy.studyEvents = capClone(original.studyEvents || copy.studyEvents || []) || [];
+        copy.modified = false;
+        copy.configLoading = false;
+        copy.configLoadError = "";
+        copy.originalValues = capSnapshotOriginal(copy);
+        state.destinationData.formDataStore[formKey] = copy;
+    }
+
+    async function capEnsureDestinationFormConfigLoaded(state, formKey) {
+        var ws = state && state.workspace;
+        var found = capFindWorkspaceForm(ws, formKey);
+        if (!capHasUnloadedDestinationConfig(found)) return true;
+        if (!capNeedsDestinationConfigLoad(found)) {
+            var blockedData = found && found.data ? found.data : capDefaultFormData();
+            blockedData.configLoading = false;
+            blockedData.configLoadError = "Edit link not found.";
+            if (ws && ws.formDataStore) ws.formDataStore[formKey] = blockedData;
+            if (ws) {
+                if (!ws.warnings) ws.warnings = [];
+                ws.warnings.push("Could not load destination configuration for " + ((found && found.entry && found.entry.text) || "form") + ": " + blockedData.configLoadError);
+            }
+            capSaveWorkflow(state);
+            return false;
+        }
+        if (CAP_CONFIG_LOADS[formKey]) return CAP_CONFIG_LOADS[formKey];
+        CAP_CONFIG_LOADS[formKey] = (async function() {
+            var fd = found.data || capDefaultFormData();
+            fd.configLoading = true;
+            fd.configLoadError = "";
+            ws.formDataStore[formKey] = fd;
+            capSaveWorkflow(state);
+            var modal = null;
+            try {
+                var link = capFindEditLink(fd.editHref, fd.scheduledActivityId);
+                if (!link) throw new Error("Edit link not found.");
+                link.click();
+                modal = await waitForSAModal(12000);
+                if (!modal) throw new Error("Edit modal did not open.");
+                var props = await collectEditModalProperties();
+                capMergeModalPropsPreservingWorkspaceState(fd, props);
+                ws.formDataStore[formKey] = fd;
+                capStoreLoadedDestinationOriginal(state, formKey, fd);
+                capSaveWorkflow(state);
+                await capCloseActiveModal(modal);
+                return true;
+            } catch (e) {
+                fd.configLoading = false;
+                fd.configLoadError = String(e && e.message ? e.message : e);
+                ws.formDataStore[formKey] = fd;
+                if (!ws.warnings) ws.warnings = [];
+                ws.warnings.push("Could not load destination configuration for " + (found.entry.text || "form") + ": " + fd.configLoadError);
+                capSaveWorkflow(state);
+                await capCloseActiveModal(modal);
+                return false;
+            }
+        })();
+        try {
+            return await CAP_CONFIG_LOADS[formKey];
+        } finally {
+            delete CAP_CONFIG_LOADS[formKey];
+        }
+    }
+
+    async function capEnsureDestinationSegmentConfigsLoaded(state, segVal) {
+        var ws = state && state.workspace;
+        var list = (ws && ws.segmentFormMap && ws.segmentFormMap[segVal]) || [];
+        var ok = true;
+        for (var i = 0; i < list.length; i++) {
+            var key = capGetFormKey(segVal, list[i].value, list[i].index);
+            if (!await capEnsureDestinationFormConfigLoaded(state, key)) ok = false;
+        }
+        return ok;
+    }
+
+    async function capHydrateUpdateItemFromOpenModal(item) {
+        var fd = item && item.formData;
+        if (!fd || fd.fullConfigLoaded || fd.configurationSource !== "activityPlanTable") return;
+        var desiredEvents = capClone(fd.studyEvents || []) || [];
+        var props = await collectEditModalProperties();
+        capMergeModalPropsPreservingWorkspaceState(fd, props, desiredEvents);
+        item.formData = fd;
     }
 
     async function capResumeWorkflowIfNeeded() {
@@ -24783,7 +25246,7 @@
                     }
                     overlay = createCollectingOverlay("Copy A-Plan", "Scanning Destination A-Plan");
                     state.navAttempts.scanDestination = 0;
-                    state.destinationData = await capScanCurrentActivityPlan(state.destinationPlan, true, overlay, "Destination A-Plan");
+                    state.destinationData = await capScanDestinationActivityPlanTableOnly(state.destinationPlan, overlay);
                     state.workspace = capBuildWorkspaceState(state.destinationData);
                     state.phase = "workspace";
                     capSaveWorkflow(state);
@@ -24860,6 +25323,51 @@
         return bplFormatTimePoint(fd.days || 0, fd.hours || 0, fd.minutes || 0, fd.seconds || 0, !!fd.preReference);
     }
 
+    function capGetTimeReferenceLabel(fd) {
+        fd = fd || {};
+        var time = fd.refActivity ? "0:00:00" : capGetTimeLabel(fd);
+        var reference = fd.exampleTime || fd.segmentRefDateTime || "";
+        return time + (reference && reference !== "N/A" ? " | " + reference : "");
+    }
+
+    function capAppendStatusIcon(wrap, text, title) {
+        var icon = document.createElement("span");
+        icon.textContent = text;
+        icon.title = title || "";
+        wrap.appendChild(icon);
+    }
+
+    function capStatusIcons(fd) {
+        fd = fd || {};
+        var wrap = document.createElement("span");
+        wrap.className = "cap-status-icons";
+        var left = document.createElement("span");
+        left.className = "cap-status-slot";
+        var middle = document.createElement("span");
+        middle.className = "cap-status-slot";
+        var right = document.createElement("span");
+        right.className = "cap-status-slot-group";
+        if (fd.hidden || fd.visibilityAlreadySet || fd.visibilityMustBeSet) capAppendStatusIcon(left, "🚫", fd.visibilityMustBeSet ? "Hidden visibility condition must be set" : "Hidden");
+        if (fd.mandatory !== false) capAppendStatusIcon(middle, "❗", "Mandatory");
+        if (fd.enforce) capAppendStatusIcon(right, "🔒", "Enforce Data Collection Order");
+        if (fd.refActivity) capAppendStatusIcon(right, "⭐", "Reference Activity");
+        wrap.appendChild(left);
+        wrap.appendChild(middle);
+        wrap.appendChild(right);
+        return wrap;
+    }
+
+    function capLegend() {
+        var legend = document.createElement("div");
+        legend.className = "cap-legend";
+        ["🚫 Hidden", "❗ Mandatory", "🔒 Enforce Order", "⭐ Ref. Activity"].forEach(function(text) {
+            var span = document.createElement("span");
+            span.textContent = text;
+            legend.appendChild(span);
+        });
+        return legend;
+    }
+
     function capFindMajorityStudyEvent(ws, segVal, excludeKey) {
         var list = (ws.segmentFormMap && ws.segmentFormMap[segVal]) || [];
         var counts = {};
@@ -24880,7 +25388,7 @@
         for (var c in counts) {
             if (counts.hasOwnProperty(c) && (!best || counts[c].count > best.count)) best = counts[c];
         }
-        return best && best.count > total / 2 ? { value: best.value, text: best.text } : null;
+        return best && best.count > 0 ? { value: best.value, text: best.text } : null;
     }
 
     function capResolveDestinationStudyEvent(ws, sourceEvent, targetSegVal) {
@@ -24905,6 +25413,12 @@
         return { event: null, warning: "Study Event '" + (sourceEvent.text || "blank") + "' could not be mapped. Select it manually before applying." };
     }
 
+    function capSetSingleStudyEvent(fd, eventOpt) {
+        if (!fd) return;
+        fd.studyEvents = [];
+        if (eventOpt) fd.studyEvents.push({ value: eventOpt.value, text: eventOpt.text });
+    }
+
     function capBuildFormSignature(segVal, entry, fd) {
         var ev = fd && fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : {};
         return [
@@ -24919,6 +25433,51 @@
             String(fd && fd.seconds || 0),
             fd && fd.preReference ? "pre" : "post"
         ].join("|");
+    }
+
+    function capBuildDuplicateSignature(segVal, entry, fd) {
+        var ev = fd && fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
+        if (!ev || (!ev.value && !ev.text)) return "";
+        var timeKey = fd && fd.refActivity ? "0:0:0:0:post" : [
+            String(fd && fd.days || 0),
+            String(fd && fd.hours || 0),
+            String(fd && fd.minutes || 0),
+            String(fd && fd.seconds || 0),
+            fd && fd.preReference ? "pre" : "post"
+        ].join(":");
+        return [
+            String(segVal || ""),
+            capNormalizeKey(entry && entry.text || entry && entry.value || ""),
+            String(ev.value || capNormalizeKey(ev.text || "")),
+            timeKey
+        ].join("|");
+    }
+
+    function capFindWorkspaceDuplicateKeys(ws) {
+        var duplicateKeys = {};
+        var signatures = {};
+        var segments = (ws && ws.segments) || [];
+        for (var si = 0; si < segments.length; si++) {
+            var segVal = segments[si].value;
+            var list = (ws.segmentFormMap && ws.segmentFormMap[segVal]) || [];
+            for (var fi = 0; fi < list.length; fi++) {
+                var entry = list[fi];
+                if (!entry || entry.deleteRequested) continue;
+                var key = capGetFormKey(segVal, entry.value, entry.index);
+                var fd = (ws.formDataStore && ws.formDataStore[key]) || capDefaultFormData();
+                var sig = capBuildDuplicateSignature(segVal, entry, fd);
+                if (!sig) continue;
+                if (!signatures[sig]) signatures[sig] = [];
+                signatures[sig].push(key);
+            }
+        }
+        for (var sigKey in signatures) {
+            if (!signatures.hasOwnProperty(sigKey) || signatures[sigKey].length < 2) continue;
+            for (var di = 0; di < signatures[sigKey].length; di++) {
+                duplicateKeys[signatures[sigKey][di]] = true;
+            }
+        }
+        return duplicateKeys;
     }
 
     function capHasDuplicate(ws, segVal, entry, fd, excludeKey) {
@@ -24999,12 +25558,19 @@
             warnings.push("Form '" + (snapshot.formEntry.text || "blank") + "' is not available in the destination A-Plan.");
             return false;
         }
-        var sourceEvent = snapshot.formData.studyEvents && snapshot.formData.studyEvents[0] ? snapshot.formData.studyEvents[0] : null;
-        var eventResult = capResolveDestinationStudyEvent(ws, sourceEvent, targetSegVal);
-        if (eventResult.warning) warnings.push(eventResult.warning);
         var data = capClone(snapshot.formData) || capDefaultFormData();
         var hasSnapshotOrigin = !!(snapshot.origin || snapshot.source);
-        if (snapshot.origin === "sourceAPlan" || snapshot.source === "sourceAPlan" || (!hasSnapshotOrigin && data.configurationSource === "activityPlanTable" && data.prePostWindowCopied === false)) {
+        var fromSource = snapshot.origin === "sourceAPlan" || snapshot.source === "sourceAPlan" || (!hasSnapshotOrigin && data.configurationSource === "activityPlanTable" && data.prePostWindowCopied === false);
+        var eventResult = null;
+        if (fromSource) {
+            var majority = capFindMajorityStudyEvent(ws, targetSegVal, null);
+            eventResult = { event: majority || null, warning: majority ? "" : "No commonly used Study Event was found in " + capGetSegmentText(ws, targetSegVal) + ". Select it manually before applying." };
+        } else {
+            var sourceEvent = snapshot.formData.studyEvents && snapshot.formData.studyEvents[0] ? snapshot.formData.studyEvents[0] : null;
+            eventResult = capResolveDestinationStudyEvent(ws, sourceEvent, targetSegVal);
+        }
+        if (eventResult.warning) warnings.push(eventResult.warning);
+        if (fromSource) {
             capMarkPrePostNotCopied(data);
         } else {
             data.prePostWindowCopied = data.prePostWindowCopied !== false;
@@ -25019,10 +25585,6 @@
         data.originalValues = null;
         data.copiedFrom = { source: "Copy A-Plan", formText: snapshot.formEntry.text || "", segmentText: snapshot.segmentText || "" };
         var newEntry = { value: destForm.value, text: destForm.text, index: ws.formInstanceCounter + 1, autoPopulated: false };
-        if (capHasDuplicate(ws, targetSegVal, newEntry, data, null)) {
-            warnings.push("Skipped duplicate: " + destForm.text + " in " + capGetSegmentText(ws, targetSegVal) + ".");
-            return false;
-        }
         ws.formInstanceCounter++;
         newEntry.index = ws.formInstanceCounter;
         if (!ws.segmentFormMap[targetSegVal]) ws.segmentFormMap[targetSegVal] = [];
@@ -25079,10 +25641,14 @@
         return {
             element: box,
             setStatus: function(text) { status.textContent = text; },
-            setItem: function(index, stateText, color) {
+            setItem: function(index, stateText, color, detailText) {
                 if (!rows[index]) return;
                 rows[index].textContent = stateText;
                 rows[index].style.background = color || "#343a46";
+                rows[index].title = detailText || "";
+                if (detailText && rows[index].previousSibling) {
+                    rows[index].previousSibling.title = detailText;
+                }
             },
             showClose: function(popup) {
                 closeBtn.style.display = "block";
@@ -25094,7 +25660,8 @@
     function capValidateWorkspace(state) {
         var ws = state.workspace;
         var errors = [];
-        var signatures = {};
+        var duplicateKeys = capFindWorkspaceDuplicateKeys(ws);
+        var duplicateSegments = {};
         for (var si = 0; si < ws.segments.length; si++) {
             var segVal = ws.segments[si].value;
             var list = ws.segmentFormMap[segVal] || [];
@@ -25115,11 +25682,9 @@
                     errors.push("Study Event is missing for " + entry.text + " in " + ws.segments[si].text + ".");
                 }
                 if (fd.refActivity) refCount++;
-                var sig = capBuildFormSignature(segVal, entry, fd);
-                if (signatures[sig]) {
-                    errors.push("Duplicate detected in " + ws.segments[si].text + ": " + entry.text + ".");
-                } else {
-                    signatures[sig] = true;
+                if (duplicateKeys[key] && !duplicateSegments[segVal]) {
+                    errors.push("Duplicate forms detected in " + ws.segments[si].text + " with the same Study Event, form name, and timepoint.");
+                    duplicateSegments[segVal] = true;
                 }
             }
             if (refCount > 1) {
@@ -25239,7 +25804,6 @@
             capSetInputValue(document.querySelector("input[name='offset.seconds']"), fd.seconds || 0);
         }
         capSetCheckboxState(document.getElementById("disableCollectionTime"), !!fd.disableCollectionTime);
-        capSetInputValue(document.getElementById("formOffsetSeconds"), fd.formOffsetSeconds || "");
         if (fd.collectionRoleRestriction) {
             await setSelect2ValueByText("dataCollectionApplicationUserRole", fd.collectionRoleRestriction);
         }
@@ -25259,6 +25823,109 @@
         return "";
     }
 
+    function capGetSaTableSnapshot(item) {
+        var tbody = document.getElementById("saTableBody");
+        var rows = tbody ? tbody.querySelectorAll("tr") : [];
+        var matchingRows = 0;
+        var targetParts = item ? [
+            normalizeSAText(item.segmentText || ""),
+            normalizeSAText(item.eventText || ""),
+            normalizeSAText(item.formText || "")
+        ] : [];
+        for (var r = 0; r < rows.length; r++) {
+            var rowText = normalizeSAText(rows[r].textContent || "");
+            if (targetParts[0] && targetParts[1] && targetParts[2] &&
+                rowText.indexOf(targetParts[0]) !== -1 &&
+                rowText.indexOf(targetParts[1]) !== -1 &&
+                rowText.indexOf(targetParts[2]) !== -1) {
+                matchingRows++;
+            }
+        }
+        return {
+            hasTable: !!tbody,
+            rowCount: rows.length,
+            editLinkCount: tbody ? tbody.querySelectorAll("a[href*='/update/scheduledactivity/']").length : 0,
+            matchingRows: matchingRows,
+            textLength: tbody ? normalizeSAText(tbody.textContent || "").length : 0
+        };
+    }
+
+    function capSaTableSnapshotChanged(before, after) {
+        if (!before || !after) return false;
+        return before.rowCount !== after.rowCount ||
+            before.editLinkCount !== after.editLinkCount ||
+            before.matchingRows !== after.matchingRows ||
+            before.textLength !== after.textLength;
+    }
+
+    function capHasVisibleModalOrBackdrop() {
+        var modal = document.querySelector("#ajaxModal.in, #ajaxModal.show, .modal.in, .modal.show");
+        var backdrop = document.querySelector(".modal-backdrop");
+        var bodyLocked = document.body && document.body.classList && document.body.classList.contains("modal-open");
+        return !!(modal || backdrop || bodyLocked);
+    }
+
+    function capCleanupStaleModalArtifacts() {
+        var openModal = document.querySelector("#ajaxModal.in, #ajaxModal.show, .modal.in, .modal.show");
+        if (openModal) return false;
+        var cleaned = false;
+        var backdrops = document.querySelectorAll(".modal-backdrop");
+        for (var i = 0; i < backdrops.length; i++) {
+            if (backdrops[i] && backdrops[i].parentNode) {
+                backdrops[i].parentNode.removeChild(backdrops[i]);
+                cleaned = true;
+            }
+        }
+        if (document.body && document.body.classList && document.body.classList.contains("modal-open")) {
+            document.body.classList.remove("modal-open");
+            document.body.style.paddingRight = "";
+            cleaned = true;
+        }
+        return cleaned;
+    }
+
+    function capGetActiveAjaxCount() {
+        try {
+            if (window.jQuery && typeof window.jQuery.active === "number") {
+                return window.jQuery.active;
+            }
+        } catch (e) {}
+        return 0;
+    }
+
+    async function capWaitForSaPageReadyAfterSave(beforeSnapshot, item, timeoutMs) {
+        var start = Date.now();
+        var maxTime = timeoutMs || 30000;
+        var stableReadyPolls = 0;
+        var sawTableChange = false;
+        while (Date.now() - start < maxTime) {
+            if (Date.now() - start > 3000) {
+                capCleanupStaleModalArtifacts();
+            }
+            var afterSnapshot = capGetSaTableSnapshot(item);
+            var addBtn = document.getElementById("addSaButton");
+            var pageUsable = afterSnapshot.hasTable &&
+                addBtn &&
+                !addBtn.disabled &&
+                !addBtn.hasAttribute("disabled") &&
+                !capHasVisibleModalOrBackdrop() &&
+                capGetActiveAjaxCount() === 0;
+            var changed = capSaTableSnapshotChanged(beforeSnapshot, afterSnapshot);
+            var targetAdded = beforeSnapshot && afterSnapshot.matchingRows > beforeSnapshot.matchingRows;
+            if (changed || targetAdded) {
+                sawTableChange = true;
+            }
+            if (pageUsable && (sawTableChange || Date.now() - start > 1800)) {
+                stableReadyPolls++;
+                if (stableReadyPolls >= 2) return true;
+            } else {
+                stableReadyPolls = 0;
+            }
+            await sleep(250);
+        }
+        return false;
+    }
+
     async function capExecuteUpdate(item) {
         var link = capFindEditLink(item.editHref, capExtractIdFromHref(item.editHref, /scheduledactivity\/(\d+)/));
         if (!link) throw new Error("Edit link not found.");
@@ -25274,6 +25941,7 @@
         if (formNeedsSelection && item.formText && formSel && !formSel.disabled) {
             await capSelect2Value("form", item.formValue, item.formText);
         }
+        await capHydrateUpdateItemFromOpenModal(item);
         if ((studyEventSel && studyEventSel.disabled) || (formSel && formSel.disabled)) {
             capSetInputValue(document.getElementById("reasonForChange"), "Copy A-Plan update");
         }
@@ -25292,6 +25960,7 @@
     }
 
     async function capExecuteAdd(item) {
+        var beforeSnapshot = capGetSaTableSnapshot(item);
         if (!clickAddSaButton()) throw new Error("Add button could not be clicked.");
         var modal = await waitForSAModal(12000);
         if (!modal) throw new Error("Add modal did not open.");
@@ -25308,6 +25977,8 @@
         if (modalError) throw new Error(modalError);
         var closed = await waitForSAModalClose(20000);
         if (!closed) throw new Error(capGetVisibleModalError(modal) || "Add modal did not close after Save.");
+        var ready = await capWaitForSaPageReadyAfterSave(beforeSnapshot, item, 30000);
+        if (!ready) throw new Error("Destination A-Plan did not finish loading after Add.");
     }
 
     async function capExecuteApply(state, applyItems, archiveReason) {
@@ -25315,8 +25986,10 @@
         for (var d = 0; d < applyItems.deletes.length; d++) all.push({ label: "Delete: " + applyItems.deletes[d].label, status: "Pending", kind: "delete", item: applyItems.deletes[d] });
         for (var u = 0; u < applyItems.updates.length; u++) all.push({ label: "Update: " + applyItems.updates[u].label, status: "Pending", kind: "update", item: applyItems.updates[u] });
         for (var a = 0; a < applyItems.adds.length; a++) all.push({ label: "Add: " + applyItems.adds[a].label, status: "Pending", kind: "add", item: applyItems.adds[a] });
+        var root = document.getElementById(CAP_ROOT_ID);
+        if (root) root.remove();
         var progress = capCreateProgressList("Preparing Copy A-Plan changes", all);
-        CAP_PROGRESS_POPUP_REF = createPopup({ title: "Copy A-Plan - Applying Changes", content: progress.element, width: "760px", height: "auto", maxHeight: "86%" });
+        CAP_PROGRESS_POPUP_REF = createPopup({ title: "Copy A-Plan - Applying Changes", content: progress.element, width: "760px", height: "auto", maxHeight: "86%", hideClose: true });
         var failures = 0;
         var cursor = 0;
         if (applyItems.deletes.length > 0) {
@@ -25332,7 +26005,8 @@
                     if (!ok) failures++;
                 }
             } catch (e) {
-                for (var dx = 0; dx < applyItems.deletes.length; dx++) progress.setItem(cursor + dx, "Failed", "#b3261e");
+                var deleteError = String(e && e.message ? e.message : e);
+                for (var dx = 0; dx < applyItems.deletes.length; dx++) progress.setItem(cursor + dx, "Failed", "#b3261e", deleteError);
                 failures += applyItems.deletes.length;
             }
             cursor += applyItems.deletes.length;
@@ -25345,8 +26019,9 @@
                 progress.setItem(cursor + ui, "Done", "#2e7d32");
             } catch (e2) {
                 failures++;
-                progress.setItem(cursor + ui, "Failed", "#b3261e");
-                capLog("update failed: " + String(e2));
+                var updateError = String(e2 && e2.message ? e2.message : e2);
+                progress.setItem(cursor + ui, "Failed", "#b3261e", updateError);
+                capLog("update failed: " + updateError);
                 await capCloseActiveModal();
             }
         }
@@ -25359,8 +26034,9 @@
                 progress.setItem(cursor + ai, "Done", "#2e7d32");
             } catch (e3) {
                 failures++;
-                progress.setItem(cursor + ai, "Failed", "#b3261e");
-                capLog("add failed: " + String(e3));
+                var addError = String(e3 && e3.message ? e3.message : e3);
+                progress.setItem(cursor + ai, "Failed", "#b3261e", addError);
+                capLog("add failed: " + addError);
                 await capCloseActiveModal();
             }
         }
@@ -25368,8 +26044,6 @@
         progress.showClose(CAP_PROGRESS_POPUP_REF);
         if (!failures) {
             capClearWorkflow();
-            var root = document.getElementById(CAP_ROOT_ID);
-            if (root) root.remove();
         }
     }
 
@@ -25450,11 +26124,13 @@
         title.appendChild(sub);
         var headerActions = document.createElement("div");
         headerActions.style.cssText = "display:flex;gap:8px;align-items:center;";
-        var applyBtn = capMakeButton("Apply Changes", "#28a745");
-        var startOverBtn = capMakeButton("Start Over", "#8a3ffc");
-        var closeBtn = capMakeButton("Close", "#444");
-        headerActions.appendChild(startOverBtn);
-        headerActions.appendChild(applyBtn);
+        var closeBtn = capMakeButton("✕", "transparent");
+        closeBtn.title = "Close";
+        closeBtn.style.border = "none";
+        closeBtn.style.width = "28px";
+        closeBtn.style.height = "28px";
+        closeBtn.style.padding = "4px 8px";
+        closeBtn.style.fontSize = "18px";
         headerActions.appendChild(closeBtn);
         header.appendChild(title);
         header.appendChild(headerActions);
@@ -25462,13 +26138,37 @@
 
         var main = document.createElement("div");
         main.className = "cap-main";
-        var studyPanel = capWorkspacePanel("Destination Study Events", "cap-study-panel");
+        var studyPanel = capWorkspacePanel("Study Events", "cap-study-panel");
         var sourcePanel = capWorkspacePanel("Source A-Plan", "");
-        var destPanel = capWorkspacePanel("Destination A-Plan", "");
-        var configPanel = capWorkspacePanel("Time Relative to Segment / Form Configuration", "cap-config-panel");
+        var destPanel = capWorkspacePanel("Target A-Plan", "");
+        var configPanel = capWorkspacePanel("Form Configuration", "cap-config-panel");
+        var panelWidths = capLoadPanelWidths();
+        capApplyPanelWidth(studyPanel.panel, panelWidths, "study", 150);
+        capApplyPanelWidth(sourcePanel.panel, panelWidths, "source", 600);
+        capApplyPanelWidth(destPanel.panel, panelWidths, "target", 700);
+        capApplyPanelWidth(configPanel.panel, panelWidths, "config", 240);
+        var studyFilter = "";
+        var sourceFilter = "";
+        var targetFilter = "";
+        studyPanel.header.appendChild(capMakeSearchInput("Search", function(value) {
+            studyFilter = value;
+            renderStudyEvents();
+        }));
+        sourcePanel.header.appendChild(capMakeSearchInput("Search forms", function(value) {
+            sourceFilter = value;
+            renderSource();
+        }));
+        destPanel.header.appendChild(capMakeSearchInput("Search forms", function(value) {
+            targetFilter = value;
+            renderDestination();
+        }));
+        sourcePanel.header.appendChild(capPanelBadge("Read-only"));
         main.appendChild(studyPanel.panel);
+        main.appendChild(capMakePanelResizeHandle(studyPanel.panel, sourcePanel.panel, "study", "source", panelWidths));
         main.appendChild(sourcePanel.panel);
+        main.appendChild(capMakePanelResizeHandle(sourcePanel.panel, destPanel.panel, "source", "target", panelWidths));
         main.appendChild(destPanel.panel);
+        main.appendChild(capMakePanelResizeHandle(destPanel.panel, configPanel.panel, "target", "config", panelWidths));
         main.appendChild(configPanel.panel);
         root.appendChild(main);
 
@@ -25476,15 +26176,27 @@
         footer.className = "cap-footer";
         var footerLeft = document.createElement("div");
         footerLeft.className = "cap-footer-left";
+        var clearTargetBtn = capMakeButton("Clear Target A-Plan", "#2a1a1a");
+        clearTargetBtn.style.borderColor = "#c0392b";
+        clearTargetBtn.style.color = "#ff6b6b";
+        var autoPasteAllBtn = capMakeButton("📋 Auto Paste All", "#1a2a3a");
+        autoPasteAllBtn.style.borderColor = "#5dade2";
+        autoPasteAllBtn.style.color = "#5dade2";
+        var sortAllBtn = capMakeButton("↕ Sort All", "#2b2b2b");
+        sortAllBtn.style.borderColor = "#777";
         var status = document.createElement("div");
         status.className = "cap-footer-status";
-        footerLeft.appendChild(capChip("Existing"));
-        footerLeft.appendChild(capChip("New"));
-        footerLeft.appendChild(capChip("Modified"));
-        footerLeft.appendChild(capChip("Deleted"));
-        footerLeft.appendChild(capChip("Pre/Post Window not copied from Source"));
-        footerLeft.appendChild(status);
+        var confirmBtn = capMakeButton("Confirm", "#007bff");
+        var footerRight = document.createElement("div");
+        footerRight.className = "cap-footer-right";
+        footerLeft.appendChild(capLegend());
+        footerLeft.appendChild(clearTargetBtn);
+        footerLeft.appendChild(autoPasteAllBtn);
+        footerLeft.appendChild(sortAllBtn);
+        footerRight.appendChild(status);
+        footerRight.appendChild(confirmBtn);
         footer.appendChild(footerLeft);
+        footer.appendChild(footerRight);
         root.appendChild(footer);
 
         document.body.appendChild(root);
@@ -25511,6 +26223,88 @@
             ws.dirty = true;
             ws.formDataStore[key] = found.data;
             persist();
+            renderDestination();
+        }
+
+        async function selectDestinationForm(key) {
+            ws.selectedFormKey = key;
+            var found = capFindWorkspaceForm(ws, key);
+            if (capNeedsDestinationConfigLoad(found)) {
+                found.data.configLoading = true;
+                found.data.configLoadError = "";
+                ws.formDataStore[key] = found.data;
+                persist();
+                renderAll();
+                status.textContent = "Loading current configuration for " + (found.entry.text || "selected form") + ".";
+                await capEnsureDestinationFormConfigLoaded(state, key);
+                renderAll();
+                return;
+            }
+            renderAll();
+        }
+
+        async function copyFormToClipboard(planData, segVal, entry, editable) {
+            var key = capGetFormKey(segVal, entry.value, entry.index);
+            if (editable) {
+                var found = capFindWorkspaceForm(ws, key);
+                if (capNeedsDestinationConfigLoad(found)) {
+                    found.data.configLoading = true;
+                    found.data.configLoadError = "";
+                    ws.formDataStore[key] = found.data;
+                    persist();
+                    renderAll();
+                    status.textContent = "Loading destination configuration before copying " + (entry.text || "form") + ".";
+                    await capEnsureDestinationFormConfigLoaded(state, key);
+                    found = capFindWorkspaceForm(ws, key);
+                }
+                if (found && (found.entry.autoPopulated || found.data.autoPopulated) && !found.data.fullConfigLoaded && found.data.configurationSource === "activityPlanTable") {
+                    warn("Could not copy " + (entry.text || "form") + " because its destination configuration was not loaded.");
+                    renderAll();
+                    return;
+                }
+            }
+            ws.clipboard = capMakeFormSnapshot(planData, segVal, entry, editable ? "destinationAPlan" : "sourceAPlan");
+            renderAll();
+        }
+
+        async function copySegmentToClipboard(planData, segVal, editable) {
+            if (editable) {
+                status.textContent = "Loading destination segment configuration before copying.";
+                var ok = await capEnsureDestinationSegmentConfigsLoaded(state, segVal);
+                if (!ok) {
+                    warn("Could not copy the destination segment because one or more form configurations were not loaded.");
+                    renderAll();
+                    return;
+                }
+            }
+            ws.clipboard = capMakeSegmentSnapshot(planData, segVal, editable ? "destinationAPlan" : "sourceAPlan");
+            renderAll();
+        }
+
+        function matchesFilterText(text, filter) {
+            if (!filter) return true;
+            var hay = capNormalizeKey(text || "");
+            var parts = String(filter || "").split(",");
+            for (var i = 0; i < parts.length; i++) {
+                var part = capNormalizeKey(parts[i]);
+                if (part && hay.indexOf(part) !== -1) return true;
+            }
+            return false;
+        }
+
+        function formMatchesFilter(planData, seg, entry, fd, filter) {
+            if (!filter) return true;
+            var ev = fd && fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : {};
+            return matchesFilterText([
+                seg && seg.text,
+                entry && entry.text,
+                ev.text,
+                fd && fd.timepointRaw,
+                fd && fd.exampleTime,
+                fd && fd.refActivity ? "reference" : "",
+                fd && fd.hidden ? "hidden" : "",
+                fd && fd.enforce ? "enforce" : ""
+            ].join(" "), filter);
         }
 
         function renderAll() {
@@ -25530,26 +26324,33 @@
         function renderStudyEvents() {
             studyPanel.body.innerHTML = "";
             var events = ws.studyEvents || [];
+            var visible = 0;
             if (!events.length) {
                 studyPanel.body.appendChild(capEmpty("No destination Study Events were found."));
                 return;
             }
             for (var i = 0; i < events.length; i++) {
                 var ev = events[i];
+                if (!matchesFilterText(ev.text, studyFilter)) continue;
+                visible++;
                 var row = document.createElement("div");
                 row.className = "cap-form-row";
                 row.style.gridTemplateColumns = "minmax(0,1fr) auto";
+                row.draggable = true;
+                row.addEventListener("dragstart", (function(eventData) {
+                    return function(e) {
+                        e.dataTransfer.effectAllowed = "copy";
+                        e.dataTransfer.setData("text/plain", JSON.stringify({ type: "studyEvent", value: eventData.value, text: eventData.text }));
+                        dragInfo = { type: "studyEvent", data: capClone(eventData) };
+                    };
+                })(ev));
                 var txt = document.createElement("div");
                 txt.className = "cap-form-main";
                 var nm = document.createElement("div");
                 nm.className = "cap-form-name";
                 nm.textContent = ev.text;
-                var meta = document.createElement("div");
-                meta.className = "cap-form-meta";
-                meta.textContent = "ID " + ev.value;
                 txt.appendChild(nm);
-                txt.appendChild(meta);
-                var copy = capMakeIconButton("fa fa-copy", "Copy Study Event");
+                var copy = capMakeIconButton("", "Copy Study Event", "📋");
                 copy.addEventListener("click", (function(eventData) {
                     return function(e) {
                         e.stopPropagation();
@@ -25562,6 +26363,7 @@
                 row.appendChild(copy);
                 studyPanel.body.appendChild(row);
             }
+            if (!visible) studyPanel.body.appendChild(capEmpty("No Study Events match the search."));
         }
 
         function renderSource() {
@@ -25572,24 +26374,37 @@
                 sourcePanel.body.appendChild(capEmpty("No source segments were found."));
                 return;
             }
+            var visible = 0;
             for (var s = 0; s < segments.length; s++) {
-                sourcePanel.body.appendChild(renderSegmentBlock(sourceData, segments[s], false));
+                var block = renderSegmentBlock(sourceData, segments[s], false, sourceFilter);
+                if (block) {
+                    sourcePanel.body.appendChild(block);
+                    visible++;
+                }
             }
+            if (!visible) sourcePanel.body.appendChild(capEmpty("No source forms match the search."));
         }
 
         function renderDestination() {
             destPanel.body.innerHTML = "";
             var segments = ws.segments || [];
+            var duplicateKeys = capFindWorkspaceDuplicateKeys(ws);
             if (!segments.length) {
                 destPanel.body.appendChild(capEmpty("No destination segments were found."));
                 return;
             }
+            var visible = 0;
             for (var s = 0; s < segments.length; s++) {
-                destPanel.body.appendChild(renderSegmentBlock(ws, segments[s], true));
+                var block = renderSegmentBlock(ws, segments[s], true, targetFilter, duplicateKeys);
+                if (block) {
+                    destPanel.body.appendChild(block);
+                    visible++;
+                }
             }
+            if (!visible) destPanel.body.appendChild(capEmpty("No target forms match the search."));
         }
 
-        function renderSegmentBlock(planData, seg, editable) {
+        function renderSegmentBlock(planData, seg, editable, filter, duplicateKeys) {
             var segBox = document.createElement("div");
             segBox.className = "cap-segment";
             var head = document.createElement("div");
@@ -25599,42 +26414,41 @@
             name.textContent = seg.text || String(seg.value);
             var actions = document.createElement("div");
             actions.className = "cap-segment-actions";
-            var copyAll = capMakeIconButton("fa fa-copy", editable ? "Copy destination segment" : "Copy source segment", "Copy All");
-            copyAll.addEventListener("click", function(e) {
+            var copyAll = capMakeIconButton("", editable ? "Copy destination segment" : "Copy source segment", "📋 Copy All");
+            copyAll.addEventListener("click", async function(e) {
                 e.stopPropagation();
-                ws.clipboard = capMakeSegmentSnapshot(planData, seg.value, editable ? "destinationAPlan" : "sourceAPlan");
-                renderAll();
+                await copySegmentToClipboard(planData, seg.value, editable);
             });
             actions.appendChild(copyAll);
             if (editable) {
-                var undo = capMakeIconButton("fa fa-undo", "Undo this segment", "Undo");
+                var undo = capMakeIconButton("", "Undo this segment", "↩ Undo");
                 undo.addEventListener("click", function(e) {
                     e.stopPropagation();
                     capRestoreDestinationSegment(state, seg.value);
                     renderAll();
                 });
-                var paste = capMakeIconButton("fa fa-clipboard", "Paste clipboard into this segment", "Paste");
+                var paste = capMakeIconButton("", "Paste clipboard into this segment", "📋 Paste");
                 paste.addEventListener("click", function(e) {
                     e.stopPropagation();
                     var pasted = capPasteClipboard(state, seg.value, false);
                     if (pasted.message) warn(pasted.message);
                     renderAll();
                 });
-                var pasteAll = capMakeIconButton("fa fa-clipboard", "Paste copied segment into all destination segments", "Paste All");
+                var pasteAll = capMakeIconButton("", "Paste copied segment into all destination segments", "📋 Paste All");
                 pasteAll.addEventListener("click", function(e) {
                     e.stopPropagation();
                     var pasted = capPasteClipboard(state, seg.value, true);
                     if (pasted.message) warn(pasted.message);
                     renderAll();
                 });
-                var sort = capMakeIconButton("fa fa-sort", "Sort this segment", "Sort");
+                var sort = capMakeIconButton("", "Sort this segment", "↕ Sort");
                 sort.addEventListener("click", function(e) {
                     e.stopPropagation();
                     capSortSegment(ws, seg.value);
                     ws.dirty = true;
                     renderAll();
                 });
-                var collapse = capMakeIconButton("fa fa-minus", "Collapse or expand", ws.segmentCollapsed[seg.value] ? "Expand" : "Collapse");
+                var collapse = capMakeIconButton("", "Collapse or expand", ws.segmentCollapsed[seg.value] ? "▲ Expand" : "▼ Collapse");
                 collapse.addEventListener("click", function(e) {
                     e.stopPropagation();
                     ws.segmentCollapsed[seg.value] = !ws.segmentCollapsed[seg.value];
@@ -25652,142 +26466,197 @@
             if (editable && ws.segmentCollapsed[seg.value]) return segBox;
             var list = document.createElement("div");
             list.addEventListener("dragover", function(e) {
-                if (editable && dragInfo) e.preventDefault();
+                if (editable && dragInfo && dragInfo.type === "form") e.preventDefault();
             });
             list.addEventListener("drop", function(e) {
-                if (!editable || !dragInfo) return;
+                if (!editable || !dragInfo || dragInfo.type !== "form") return;
                 e.preventDefault();
                 capMoveWorkspaceForm(ws, dragInfo.key, seg.value, null, warn);
                 dragInfo = null;
                 renderAll();
             });
-            var formsList = (planData.segmentFormMap && planData.segmentFormMap[seg.value]) || [];
+            var sourceList = (planData.segmentFormMap && planData.segmentFormMap[seg.value]) || [];
+            var formsList = [];
+            for (var fl = 0; fl < sourceList.length; fl++) {
+                var filterKey = capGetFormKey(seg.value, sourceList[fl].value, sourceList[fl].index);
+                var filterData = planData.formDataStore[filterKey] || capDefaultFormData();
+                if (formMatchesFilter(planData, seg, sourceList[fl], filterData, filter)) formsList.push(sourceList[fl]);
+            }
+            if (filter && !formsList.length) return null;
             if (!formsList.length) {
                 list.appendChild(capEmpty("No forms in this segment."));
             }
             for (var f = 0; f < formsList.length; f++) {
-                list.appendChild(renderFormRow(planData, seg.value, formsList[f], editable, f));
+                list.appendChild(renderFormRow(planData, seg.value, formsList[f], editable, f, duplicateKeys));
             }
             segBox.appendChild(list);
             return segBox;
         }
 
-        function renderFormRow(planData, segVal, entry, editable, rowIndex) {
+        function renderFormRow(planData, segVal, entry, editable, rowIndex, duplicateKeys) {
             var key = capGetFormKey(segVal, entry.value, entry.index);
             var fd = planData.formDataStore[key] || capDefaultFormData();
             var row = document.createElement("div");
             row.className = "cap-form-row";
             if (editable && ws.selectedFormKey === key) row.className += " cap-selected";
             if (entry.deleteRequested) row.className += " cap-deleted";
+            var missingStudyEvent = editable && !(entry.autoPopulated || fd.autoPopulated) && (!fd.studyEvents || !fd.studyEvents[0] || !fd.studyEvents[0].value);
+            if (editable && (missingStudyEvent || (duplicateKeys && duplicateKeys[key]))) row.className += " cap-outline-danger";
             if (editable) {
                 row.draggable = true;
                 row.addEventListener("dragstart", function(e) {
-                    dragInfo = { key: key, segVal: segVal };
+                    dragInfo = { type: "form", key: key, segVal: segVal };
                     e.dataTransfer.effectAllowed = "move";
                 });
                 row.addEventListener("dragover", function(e) {
-                    if (dragInfo) e.preventDefault();
+                    if (dragInfo && dragInfo.type === "form") e.preventDefault();
                 });
                 row.addEventListener("drop", function(e) {
-                    if (!dragInfo) return;
+                    if (!dragInfo || dragInfo.type !== "form") return;
                     e.preventDefault();
                     capMoveWorkspaceForm(ws, dragInfo.key, segVal, rowIndex, warn);
                     dragInfo = null;
                     renderAll();
                 });
                 row.addEventListener("click", function() {
-                    ws.selectedFormKey = key;
-                    renderAll();
+                    selectDestinationForm(key);
                 });
             }
+            row.appendChild(editable ? renderEventDrop(key, fd) : renderReadOnlyEventLabel(fd));
             var main = document.createElement("div");
             main.className = "cap-form-main";
+            var titleLine = document.createElement("div");
+            titleLine.className = "cap-form-title-line";
             var name = document.createElement("div");
             name.className = "cap-form-name";
             name.textContent = entry.text || "";
             var ev = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
-            var meta = document.createElement("div");
-            meta.className = "cap-form-meta";
-            meta.textContent = (ev && ev.text ? ev.text : "[No Study Event]") + " | " + capGetTimeLabel(fd) + (fd.hidden ? " | Hidden" : "") + (fd.refActivity ? " | Reference" : "") + (fd.modified ? " | Modified" : "") + (!(entry.autoPopulated || fd.autoPopulated) ? " | New" : "") + (fd.prePostWindowReviewNeeded ? " | Pre/Post Window: Not copied" : "");
-            main.appendChild(name);
-            main.appendChild(meta);
+            titleLine.appendChild(name);
+            main.appendChild(titleLine);
             row.appendChild(main);
-            if (editable) {
-                row.appendChild(renderEventDrop(key, fd));
-            } else {
-                var readOnly = document.createElement("div");
-                readOnly.className = "cap-form-meta";
-                readOnly.textContent = "Read-only";
-                row.appendChild(readOnly);
-            }
+            row.appendChild(capStatusIcons(fd));
+            var time = document.createElement("div");
+            time.className = "cap-form-time";
+            time.textContent = capGetTimeReferenceLabel(fd);
+            row.appendChild(time);
             var actions = document.createElement("div");
             actions.className = "cap-row-actions";
-            var copy = capMakeIconButton("fa fa-copy", "Copy form");
-            copy.addEventListener("click", function(e) {
+            var copy = capMakeIconButton("", "Copy this form instance", "📋");
+            copy.addEventListener("click", async function(e) {
                 e.stopPropagation();
-                ws.clipboard = capMakeFormSnapshot(planData, segVal, entry, editable ? "destinationAPlan" : "sourceAPlan");
-                renderAll();
+                await copyFormToClipboard(planData, segVal, entry, editable);
             });
-            actions.appendChild(copy);
             if (editable) {
-                var up = capMakeIconButton("fa fa-arrow-up", "Move up");
+                var up = capMakeIconButton("", "Move up", "▲");
                 up.addEventListener("click", function(e) {
                     e.stopPropagation();
                     capReorderWorkspaceForm(ws, key, -1);
                     renderAll();
                 });
-                var down = capMakeIconButton("fa fa-arrow-down", "Move down");
+                var down = capMakeIconButton("", "Move down", "▼");
                 down.addEventListener("click", function(e) {
                     e.stopPropagation();
                     capReorderWorkspaceForm(ws, key, 1);
                     renderAll();
                 });
-                var del = capMakeIconButton(entry.deleteRequested ? "fa fa-undo" : "fa fa-times", entry.deleteRequested ? "Undo delete" : "Delete");
+                actions.appendChild(up);
+                actions.appendChild(down);
+                actions.appendChild(copy);
+                var del = entry.deleteRequested ? capMakeIconButton("", "Undo delete", "↩") : capMakeDeleteButton("Mark existing form for archive/removal", "✕");
                 del.addEventListener("click", function(e) {
                     e.stopPropagation();
                     capToggleDeleteWorkspaceForm(ws, key);
                     renderAll();
                 });
-                actions.appendChild(up);
-                actions.appendChild(down);
                 actions.appendChild(del);
+            } else {
+                actions.appendChild(copy);
             }
             row.appendChild(actions);
             return row;
         }
 
+        function renderReadOnlyEventLabel(fd) {
+            var wrap = document.createElement("div");
+            wrap.className = "cap-source-event";
+            var current = fd && fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
+            wrap.title = current ? (current.text || "") : "";
+            wrap.textContent = current ? (current.text || "") : "";
+            return wrap;
+        }
+
         function renderEventDrop(key, fd) {
             var wrap = document.createElement("div");
             wrap.className = "cap-event-drop";
-            var select = document.createElement("select");
-            var blank = document.createElement("option");
-            blank.value = "";
-            blank.textContent = "Select Study Event";
-            select.appendChild(blank);
-            for (var i = 0; i < ws.studyEvents.length; i++) {
-                var opt = document.createElement("option");
-                opt.value = ws.studyEvents[i].value;
-                opt.textContent = ws.studyEvents[i].text;
-                select.appendChild(opt);
-            }
             var current = fd.studyEvents && fd.studyEvents[0] ? fd.studyEvents[0] : null;
-            select.value = current ? current.value : "";
-            select.addEventListener("click", function(e) { e.stopPropagation(); });
-            select.addEventListener("change", function() {
-                var found = capFindDestinationOption(ws.studyEvents, select.value, "");
-                fd.studyEvents = found ? [{ value: found.value, text: found.text }] : [];
+            wrap.addEventListener("click", function(e) { e.stopPropagation(); });
+            wrap.addEventListener("dragover", function(e) {
+                if (dragInfo && dragInfo.type === "studyEvent") e.preventDefault();
+            });
+            wrap.addEventListener("drop", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var eventData = dragInfo && dragInfo.type === "studyEvent" ? dragInfo.data : null;
+                if (!eventData) {
+                    try {
+                        var raw = e.dataTransfer.getData("text/plain");
+                        var parsed = raw ? JSON.parse(raw) : null;
+                        if (parsed && parsed.type === "studyEvent") eventData = parsed;
+                    } catch (dropError) {}
+                }
+                var found = eventData ? capFindDestinationOption(ws.studyEvents, eventData.value, eventData.text) : null;
+                if (!found) {
+                    warn("The dropped Study Event is not available in the destination.");
+                    return;
+                }
+                capSetSingleStudyEvent(fd, found);
+                dragInfo = null;
                 markModified(key);
                 renderAll();
             });
-            var copyEv = capMakeIconButton("fa fa-copy", "Copy this row's Study Event");
-            copyEv.addEventListener("click", function(e) {
-                e.stopPropagation();
-                if (fd.studyEvents && fd.studyEvents[0]) {
-                    ws.clipboard = { type: "studyEvent", source: "destinationAPlan", data: capClone(fd.studyEvents[0]) };
+            if (current) {
+                var chip = document.createElement("span");
+                chip.className = "cap-event-chip";
+                chip.title = current.text || "";
+                chip.draggable = true;
+                chip.addEventListener("dragstart", function(e) {
+                    e.stopPropagation();
+                    e.dataTransfer.effectAllowed = "copy";
+                    e.dataTransfer.setData("text/plain", JSON.stringify({ type: "studyEvent", value: current.value, text: current.text }));
+                    dragInfo = { type: "studyEvent", data: capClone(current) };
+                });
+                var text = document.createElement("span");
+                text.textContent = current.text || "";
+                chip.appendChild(text);
+                var copyEv = document.createElement("span");
+                copyEv.className = "cap-event-tool";
+                copyEv.title = "Copy this row's Study Event";
+                copyEv.textContent = "📋";
+                copyEv.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    ws.clipboard = { type: "studyEvent", source: "destinationAPlan", data: capClone(current) };
                     renderAll();
-                }
-            });
-            var pasteEv = capMakeIconButton("fa fa-clipboard", "Paste copied Study Event");
+                });
+                var removeEv = document.createElement("span");
+                removeEv.className = "cap-event-tool";
+                removeEv.title = "Remove Study Event";
+                removeEv.textContent = "×";
+                removeEv.style.color = "#ff6b6b";
+                removeEv.style.fontWeight = "bold";
+                removeEv.addEventListener("click", function(e) {
+                    e.stopPropagation();
+                    fd.studyEvents = [];
+                    markModified(key);
+                    renderAll();
+                });
+                chip.appendChild(copyEv);
+                chip.appendChild(removeEv);
+                wrap.appendChild(chip);
+            }
+            var pasteEv = document.createElement("span");
+            pasteEv.className = "cap-event-tool";
+            pasteEv.title = "Paste copied Study Event";
+            pasteEv.textContent = "📋";
             pasteEv.addEventListener("click", function(e) {
                 e.stopPropagation();
                 if (!ws.clipboard || ws.clipboard.type !== "studyEvent") {
@@ -25799,18 +26668,17 @@
                     warn("The copied Study Event is not available in the destination.");
                     return;
                 }
-                fd.studyEvents = [{ value: ev.value, text: ev.text }];
+                capSetSingleStudyEvent(fd, ev);
                 markModified(key);
                 renderAll();
             });
-            wrap.appendChild(select);
-            wrap.appendChild(copyEv);
             wrap.appendChild(pasteEv);
             return wrap;
         }
 
         function renderConfig() {
             configPanel.body.innerHTML = "";
+            configPanel.body.className = "cap-panel-body cap-config-body";
             var found = capFindWorkspaceForm(ws, ws.selectedFormKey);
             if (!found) {
                 configPanel.body.appendChild(capEmpty("Select a destination form to edit its configuration. Source forms are read-only."));
@@ -25829,42 +26697,144 @@
             meta.textContent = capGetSegmentText(ws, found.segVal);
             info.appendChild(name);
             info.appendChild(meta);
-            var copyConfig = capMakeIconButton("fa fa-copy", "Copy this destination form", "Copy Form");
-            copyConfig.addEventListener("click", function() {
-                ws.clipboard = capMakeFormSnapshot(ws, found.segVal, found.entry, "destinationAPlan");
-                renderAll();
+            var copyConfig = capMakeIconButton("", "Copy this destination form", "📋 Copy Form");
+            copyConfig.addEventListener("click", async function() {
+                await copyFormToClipboard(ws, found.segVal, found.entry, true);
             });
             banner.appendChild(info);
             banner.appendChild(copyConfig);
             configPanel.body.appendChild(banner);
-            if (fd.prePostWindowReviewNeeded) {
-                var prePostNote = document.createElement("div");
-                prePostNote.className = "cap-warning";
-                prePostNote.textContent = "Pre/Post Window values were not copied from the Source A-Plan. Review and configure them manually where required.";
-                prePostNote.style.marginBottom = "10px";
-                configPanel.body.appendChild(prePostNote);
+            if (capHasUnloadedDestinationConfig(found)) {
+                var canLoadConfig = capNeedsDestinationConfigLoad(found);
+                if (!canLoadConfig && !fd.configLoadError) fd.configLoadError = "Edit link not found.";
+                if (fd.configLoading) {
+                    configPanel.body.appendChild(capEmpty("Loading current destination form configuration..."));
+                    return;
+                }
+                if (fd.configLoadError) {
+                    var loadError = document.createElement("div");
+                    loadError.className = "cap-error";
+                    loadError.textContent = "Could not load this form's current configuration: " + fd.configLoadError;
+                    loadError.style.marginBottom = "10px";
+                    configPanel.body.appendChild(loadError);
+                } else {
+                    var loadNote = document.createElement("div");
+                    loadNote.className = "cap-warning";
+                    loadNote.textContent = "Current destination configuration has not been loaded yet.";
+                    loadNote.style.marginBottom = "10px";
+                    configPanel.body.appendChild(loadNote);
+                }
+                if (canLoadConfig) {
+                    var loadBtn = capMakeButton("Load Configuration", "#5b43c7");
+                    loadBtn.addEventListener("click", function() { selectDestinationForm(found.key); });
+                    configPanel.body.appendChild(loadBtn);
+                }
+                return;
             }
-            var grid = document.createElement("div");
-            grid.className = "cap-config-grid";
-            grid.appendChild(capNumberField("Days", fd.days || 0, function(v) { fd.days = v; markModified(found.key); }));
-            grid.appendChild(capNumberField("Hours", fd.hours || 0, function(v) { fd.hours = v; markModified(found.key); }));
-            grid.appendChild(capNumberField("Minutes", fd.minutes || 0, function(v) { fd.minutes = v; markModified(found.key); }));
-            grid.appendChild(capNumberField("Seconds", fd.seconds || 0, function(v) { fd.seconds = v; markModified(found.key); }));
-            grid.appendChild(capTextField("Pre Window", fd.preWindow || "", function(v) { fd.preWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
-            grid.appendChild(capTextField("Post Window", fd.postWindow || "", function(v) { fd.postWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
-            grid.appendChild(capTextField("Form Offset Seconds", fd.formOffsetSeconds || "", function(v) { fd.formOffsetSeconds = v; markModified(found.key); }));
-            grid.appendChild(capTextField("Role Restriction", fd.collectionRoleRestriction || "", function(v) { fd.collectionRoleRestriction = v; markModified(found.key); }));
-            configPanel.body.appendChild(grid);
+            if (found.entry.autoPopulated || fd.autoPopulated) {
+                var autoBanner = document.createElement("div");
+                autoBanner.className = "cap-warning";
+                autoBanner.textContent = "📌 Auto-populated from SA table (editable)";
+                configPanel.body.appendChild(autoBanner);
+            }
             var checks = document.createElement("div");
             checks.className = "cap-checks";
-            checks.style.marginTop = "10px";
-            checks.appendChild(capCheckboxField("Hidden", !!fd.hidden, function(v) { fd.hidden = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Hidden?", !!fd.hidden, function(v) { fd.hidden = v; markModified(found.key); }));
             checks.appendChild(capCheckboxField("Mandatory", fd.mandatory !== false, function(v) { fd.mandatory = v; markModified(found.key); }));
-            checks.appendChild(capCheckboxField("Enforce Order", !!fd.enforce, function(v) { fd.enforce = v; markModified(found.key); }));
-            checks.appendChild(capCheckboxField("Reference Activity", !!fd.refActivity, function(v) { fd.refActivity = v; markModified(found.key); }));
-            checks.appendChild(capCheckboxField("Pre-reference", !!fd.preReference, function(v) { fd.preReference = v; markModified(found.key); }));
-            checks.appendChild(capCheckboxField("Disable Collection Time", !!fd.disableCollectionTime, function(v) { fd.disableCollectionTime = v; markModified(found.key); }));
+            checks.appendChild(capCheckboxField("Enforce Data Collection Order", !!fd.enforce, function(v) { fd.enforce = v; markModified(found.key); }));
             configPanel.body.appendChild(checks);
+            configPanel.body.appendChild(capTextField("Pre-Window", fd.preWindow || "", function(v) { fd.preWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
+            configPanel.body.appendChild(capTextField("Post-Window", fd.postWindow || "", function(v) { fd.postWindow = v; fd.prePostWindowReviewNeeded = false; markModified(found.key); }));
+            var refChecks = document.createElement("div");
+            refChecks.className = "cap-checks";
+            refChecks.appendChild(capCheckboxField("Reference Activity", !!fd.refActivity, function(v) { fd.refActivity = v; if (v) fd.preReference = false; markModified(found.key); renderAll(); }));
+            refChecks.appendChild(capCheckboxField("Pre-Reference?", !!fd.preReference, function(v) { fd.preReference = v; markModified(found.key); }));
+            configPanel.body.appendChild(refChecks);
+            var daysField = capNumberField("Days", fd.days || 0, function(v) { fd.days = v; markModified(found.key); }, 200);
+            var hoursField = capNumberField("Hours", fd.hours || 0, function(v) { fd.hours = v; markModified(found.key); }, 23);
+            var minutesField = capNumberField("Minutes", fd.minutes || 0, function(v) { fd.minutes = v; markModified(found.key); }, 59);
+            var secondsField = capNumberField("Seconds", fd.seconds || 0, function(v) { fd.seconds = v; markModified(found.key); }, 59);
+            var timeFields = [daysField, hoursField, minutesField, secondsField];
+            for (var tf = 0; tf < timeFields.length; tf++) {
+                var input = timeFields[tf].querySelector("input");
+                if (input && fd.refActivity) {
+                    input.disabled = true;
+                    input.style.opacity = "0.5";
+                }
+                configPanel.body.appendChild(timeFields[tf]);
+            }
+            var applyTimeSection = document.createElement("div");
+            applyTimeSection.style.cssText = "margin-top:10px;padding-top:8px;border-top:1px solid #333;";
+            var applyTimeLbl = document.createElement("label");
+            applyTimeLbl.textContent = "Apply Time Calculation";
+            applyTimeLbl.style.cssText = "font-size:11px;color:#aaa;display:block;margin-bottom:4px;";
+            var applyTimeRow = document.createElement("div");
+            applyTimeRow.style.cssText = "display:flex;align-items:center;gap:4px;";
+            var applyTimeInput = document.createElement("input");
+            applyTimeInput.type = "text";
+            applyTimeInput.placeholder = "HH:MM:SS, HH:MM, or minutes";
+            var applyTimeBtn = capMakeButton("Apply", "#007bff");
+            var undoTimeBtn = capMakeButton("Undo", fd._preApplyState ? "#dc3545" : "#333");
+            undoTimeBtn.disabled = !fd._preApplyState;
+            undoTimeBtn.style.color = fd._preApplyState ? "#fff" : "#888";
+            undoTimeBtn.style.cursor = fd._preApplyState ? "pointer" : "not-allowed";
+            applyTimeBtn.addEventListener("click", function() {
+                var inputVal = normalizeSAText(applyTimeInput.value || "");
+                if (!inputVal) return;
+                if (fd.refActivity) {
+                    warn("Cannot apply time calculation to the reference activity itself.");
+                    return;
+                }
+                fd._preApplyState = { days: fd.days || 0, hours: fd.hours || 0, minutes: fd.minutes || 0, seconds: fd.seconds || 0, preReference: !!fd.preReference };
+                if (/^-?\d+$/.test(inputVal)) {
+                    var totalMin = parseInt(inputVal, 10) || 0;
+                    fd.preReference = totalMin < 0;
+                    totalMin = Math.abs(totalMin);
+                    fd.days = Math.floor(totalMin / 1440);
+                    totalMin = totalMin % 1440;
+                    fd.hours = Math.floor(totalMin / 60);
+                    fd.minutes = totalMin % 60;
+                    fd.seconds = 0;
+                } else {
+                    var refDate = bplParseClinSparkDateTime(fd.segmentRefDateTime || "");
+                    if (!refDate) {
+                        warn("No reference activity time available for this segment.");
+                        return;
+                    }
+                    var tp = inputVal.split(":");
+                    var inH = parseInt(tp[0], 10) || 0;
+                    var inM = tp.length >= 2 ? (parseInt(tp[1], 10) || 0) : 0;
+                    var inS = tp.length >= 3 ? (parseInt(tp[2], 10) || 0) : 0;
+                    var diffSec = ((inH * 3600) + (inM * 60) + inS) - ((refDate.getHours() * 3600) + (refDate.getMinutes() * 60) + refDate.getSeconds());
+                    fd.preReference = diffSec < 0;
+                    diffSec = Math.abs(diffSec);
+                    fd.days = Math.floor(diffSec / 86400);
+                    diffSec = diffSec % 86400;
+                    fd.hours = Math.floor(diffSec / 3600);
+                    diffSec = diffSec % 3600;
+                    fd.minutes = Math.floor(diffSec / 60);
+                    fd.seconds = diffSec % 60;
+                }
+                markModified(found.key);
+                renderAll();
+            });
+            undoTimeBtn.addEventListener("click", function() {
+                if (!fd._preApplyState) return;
+                fd.days = parseInt(fd._preApplyState.days, 10) || 0;
+                fd.hours = parseInt(fd._preApplyState.hours, 10) || 0;
+                fd.minutes = parseInt(fd._preApplyState.minutes, 10) || 0;
+                fd.seconds = parseInt(fd._preApplyState.seconds, 10) || 0;
+                fd.preReference = !!fd._preApplyState.preReference;
+                fd._preApplyState = null;
+                markModified(found.key);
+                renderAll();
+            });
+            applyTimeRow.appendChild(applyTimeInput);
+            applyTimeRow.appendChild(applyTimeBtn);
+            applyTimeRow.appendChild(undoTimeBtn);
+            applyTimeSection.appendChild(applyTimeLbl);
+            applyTimeSection.appendChild(applyTimeRow);
+            configPanel.body.appendChild(applyTimeSection);
         }
 
         closeBtn.addEventListener("click", function() {
@@ -25873,13 +26843,30 @@
             capClearWorkflow();
             root.remove();
         });
-        startOverBtn.addEventListener("click", function() {
-            if (ws.dirty && !window.confirm("Start over and discard staged changes?")) return;
-            CAP_CANCELLED = true;
-            capClearWorkflow();
-            root.remove();
+        clearTargetBtn.addEventListener("click", function() {
+            if (ws.dirty && !window.confirm("Clear staged Target A-Plan changes?")) return;
+            state.workspace = capBuildWorkspaceState(state.destinationData || {});
+            ws = state.workspace;
+            persist();
+            renderAll();
         });
-        applyBtn.addEventListener("click", function() {
+        autoPasteAllBtn.addEventListener("click", function() {
+            if (!ws.clipboard || ws.clipboard.type !== "segment" || ws.clipboard.source !== "sourceAPlan") {
+                warn("Copy a source segment before using Auto Paste All.");
+                return;
+            }
+            var pasted = capPasteClipboard(state, "", true);
+            if (pasted.message) warn(pasted.message);
+            renderAll();
+        });
+        sortAllBtn.addEventListener("click", function() {
+            for (var s = 0; s < (ws.segments || []).length; s++) {
+                capSortSegment(ws, ws.segments[s].value);
+            }
+            ws.dirty = true;
+            renderAll();
+        });
+        confirmBtn.addEventListener("click", function() {
             var validation = capValidateWorkspace(state);
             var items = capBuildApplyItems(state);
             if (!validation.length && items.adds.length + items.updates.length + items.deletes.length === 0) {
@@ -25906,6 +26893,13 @@
         return { panel: panel, header: header, body: body };
     }
 
+    function capPanelBadge(text) {
+        var badge = document.createElement("div");
+        badge.className = "cap-panel-badge";
+        badge.textContent = text;
+        return badge;
+    }
+
     function capChip(text) {
         var chip = document.createElement("span");
         chip.className = "cap-chip";
@@ -25920,7 +26914,7 @@
         return empty;
     }
 
-    function capNumberField(labelText, value, onChange) {
+    function capNumberField(labelText, value, onChange, maxValue) {
         var field = document.createElement("div");
         field.className = "cap-field";
         var label = document.createElement("label");
@@ -25928,7 +26922,9 @@
         var input = document.createElement("input");
         input.type = "number";
         input.min = "0";
+        if (maxValue !== undefined && maxValue !== null) input.max = String(maxValue);
         input.value = String(value || 0);
+        input.addEventListener("input", function() { onChange(parseInt(input.value, 10) || 0); });
         input.addEventListener("change", function() { onChange(parseInt(input.value, 10) || 0); });
         field.appendChild(label);
         field.appendChild(input);
@@ -25943,6 +26939,7 @@
         var input = document.createElement("input");
         input.type = "text";
         input.value = value || "";
+        input.addEventListener("input", function() { onChange(input.value || ""); });
         input.addEventListener("change", function() { onChange(input.value || ""); });
         field.appendChild(label);
         field.appendChild(input);
@@ -28148,9 +29145,47 @@
         } catch (err) { log("ParseMethod: error - " + err); onComplete([], []); }
     }
 
+    function parseMethodXmlHttpRequest(options) {
+        if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") {
+            GM.xmlHttpRequest(options);
+            return;
+        }
+        if (typeof window !== "undefined" && window.GM && typeof window.GM.xmlHttpRequest === "function") {
+            window.GM.xmlHttpRequest(options);
+            return;
+        }
+        if (typeof GM_xmlhttpRequest === "function") {
+            GM_xmlhttpRequest(options);
+            return;
+        }
+        if (typeof window !== "undefined" && typeof window.GM_xmlhttpRequest === "function") {
+            window.GM_xmlhttpRequest(options);
+            return;
+        }
+        var req = new XMLHttpRequest();
+        try {
+            req.open(options.method || "GET", options.url, true);
+            req.withCredentials = true;
+            req.onreadystatechange = function() {
+                if (req.readyState !== 4) return;
+                if (req.status >= 200 && req.status < 300) {
+                    if (typeof options.onload === "function") options.onload({ responseText: req.responseText, status: req.status });
+                } else if (typeof options.onerror === "function") {
+                    options.onerror(new Error("HTTP " + req.status + " fetching " + options.url));
+                }
+            };
+            req.onerror = function() {
+                if (typeof options.onerror === "function") options.onerror(new Error("XMLHttpRequest error fetching " + options.url));
+            };
+            req.send();
+        } catch (e) {
+            if (typeof options.onerror === "function") options.onerror(new Error("XMLHttpRequest error fetching " + options.url));
+        }
+    }
+
     async function getMethodLibraryData() {
         return new Promise(function(resolve) {
-            GM.xmlHttpRequest({ method: "GET", url: METHOD_LIBRARY_URL, onload: function(resp) {
+            parseMethodXmlHttpRequest({ method: "GET", url: METHOD_LIBRARY_URL, onload: function(resp) {
                 var html = resp && resp.responseText ? resp.responseText : "";
                 var methods = [];
                 var tmp = document.createElement("div"); tmp.innerHTML = html;
@@ -28163,7 +29198,7 @@
 
     async function getMethodFormalExpr(methodUrl) {
         return new Promise(function(resolve) {
-            GM.xmlHttpRequest({ method: "GET", url: methodUrl, onload: function(resp) {
+            parseMethodXmlHttpRequest({ method: "GET", url: methodUrl, onload: function(resp) {
                 var html = resp && resp.responseText ? resp.responseText : "";
                 var tmp = document.createElement("div"); tmp.innerHTML = html;
                 var tables = tmp.querySelectorAll("table.table.table-striped.table-bordered");
@@ -28175,7 +29210,7 @@
 
     async function getMethodItemRefs(methodUrl) {
         return new Promise(function(resolve) {
-            GM.xmlHttpRequest({ method: "GET", url: methodUrl + "?references=references", onload: function(resp) {
+            parseMethodXmlHttpRequest({ method: "GET", url: methodUrl + "?references=references", onload: function(resp) {
                 var html = resp && resp.responseText ? resp.responseText : "";
                 var refs = [];
                 var tmp = document.createElement("div"); tmp.innerHTML = html;
@@ -28188,7 +29223,7 @@
 
     async function getItemRefForms(itemRefUrl) {
         return new Promise(function(resolve) {
-            GM.xmlHttpRequest({ method: "GET", url: itemRefUrl + "?references=references", onload: function(resp) {
+            parseMethodXmlHttpRequest({ method: "GET", url: itemRefUrl + "?references=references", onload: function(resp) {
                 var html = resp && resp.responseText ? resp.responseText : "";
                 var forms = [];
                 var tmp = document.createElement("div"); tmp.innerHTML = html;
@@ -47142,6 +48177,7 @@
         var maxWidth = options.maxWidth || "90%";
         var maxHeight = options.maxHeight || "90%";
         var onClose = options.onClose || null;
+        var hideClose = !!options.hideClose;
 
         var popupId = "clinsparkPopup_" + Date.now();
         var existing = document.getElementById(popupId);
@@ -47239,6 +48275,7 @@
         closeBtn.style.width = "28px";
         closeBtn.style.height = "28px";
         closeBtn.style.display = "flex";
+        if (hideClose) closeBtn.style.display = "none";
         closeBtn.style.alignItems = "center";
         closeBtn.style.justifyContent = "center";
         closeBtn.style.flexShrink = "0";
@@ -47265,6 +48302,7 @@
 
         var escapeHandler = function(e) {
             if (e.key === "Escape" && document.body.contains(popup)) {
+                if (hideClose) return;
                 try { clearAllRunState(); } catch(e2){}
                 if (onClose) {
                     try { onClose(); } catch (e3) { log("Popup onClose error (Escape): " + e3); }
