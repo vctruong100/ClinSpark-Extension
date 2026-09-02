@@ -4161,7 +4161,8 @@
         }
     }
 
-    function createCollectingOverlay(title, message) {
+    function createCollectingOverlay(title, message, options) {
+        options = options || {};
 
         var overlay = document.createElement("div");
         overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:30000;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
@@ -4191,6 +4192,19 @@
         timerEl.textContent = "00:00";
         timerEl.style.cssText = "color:#6f6;font-size:12px;font-variant-numeric:tabular-nums;";
         panel.appendChild(timerEl);
+
+        if (options.cancelText && typeof options.onCancel === "function") {
+            var cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.textContent = options.cancelText;
+            cancelBtn.style.cssText = "margin-top:4px;border:none;border-radius:6px;background:#6b1f1f;color:#fff;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;";
+            cancelBtn.addEventListener("click", function() {
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = "Cancelling...";
+                try { options.onCancel(); } catch (e) {}
+            });
+            panel.appendChild(cancelBtn);
+        }
 
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
@@ -12861,9 +12875,9 @@
         } catch (e) {}
     }
 
-    function capApplyPanelWidth(panel, widths, key, fallback) {
+    function capApplyPanelWidth(panel, widths, key, fallback, grow) {
         var width = Math.max(parseInt(widths && widths[key], 10) || fallback, fallback);
-        panel.style.flex = "0 0 " + width + "px";
+        panel.style.flex = (grow ? "1 1 " : "0 0 ") + width + "px";
     }
 
     function capMakePanelResizeHandle(leftPanel, rightPanel, leftKey, rightKey, widths) {
@@ -12879,8 +12893,8 @@
                 var dx = ev.clientX - startX;
                 var nextLeft = Math.max(90, leftStart + dx);
                 var nextRight = Math.max(120, rightStart - dx);
-                leftPanel.style.flex = "0 0 " + nextLeft + "px";
-                rightPanel.style.flex = "0 0 " + nextRight + "px";
+                leftPanel.style.flex = (leftPanel.dataset.capFillRemainder === "1" ? "1 1 " : "0 0 ") + nextLeft + "px";
+                rightPanel.style.flex = (rightPanel.dataset.capFillRemainder === "1" ? "1 1 " : "0 0 ") + nextRight + "px";
             }
             function onUp() {
                 widths[leftKey] = Math.round(leftPanel.getBoundingClientRect().width);
@@ -12949,18 +12963,67 @@
         if (overlay && overlay.setMessage) overlay.setMessage(text);
     }
 
+    function capIsSaTableStillLoading(tbody) {
+        if (!tbody) return true;
+        var text = capNormalizeKey(tbody.textContent || "");
+        if (!text) return true;
+        if (text.indexOf("loading") !== -1 || text.indexOf("processing") !== -1) return true;
+        if (text.indexOf("no matching") !== -1 || text.indexOf("no data") !== -1 || text.indexOf("no scheduled activities") !== -1) return false;
+        var rows = tbody.querySelectorAll("tr");
+        if (!rows || rows.length === 0) return true;
+        for (var i = 0; i < rows.length; i++) {
+            var rowText = capNormalizeKey(rows[i].textContent || "");
+            if (rowText && rowText.indexOf("loading") === -1 && rowText.indexOf("processing") === -1 && rowText.indexOf("no matching") === -1 && rowText.indexOf("no data") === -1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    async function capWaitForSourceScheduledRows(overlay, timeoutMs) {
+        var start = Date.now();
+        var maxTime = timeoutMs || 45000;
+        var lastMessageSecond = -1;
+        var lastRows = [];
+        while (Date.now() - start < maxTime) {
+            if (CAP_CANCELLED) {
+                throw new Error("Copy A-Plan scan cancelled.");
+            }
+            var elapsedSecond = Math.floor((Date.now() - start) / 1000);
+            if (elapsedSecond !== lastMessageSecond) {
+                lastMessageSecond = elapsedSecond;
+                capSetOverlayMessage(overlay, "Waiting for Source A-Plan table rows... " + elapsedSecond + "s");
+            }
+            var tbody = document.getElementById("saTableBody");
+            if (tbody && !capIsSaTableStillLoading(tbody)) {
+                try {
+                    var dropdownData = { segments: [], studyEvents: [], forms: [] };
+                    lastRows = capScanCurrentScheduledRows(dropdownData, {});
+                    if (lastRows && lastRows.length > 0) {
+                        return lastRows;
+                    }
+                } catch (e) {
+                    capLog("source table readiness poll failed: " + String(e && e.message ? e.message : e));
+                }
+            }
+            await sleep(300);
+        }
+        if (lastRows && lastRows.length > 0) return lastRows;
+        throw new Error("Source A-Plan table did not load any scheduled activity rows within " + Math.round(maxTime / 1000) + " seconds. If this Source A-Plan is empty or the wrong plan was selected, click Start Over and choose a different Source A-Plan.");
+    }
+
     function capInjectStyles() {
         if (document.getElementById(CAP_STYLE_ID)) return;
         var style = document.createElement("style");
         style.id = CAP_STYLE_ID;
         style.textContent = [
-            "#" + CAP_ROOT_ID + " { position:fixed; inset:0; z-index:999997; background:#1a1a1a; color:#fff; font-family:Arial,sans-serif; display:flex; flex-direction:column; box-sizing:border-box; }",
+            "#" + CAP_ROOT_ID + " { position:fixed; inset:0; width:100vw; height:100vh; max-width:none; z-index:999997; background:#1a1a1a; color:#fff; font-family:Arial,sans-serif; display:flex; flex-direction:column; box-sizing:border-box; }",
             "#" + CAP_ROOT_ID + " * { box-sizing:border-box; }",
             "#" + CAP_ROOT_ID + " .cap-header { position:relative; flex:0 0 auto; display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px; min-height:50px; padding:8px 12px; border-bottom:1px solid #444; background:#292929; }",
             "#" + CAP_ROOT_ID + " .cap-title { display:flex; flex-direction:column; min-width:0; }",
             "#" + CAP_ROOT_ID + " .cap-title strong { font-size:15px; font-weight:600; }",
             "#" + CAP_ROOT_ID + " .cap-title span { color:#ccc; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70vw; }",
-            "#" + CAP_ROOT_ID + " .cap-main { min-height:0; flex:1 1 auto; display:flex; align-items:stretch; gap:0; padding:8px; overflow:hidden; }",
+            "#" + CAP_ROOT_ID + " .cap-main { width:100%; max-width:none; min-height:0; flex:1 1 auto; display:flex; align-items:stretch; gap:0; padding:8px; overflow:hidden; }",
             "#" + CAP_ROOT_ID + " .cap-panel { min-height:0; min-width:90px; border:1px solid #444; border-radius:4px; background:#1a1a1a; display:flex; flex-direction:column; overflow:hidden; }",
             "#" + CAP_ROOT_ID + " .cap-panel-header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; border-bottom:1px solid #444; background:#292929; }",
             "#" + CAP_ROOT_ID + " .cap-panel-title { font-size:13px; font-weight:600; letter-spacing:0; text-transform:uppercase; color:#fff; }",
@@ -14064,13 +14127,9 @@
         if (!capIsExpectedPlanPage(plan)) {
             throw new Error("Source A-Plan page did not match the selected Activity Plan ID " + plan.id + ".");
         }
-        var tbody = await waitForSelector("#saTableBody", 15000);
-        if (!tbody) {
-            throw new Error("Source A-Plan Scheduled Activity table was not found.");
-        }
-        capSetOverlayMessage(overlay, "Parsing Source A-Plan table");
         var dropdownData = { segments: [], studyEvents: [], forms: [] };
-        var rows = capScanCurrentScheduledRows(dropdownData, {});
+        var rows = await capWaitForSourceScheduledRows(overlay, 45000);
+        capSetOverlayMessage(overlay, "Parsing Source A-Plan table");
         dropdownData.segments = capEnsureSegmentsFromRows([], rows);
         dropdownData.studyEvents = capOptionsFromRows(rows, "eventValue", "eventText");
         dropdownData.forms = capOptionsFromRows(rows, "formValue", "formText");
@@ -14261,7 +14320,13 @@
                         capNavigateForWorkflow(state, state.sourcePlan, "scanSource");
                         return;
                     }
-                    overlay = createCollectingOverlay("Copy A-Plan", "Scanning Source A-Plan");
+                    overlay = createCollectingOverlay("Copy A-Plan", "Scanning Source A-Plan", {
+                        cancelText: "Cancel Scan",
+                        onCancel: function() {
+                            CAP_CANCELLED = true;
+                            capClearWorkflow();
+                        }
+                    });
                     state.navAttempts.scanSource = 0;
                     state.sourceData = await capScanSourceActivityPlanTableOnly(state.sourcePlan, overlay);
                     state.phase = "scanDestination";
@@ -14302,6 +14367,10 @@
             } catch (e) {
                 if (overlay) overlay.close();
                 CAP_BUSY = false;
+                if (CAP_CANCELLED) {
+                    capClearWorkflow();
+                    return;
+                }
                 capShowError("Copy A-Plan failed", [String(e && e.message ? e.message : e)], true);
             }
         }, 800);
@@ -15179,7 +15248,8 @@
         capApplyPanelWidth(studyPanel.panel, panelWidths, "study", 150);
         capApplyPanelWidth(sourcePanel.panel, panelWidths, "source", 600);
         capApplyPanelWidth(destPanel.panel, panelWidths, "target", 700);
-        capApplyPanelWidth(configPanel.panel, panelWidths, "config", 240);
+        capApplyPanelWidth(configPanel.panel, panelWidths, "config", 240, true);
+        configPanel.panel.dataset.capFillRemainder = "1";
         var studyFilter = "";
         var sourceFilter = "";
         var targetFilter = "";
@@ -15467,10 +15537,10 @@
                     if (pasted.message) warn(pasted.message);
                     renderAll();
                 });
-                var pasteAll = capMakeIconButton("", "Paste copied segment into all destination segments", "📋 Paste All");
+                var pasteAll = capMakeIconButton("", "Paste all copied forms into this segment", "📋 Paste All");
                 pasteAll.addEventListener("click", function(e) {
                     e.stopPropagation();
-                    var pasted = capPasteClipboard(state, seg.value, true);
+                    var pasted = capPasteClipboard(state, seg.value, false);
                     if (pasted.message) warn(pasted.message);
                     renderAll();
                 });
@@ -33919,6 +33989,7 @@
             return;
         }
 
+        await waitForClearMappingTableReady(15000);
         var tableRows = collectClearMappingRowsFromTable();
         log("ClearMapping: selectable rows found=" + String(tableRows.length));
         if (tableRows.length === 0) {
@@ -33959,9 +34030,160 @@
         } catch (e) {}
     }
 
+    function clearMappingNormalizeText(text) {
+        return String(text || "").trim().replace(/\s+/g, " ");
+    }
+
+    function clearMappingExtractDeleteUrl(deleteLink) {
+        if (!deleteLink) return "";
+        var onclickText = deleteLink.getAttribute("onclick") || "";
+        var m = onclickText.match(/maybeDeleteEligRef\(['"]([^'"]+)['"]\)/);
+        return m && m[1] ? m[1] : "";
+    }
+
+    function clearMappingGetTbody() {
+        return document.querySelector("tbody#eligibilityRefTableBody") ||
+            document.querySelector("tbody#eligibilityreftablebody") ||
+            document.querySelector("#eligibilityRefTable tbody");
+    }
+
+    function clearMappingIsPlaceholderRow(tr) {
+        if (!tr) return true;
+        var text = clearMappingNormalizeText(tr.textContent || "").toLowerCase();
+        if (!text) return true;
+        if (tr.querySelector("td.dataTables_empty") || tr.querySelector("td[colspan]")) {
+            return text.indexOf("loading") !== -1 ||
+                text.indexOf("processing") !== -1 ||
+                text.indexOf("no matching") !== -1 ||
+                text.indexOf("no data") !== -1 ||
+                text.indexOf("no eligibility") !== -1;
+        }
+        return text.indexOf("loading") !== -1 || text.indexOf("processing") !== -1;
+    }
+
+    function clearMappingIsTableLoading(tbody) {
+        if (!tbody) return true;
+        var rows = tbody.querySelectorAll("tr");
+        if (!rows || rows.length === 0) return true;
+        for (var i = 0; i < rows.length; i++) {
+            if (!clearMappingIsPlaceholderRow(rows[i])) return false;
+        }
+        return true;
+    }
+
+    async function waitForClearMappingTableReady(timeoutMs) {
+        var start = Date.now();
+        var maxWait = timeoutMs || 15000;
+        while (Date.now() - start < maxWait) {
+            if (CLEAR_MAPPING_CANCELED) return null;
+            var tbody = clearMappingGetTbody();
+            if (tbody && !clearMappingIsTableLoading(tbody)) {
+                return tbody;
+            }
+            await sleep(250);
+        }
+        return clearMappingGetTbody();
+    }
+
+    function clearMappingRowDataFromTr(tr, fallbackIndex) {
+        var tds = tr ? tr.querySelectorAll("td") : [];
+        if (!tds || tds.length < 9) return null;
+        var deleteLink = tr.querySelector("a[onclick*='maybeDeleteEligRef']");
+        var deleteUrl = clearMappingExtractDeleteUrl(deleteLink);
+        if (!deleteUrl) return null;
+        var itemType = clearMappingNormalizeText(tds[0].childNodes[0] ? tds[0].childNodes[0].textContent : tds[0].textContent || "");
+        var itemCodeEl = tds[0].querySelector("a[href*='/show/item/']");
+        var itemCode = itemCodeEl ? clearMappingNormalizeText(itemCodeEl.textContent || "") : "";
+        var checkItemEl = tds[5].querySelector("a[href*='/show/item/']");
+        var checkItem = checkItemEl ? clearMappingNormalizeText(checkItemEl.textContent || "") : clearMappingNormalizeText(tds[5].textContent || "");
+        var saText = clearMappingNormalizeText(tds[4].textContent || "");
+        var operatorText = clearMappingNormalizeText(tds[6].textContent || "");
+        var valueText = clearMappingNormalizeText(tds[7].textContent || "");
+        return {
+            deleteUrl: deleteUrl,
+            itemType: itemType || "",
+            itemCode: itemCode || checkItem || "",
+            checkItem: checkItem || itemCode || "",
+            scheduledActivity: saText || "",
+            operator: operatorText || "",
+            value: valueText || "",
+            rowIndex: fallbackIndex || 0
+        };
+    }
+
+    function clearMappingRowsMatch(expected, actual) {
+        if (!expected || !actual) return false;
+        return clearMappingNormalizeText(expected.deleteUrl) === clearMappingNormalizeText(actual.deleteUrl) &&
+            clearMappingNormalizeText(expected.itemCode) === clearMappingNormalizeText(actual.itemCode) &&
+            clearMappingNormalizeText(expected.checkItem) === clearMappingNormalizeText(actual.checkItem) &&
+            clearMappingNormalizeText(expected.scheduledActivity) === clearMappingNormalizeText(actual.scheduledActivity) &&
+            clearMappingNormalizeText(expected.operator) === clearMappingNormalizeText(actual.operator) &&
+            clearMappingNormalizeText(expected.value) === clearMappingNormalizeText(actual.value);
+    }
+
+    function findClearMappingDeleteLink(deleteUrl, expectedItem) {
+        var tbody = clearMappingGetTbody();
+        var rows = tbody ? tbody.querySelectorAll("tr") : [];
+        for (var i = 0; i < rows.length; i++) {
+            var candidate = rows[i].querySelector("a[onclick*='maybeDeleteEligRef']");
+            var candidateUrl = clearMappingExtractDeleteUrl(candidate);
+            if (candidateUrl === deleteUrl) {
+                var actual = clearMappingRowDataFromTr(rows[i], i);
+                if (expectedItem && !clearMappingRowsMatch(expectedItem, actual)) {
+                    log("ClearMapping: exact delete URL row details changed; refusing to delete url=" + String(deleteUrl));
+                    return { link: null, mismatch: true };
+                }
+                return { link: candidate, mismatch: false };
+            }
+        }
+        return { link: null, mismatch: false };
+    }
+
+    function openClearMappingDeleteConfirmByUrl(deleteUrl) {
+        if (!/^\/secure\/crfdesign\/studylibrary\/eligibility\/delete\/\d+/.test(String(deleteUrl || ""))) {
+            log("ClearMapping: refused direct delete confirm for unexpected url=" + String(deleteUrl));
+            return false;
+        }
+        try {
+            if (typeof maybeDeleteEligRef === "function") {
+                maybeDeleteEligRef(deleteUrl);
+                log("ClearMapping: opened delete confirm directly by exact URL");
+                return true;
+            }
+            if (window && typeof window.maybeDeleteEligRef === "function") {
+                window.maybeDeleteEligRef(deleteUrl);
+                log("ClearMapping: opened delete confirm directly by exact window URL");
+                return true;
+            }
+        } catch (e) {
+            log("ClearMapping: direct delete confirm failed - " + String(e));
+        }
+        return false;
+    }
+
+    async function waitForClearMappingDeleteComplete(deleteUrl, timeoutMs) {
+        var start = Date.now();
+        var maxWait = timeoutMs || 12000;
+        while (Date.now() - start < maxWait) {
+            if (CLEAR_MAPPING_CANCELED) return false;
+            var confirmModal = document.querySelector("div.bootbox.modal.in, div.bootbox.modal.show");
+            var activeAjax = 0;
+            try {
+                if (window.jQuery && typeof window.jQuery.active === "number") activeAjax = window.jQuery.active;
+            } catch (e) {}
+            var tableReady = await waitForClearMappingTableReady(1000);
+            var lookup = findClearMappingDeleteLink(deleteUrl, null);
+            if (!confirmModal && activeAjax === 0 && tableReady && !lookup.link) {
+                return true;
+            }
+            await sleep(250);
+        }
+        return false;
+    }
+
     function collectClearMappingRowsFromTable() {
         var results = [];
-        var tbody = document.querySelector("tbody#eligibilityRefTableBody");
+        var tbody = clearMappingGetTbody();
         if (!tbody) {
             log("ClearMapping: collect rows no tbody");
             return results;
@@ -33970,37 +34192,13 @@
         var i = 0;
         while (i < rows.length) {
             var tr = rows[i];
-            var tds = tr.querySelectorAll("td");
-            if (tds && tds.length >= 9) {
-                var deleteLink = tr.querySelector("a[onclick*='maybeDeleteEligRef']");
-                var deleteUrl = "";
-                if (deleteLink) {
-                    var onclickText = deleteLink.getAttribute("onclick") || "";
-                    var m = onclickText.match(/maybeDeleteEligRef\(['"]([^'"]+)['"]\)/);
-                    if (m) {
-                        deleteUrl = m[1];
-                    }
-                }
-                if (deleteUrl) {
-                    var itemType = (tds[0].childNodes[0] ? tds[0].childNodes[0].textContent : tds[0].textContent || "").trim().replace(/\s+/g, " ");
-                    var itemCodeEl = tds[0].querySelector("a[href*='/show/item/']");
-                    var itemCode = itemCodeEl ? (itemCodeEl.textContent || "").trim().replace(/\s+/g, " ") : "";
-                    var checkItemEl = tds[5].querySelector("a[href*='/show/item/']");
-                    var checkItem = checkItemEl ? (checkItemEl.textContent || "").trim().replace(/\s+/g, " ") : (tds[5].textContent || "").trim().replace(/\s+/g, " ");
-                    var saText = (tds[4].textContent || "").trim().replace(/\s+/g, " ");
-                    var operatorText = (tds[6].textContent || "").trim().replace(/\s+/g, " ");
-                    var valueText = (tds[7].textContent || "").trim().replace(/\s+/g, " ");
-                    results.push({
-                        deleteUrl: deleteUrl,
-                        itemType: itemType || "",
-                        itemCode: itemCode || checkItem || "",
-                        checkItem: checkItem || itemCode || "",
-                        scheduledActivity: saText || "",
-                        operator: operatorText || "",
-                        value: valueText || "",
-                        rowIndex: i
-                    });
-                }
+            if (clearMappingIsPlaceholderRow(tr)) {
+                i = i + 1;
+                continue;
+            }
+            var rowData = clearMappingRowDataFromTr(tr, i);
+            if (rowData) {
+                results.push(rowData);
             }
             i = i + 1;
         }
@@ -34038,17 +34236,20 @@
         list.style.cssText = "flex:1 1 auto;min-height:0;max-height:460px;overflow-y:auto;border:1px solid #333;border-radius:5px;background:#141414;";
         var checks = [];
         var checkRows = [];
+        var clearMappingWarningOpen = false;
         function updateCount() {
             var selected = 0;
+            var visible = 0;
             var i = 0;
             while (i < checks.length) {
                 if (checks[i].checked) selected = selected + 1;
+                if (checkRows[i] && checkRows[i].row.style.display !== "none") visible = visible + 1;
                 i = i + 1;
             }
-            countLabel.textContent = String(selected) + " of " + String(rows.length) + " selected";
-            confirmBtn.disabled = selected === 0;
-            confirmBtn.style.opacity = selected === 0 ? "0.5" : "1";
-            confirmBtn.style.cursor = selected === 0 ? "default" : "pointer";
+            countLabel.textContent = String(selected) + " of " + String(rows.length) + " selected" + (searchInput.value.trim() ? " | " + String(visible) + " visible" : "");
+            confirmBtn.disabled = selected === 0 || clearMappingWarningOpen;
+            confirmBtn.style.opacity = selected === 0 || clearMappingWarningOpen ? "0.5" : "1";
+            confirmBtn.style.cursor = selected === 0 || clearMappingWarningOpen ? "default" : "pointer";
         }
         var ri = 0;
         while (ri < rows.length) {
@@ -34182,18 +34383,27 @@
                 if (matches) visible++;
             }
             searchInput.title = query.trim() ? String(visible) + " matching mapping(s)" : "";
+            updateCount();
         }
         searchInput.addEventListener("input", applyClearMappingSearch);
         applyClearMappingSearch();
         applyClearMappingFullscreen();
         selectAllBtn.addEventListener("click", function() {
             var i = 0;
-            while (i < checks.length) { checks[i].checked = true; i = i + 1; }
+            var hasSearch = !!searchInput.value.trim();
+            while (i < checks.length) {
+                if (hasSearch) checks[i].checked = !!(checkRows[i] && checkRows[i].row.style.display !== "none");
+                else checks[i].checked = true;
+                i = i + 1;
+            }
             updateCount();
         });
         deselectAllBtn.addEventListener("click", function() {
             var i = 0;
-            while (i < checks.length) { checks[i].checked = false; i = i + 1; }
+            while (i < checks.length) {
+                if (!searchInput.value.trim() || (checkRows[i] && checkRows[i].row.style.display !== "none")) checks[i].checked = false;
+                i = i + 1;
+            }
             updateCount();
         });
         cancelBtn.addEventListener("click", function() {
@@ -34202,6 +34412,7 @@
             popup.close();
         });
         confirmBtn.addEventListener("click", function() {
+            if (clearMappingWarningOpen) return;
             var selectedRows = [];
             var i = 0;
             while (i < rows.length) {
@@ -34210,13 +34421,22 @@
                 }
                 i = i + 1;
             }
+            if (selectedRows.length === 0) return;
+            clearMappingWarningOpen = true;
+            updateCount();
             clearMappingSelectionContinuing = true;
-            showClearMappingWarning(selectedRows, popup);
+            showClearMappingWarning(selectedRows, popup, function(action) {
+                if (action !== "proceed") {
+                    clearMappingWarningOpen = false;
+                    clearMappingSelectionContinuing = false;
+                    updateCount();
+                }
+            });
         });
         updateCount();
     }
 
-    function showClearMappingWarning(selectedRows, selectionPopup) {
+    function showClearMappingWarning(selectedRows, selectionPopup, onClose) {
         var wrap = document.createElement("div");
         wrap.style.cssText = "display:flex;flex-direction:column;gap:12px;color:#fff;font-size:13px;line-height:1.45;";
         var msg = document.createElement("div");
@@ -34233,11 +34453,22 @@
         btns.appendChild(cancelBtn);
         btns.appendChild(confirmBtn);
         wrap.appendChild(btns);
-        var warningPopup = createPopup({ title: "Clear Mapping - Confirm Delete", content: wrap, width: "430px", height: "auto" });
+        var warningClosed = false;
+        function finishWarning(action) {
+            if (warningClosed) return;
+            warningClosed = true;
+            if (typeof onClose === "function") onClose(action);
+        }
+        var warningPopup = createPopup({ title: "Clear Mapping - Confirm Delete", content: wrap, width: "430px", height: "auto", onClose: function() { finishWarning("cancel"); } });
         cancelBtn.addEventListener("click", function() {
+            finishWarning("cancel");
             warningPopup.close();
         });
         confirmBtn.addEventListener("click", function() {
+            if (confirmBtn.disabled) return;
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = "Deleting...";
+            finishWarning("proceed");
             warningPopup.close();
             if (selectionPopup) {
                 selectionPopup.close();
@@ -34267,7 +34498,7 @@
             }
             setClearMappingQueue(remaining);
             var item = remaining[0];
-            var ok = await deleteEligibilityRowByUrl(item.deleteUrl);
+            var ok = await deleteEligibilityRowByUrl(item.deleteUrl, item);
             results.push({ item: item, ok: ok });
             if (!ok) {
                 log("ClearMapping: failed to delete selected item url=" + String(item.deleteUrl));
@@ -34320,10 +34551,10 @@
         close.addEventListener("click", function() { popup.close(); });
     }
 
-    async function deleteEligibilityRowByUrl(deleteUrl) {
+    async function deleteEligibilityRowByUrl(deleteUrl, expectedItem) {
         log("ClearMapping: deleteEligibilityRowByUrl url=" + String(deleteUrl));
 
-        var tbody = await waitForSelector("tbody#eligibilityRefTableBody", 15000);
+        var tbody = await waitForClearMappingTableReady(15000);
         if (!tbody) {
             log("ClearMapping: tbody missing in deleteEligibilityRowByUrl");
             return false;
@@ -34336,44 +34567,58 @@
         }
 
         var deleteLink = null;
-        var i = 0;
-        while (i < rows.length) {
-            var candidate = rows[i].querySelector("a[onclick*='maybeDeleteEligRef']");
-            if (candidate) {
-                var onclickText = candidate.getAttribute("onclick") || "";
-                if (onclickText.indexOf(deleteUrl) !== -1) {
-                    deleteLink = candidate;
-                    break;
-                }
+        var lookup = { link: null, mismatch: false };
+        var rowWaited = 0;
+        var rowStep = 250;
+        while (rowWaited <= 10000) {
+            if (CLEAR_MAPPING_CANCELED) {
+                log("ClearMapping: delete selected cancelled while waiting for table row");
+                return false;
             }
-            i = i + 1;
+            lookup = findClearMappingDeleteLink(deleteUrl, expectedItem);
+            if (lookup.mismatch) return false;
+            if (lookup.link) {
+                deleteLink = lookup.link;
+                break;
+            }
+            await sleep(rowStep);
+            rowWaited = rowWaited + rowStep;
         }
 
+        var openedConfirmDirectly = false;
         if (!deleteLink) {
-            log("ClearMapping: selected delete link not found on current table");
-            return false;
+            log("ClearMapping: selected delete link not found on current table; trying exact URL confirm fallback");
+            openedConfirmDirectly = openClearMappingDeleteConfirmByUrl(deleteUrl);
+            if (!openedConfirmDirectly) {
+                log("ClearMapping: selected delete link not found on current table");
+                return false;
+            }
         }
 
         var actionBtn = null;
         var parent = deleteLink;
-        while (parent && parent.tagName !== "TR") {
-            parent = parent.parentNode;
-        }
-        if (parent) {
-            actionBtn = parent.querySelector("button.dropdown-toggle");
-        }
-        if (actionBtn) {
-            actionBtn.click();
-            await sleep(250);
+        if (!openedConfirmDirectly) {
+            while (parent && parent.tagName !== "TR") {
+                parent = parent.parentNode;
+            }
+            if (parent) {
+                actionBtn = parent.querySelector("button.dropdown-toggle");
+            }
+            if (actionBtn) {
+                actionBtn.click();
+                await sleep(250);
+            }
         }
 
         if (CLEAR_MAPPING_CANCELED) {
             log("ClearMapping: delete selected cancelled before click");
             return false;
         }
-        log("ClearMapping: clicking selected delete link");
-        deleteLink.click();
-        await sleep(600);
+        if (!openedConfirmDirectly) {
+            log("ClearMapping: clicking selected delete link");
+            deleteLink.click();
+            await sleep(600);
+        }
 
         var okBtn = null;
         var waited = 0;
@@ -34400,8 +34645,11 @@
 
         log("ClearMapping: clicking OK button in modal");
         okBtn.click();
-        await sleep(1500);
-        return true;
+        var deleted = await waitForClearMappingDeleteComplete(deleteUrl, 12000);
+        if (!deleted) {
+            log("ClearMapping: delete confirmation did not complete for url=" + String(deleteUrl));
+        }
+        return deleted;
     }
 
 
