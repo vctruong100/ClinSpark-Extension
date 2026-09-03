@@ -409,6 +409,15 @@
     var EDIT_SE_COLLECTED = null;   // [{name, href, originalName}]  — href is null for added rows
     var EDIT_SE_FINAL_ORDER = null; // [{name, href, status, reason}]
 
+    // Edit Item Reference Feature
+    var EIR_FEATURE_NAME = 'Edit Item Reference';
+    var EIR_POPUP_REF = null;
+    var EIR_PROGRESS_POPUP_REF = null;
+    var EIR_CANCELLED = false;
+    var EIR_ORIGIN_OPTIONS = ['Protocol', 'CRF'];
+    var EIR_INC_CODELIST_SEARCH = 'a_YES/NO, SF/N/A';
+    var EIR_EXC_CODELIST_SEARCH = 'IE_NO/YES, SF/NA';
+
     function createCollectingOverlay(title, message, options) {
         options = options || {};
 
@@ -13771,6 +13780,7 @@
         { id: "Item Method Forms", label: "Item Method Forms" },
         { id: "Find Form & Events", label: "Find Form & Events" },
         { id: "Edit Study Events List", label: "Edit Study Events List" },
+        { id: "Edit Item Reference", label: "Edit Item Reference" },
         { id: "Set Visibility Condition", label: "Set Visibility Condition"},
         { id: "Download DTS Report", label: "Download DTS Report" },
         { id: "Pause", label: "Pause" },
@@ -44741,6 +44751,1236 @@
 
 
     //==========================
+    // EDIT ITEM REFERENCE FEATURE
+    //==========================
+
+    function eirIsItemGroupPage() {
+        var url = location.href.split('?')[0].split('#')[0];
+        if (location.hostname !== 'cenexel.clinspark.com' && location.hostname !== 'cenexeltest.clinspark.com') return false;
+        var marker = '/secure/crfdesign/studylibrary/show/itemgroup/';
+        var idx = url.indexOf(marker);
+        if (idx === -1) return false;
+        var suffix = url.substring(idx + marker.length);
+        if (suffix.length === 0) return false;
+        for (var i = 0; i < suffix.length; i++) {
+            var code = suffix.charCodeAt(i);
+            if (code < 48 || code > 57) return false;
+        }
+        return true;
+    }
+
+    function eirShowWrongPageWarning() {
+        showWrongPagePopup(EIR_FEATURE_NAME, 'cenexel(test).clinspark.com/secure/crfdesign/studylibrary/show/itemgroup/####', location.pathname + location.search, null);
+    }
+
+    function clinsparkPlaceHeaderControl(popupRef, button) {
+        if (!popupRef || !popupRef.element || !button) return;
+        var header = popupRef.element.firstElementChild;
+        if (!header) return;
+        var closeButton = header.querySelector("button:last-of-type") || header.querySelector("button");
+        header.style.gridTemplateColumns = "1fr auto auto";
+        button.style.margin = "0";
+        if (closeButton && closeButton !== button) header.insertBefore(button, closeButton);
+        else if (!button.parentNode || button.parentNode !== header) header.appendChild(button);
+    }
+
+    function eirCollapseWhitespace(str) {
+        var out = '';
+        var prevSpace = false;
+        for (var i = 0; i < str.length; i++) {
+            var c = str.charAt(i);
+            var code = c.charCodeAt(0);
+            var isSpace = code === 32 || code === 10 || code === 9 || code === 13;
+            if (isSpace) {
+                if (!prevSpace) {
+                    out += ' ';
+                    prevSpace = true;
+                }
+            } else {
+                out += c;
+                prevSpace = false;
+            }
+        }
+        return out;
+    }
+
+    function eirExtractLabeledValue(row, labelText) {
+        var spans = row.querySelectorAll('span.sortaBold');
+        for (var i = 0; i < spans.length; i++) {
+            var sp = spans[i];
+            if ((sp.textContent || '').trim() !== labelText) continue;
+            var parent = sp.parentNode;
+            if (!parent) return '';
+
+            // If the label is in a table cell with a value cell next to it, use that cell.
+            if (parent.tagName.toLowerCase() === 'td') {
+                var nextTd = parent.nextElementSibling;
+                if (nextTd) {
+                    var val = (nextTd.textContent || '').trim();
+                    if (val) return eirCollapseWhitespace(val);
+                }
+            }
+
+            // Otherwise collect text nodes that follow the label inside the same parent.
+            var out = '';
+            var found = false;
+            for (var n = 0; n < parent.childNodes.length; n++) {
+                var node = parent.childNodes[n];
+                if (node === sp) { found = true; continue; }
+                if (found && node.nodeType === Node.TEXT_NODE) out += node.textContent || '';
+            }
+            if (out.trim()) return eirCollapseWhitespace(out.trim());
+        }
+        return '';
+    }
+
+    function eirParseItemReferenceRow(row) {
+        var links = row.querySelectorAll('a[href]');
+        var link = null;
+        for (var li = 0; li < links.length; li++) {
+            var h = (links[li].getAttribute('href') || '').toLowerCase();
+            if (h.indexOf('/secure/crfdesign/studylibrary/show/item/') !== -1) {
+                link = links[li];
+                break;
+            }
+        }
+        if (!link) return null;
+        var href = link.getAttribute('href') || '';
+        var name = (link.textContent || '').trim();
+        if (!name) return null;
+        return {
+            rowId: row.id || '',
+            originalName: name,
+            newName: name,
+            href: href,
+            originalPrompt: eirExtractLabeledValue(row, 'Prompt:'),
+            newPrompt: eirExtractLabeledValue(row, 'Prompt:'),
+            originalSasFieldName: eirExtractLabeledValue(row, 'SAS Field Name:'),
+            newSasFieldName: eirExtractLabeledValue(row, 'SAS Field Name:'),
+            originalCodeList: eirExtractLabeledValue(row, 'Code List:'),
+            newCodeList: eirExtractLabeledValue(row, 'Code List:'),
+            desiredCodeListSearch: '',
+            desiredCodeListPrefix: '',
+            originalOrigin: eirExtractLabeledValue(row, 'Origin:'),
+            newOrigin: eirExtractLabeledValue(row, 'Origin:')
+        };
+    }
+
+    function eirCollectItemReferences() {
+        var container = document.getElementById('sortableTable');
+        if (!container) {
+            log('[EIR] sortableTable not found');
+            return [];
+        }
+        var rows = container.querySelectorAll('tr');
+        log('[EIR] table tag: ' + container.tagName + ', rows found: ' + rows.length);
+        var items = [];
+        for (var i = 0; i < rows.length; i++) {
+            var parsed = eirParseItemReferenceRow(rows[i]);
+            if (parsed) items.push(parsed);
+        }
+        log('[EIR] collected ' + items.length + ' item references');
+        return items;
+    }
+
+    function eirGetChangedFields(item) {
+        return {
+            name: item.newName !== item.originalName,
+            prompt: item.newPrompt !== item.originalPrompt,
+            sasFieldName: item.newSasFieldName !== item.originalSasFieldName,
+            codeList: !!item.desiredCodeListSearch && item.newCodeList !== item.originalCodeList,
+            origin: item.newOrigin !== item.originalOrigin
+        };
+    }
+
+    function eirIsItemChanged(item) {
+        var changes = eirGetChangedFields(item);
+        return changes.name || changes.prompt || changes.sasFieldName || changes.codeList || changes.origin;
+    }
+
+    function eirExtractIePromptNumber(promptText) {
+        var text = String(promptText || '');
+        var match = text.match(/#\s*(\d+)\s*([A-Za-z]{0,2})(?=\b|[^A-Za-z0-9])/);
+        if (!match) return null;
+        var numberPart = match[1] || '';
+        var letterPart = match[2] || '';
+        if (!numberPart) return null;
+        var padded = numberPart.length < 3 ? ('000' + numberPart).slice(-3) : numberPart;
+        return padded + letterPart;
+    }
+
+    function eirReplaceIeCode(value, prefix, targetCode) {
+        var original = String(value == null ? '' : value);
+        if (!original) {
+            return { value: original, changed: false, reason: 'blank' };
+        }
+        var pattern = new RegExp('(^|[^A-Za-z0-9])(' + prefix + '[\\s_-]*0*\\d+[A-Za-z]*)(?=$|[^A-Za-z0-9])', 'i');
+        var match = original.match(pattern);
+        if (!match) {
+            return { value: original, changed: false, reason: 'missingCode' };
+        }
+        var matchedNormalized = String(match[2] || '').replace(/[\s_-]/g, '').toUpperCase();
+        if (matchedNormalized === String(targetCode || '').toUpperCase()) {
+            return { value: original, changed: false, reason: 'alreadyMatched' };
+        }
+        return {
+            value: original.replace(pattern, function(full, leading) {
+                return leading + targetCode;
+            }),
+            changed: true,
+            reason: 'changed'
+        };
+    }
+
+    function eirApplyIeRenamesToItems(items, groupType) {
+        var prefix = groupType === 'inclusion' ? 'INC' : 'EXC';
+        var stats = {
+            prefix: prefix,
+            rowsReviewed: items.length,
+            rowsChanged: 0,
+            fieldsChanged: 0,
+            alreadyMatched: 0,
+            missingPromptNumber: 0,
+            missingNameCode: 0,
+            missingSasCode: 0,
+            blankSas: 0,
+            targetCodeTooLong: 0
+        };
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var suffix = eirExtractIePromptNumber(item.newPrompt || item.originalPrompt || '');
+            if (!suffix) {
+                stats.missingPromptNumber++;
+                continue;
+            }
+            var targetCode = prefix + suffix;
+            if (targetCode.length > 8) {
+                stats.targetCodeTooLong++;
+                continue;
+            }
+            var rowChanged = false;
+            var rowAlreadyMatched = false;
+            var nameResult = eirReplaceIeCode(item.newName, prefix, targetCode);
+            if (nameResult.changed) {
+                item.newName = nameResult.value;
+                stats.fieldsChanged++;
+                rowChanged = true;
+            } else if (nameResult.reason === 'missingCode') {
+                stats.missingNameCode++;
+            } else if (nameResult.reason === 'alreadyMatched') {
+                rowAlreadyMatched = true;
+            }
+            var sasResult = eirReplaceIeCode(item.newSasFieldName, prefix, targetCode);
+            if (sasResult.changed) {
+                item.newSasFieldName = sasResult.value;
+                stats.fieldsChanged++;
+                rowChanged = true;
+            } else if (sasResult.reason === 'blank') {
+                stats.blankSas++;
+            } else if (sasResult.reason === 'missingCode') {
+                stats.missingSasCode++;
+            } else if (sasResult.reason === 'alreadyMatched') {
+                rowAlreadyMatched = true;
+            }
+            if (rowChanged) {
+                stats.rowsChanged++;
+            } else if (rowAlreadyMatched) {
+                stats.alreadyMatched++;
+            }
+        }
+        return stats;
+    }
+
+    function eirShowApplyIeRenameConfirm(onConfirm) {
+        var root = document.createElement('div');
+        root.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;';
+
+        var msg = document.createElement('div');
+        msg.textContent = 'Apply I/E renames to every item currently listed. This will stage Name and SAS Field Name changes based on the number after # in each Prompt. Review the staged changes before pressing Confirm.';
+        msg.style.cssText = 'line-height:1.4;color:#ddd;';
+        root.appendChild(msg);
+
+        var choiceLabel = document.createElement('div');
+        choiceLabel.textContent = 'Which item group is this?';
+        choiceLabel.style.cssText = 'font-weight:700;color:#fff;';
+        root.appendChild(choiceLabel);
+
+        var selectedType = '';
+        var choices = document.createElement('div');
+        choices.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+        root.appendChild(choices);
+
+        var confirmBtn = document.createElement('button');
+        function makeChoice(label, value) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = label;
+            btn.style.cssText = 'padding:8px 12px;border-radius:6px;border:1px solid #555;background:#262626;color:#fff;cursor:pointer;font-weight:600;';
+            btn.addEventListener('click', function() {
+                selectedType = value;
+                var all = choices.querySelectorAll('button');
+                for (var i = 0; i < all.length; i++) {
+                    all[i].style.background = '#262626';
+                    all[i].style.borderColor = '#555';
+                }
+                btn.style.background = '#1f6f34';
+                btn.style.borderColor = '#2ea043';
+                confirmBtn.disabled = false;
+                confirmBtn.style.opacity = '1';
+                confirmBtn.style.cursor = 'pointer';
+            });
+            choices.appendChild(btn);
+        }
+        makeChoice('Inclusion', 'inclusion');
+        makeChoice('Exclusion', 'exclusion');
+
+        var warning = document.createElement('div');
+        warning.textContent = 'Proceed only if this page is the matching Inclusion or Exclusion item group reference list.';
+        warning.style.cssText = 'padding:9px 10px;border-left:3px solid #f59e0b;background:#2a210f;color:#facc15;line-height:1.35;';
+        root.appendChild(warning);
+
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;';
+        confirmBtn.type = 'button';
+        confirmBtn.textContent = 'Apply Renames';
+        confirmBtn.disabled = true;
+        confirmBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #2ea043;background:#1f6f34;color:#fff;cursor:default;opacity:0.5;font-weight:700;';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        root.appendChild(actions);
+
+        var popup = createPopup({
+            title: 'Apply Renames for I/E',
+            content: root,
+            width: '520px',
+            height: 'auto',
+            maxHeight: '85%'
+        });
+        cancelBtn.addEventListener('click', function() { popup.close(); });
+        confirmBtn.addEventListener('click', function() {
+            if (!selectedType) return;
+            popup.close();
+            onConfirm(selectedType);
+        });
+    }
+
+    function eirNormalizeOptionText(value) {
+        return String(value == null ? '' : value).toLowerCase().replace(/&nbsp;/g, ' ').replace(/\s+/g, '');
+    }
+
+    function eirCodeListTextMatches(text, search) {
+        var hay = eirNormalizeOptionText(text);
+        var needle = eirNormalizeOptionText(search);
+        if (!hay || !needle) return false;
+        if (hay.indexOf(needle) !== -1) return true;
+        var relaxedHay = hay.replace(/n\/a/g, 'na');
+        var relaxedNeedle = needle.replace(/n\/a/g, 'na');
+        return relaxedHay.indexOf(relaxedNeedle) !== -1;
+    }
+
+    function eirDetectIePrefix(item) {
+        var sources = [
+            item.newName,
+            item.originalName,
+            item.newSasFieldName,
+            item.originalSasFieldName,
+            item.newPrompt,
+            item.originalPrompt
+        ];
+        var found = {};
+        for (var i = 0; i < sources.length; i++) {
+            var text = String(sources[i] || '');
+            var matches = text.match(/\b(INC|EXC)(?=\s*#|[\s_-]*0*\d+)/ig);
+            if (!matches) continue;
+            for (var m = 0; m < matches.length; m++) {
+                found[String(matches[m]).toUpperCase()] = true;
+            }
+        }
+        var hasInc = !!found.INC;
+        var hasExc = !!found.EXC;
+        if (hasInc && hasExc) return 'AMBIGUOUS';
+        if (hasInc) return 'INC';
+        if (hasExc) return 'EXC';
+        return '';
+    }
+
+    function eirGetCodeListSearchForPrefix(prefix) {
+        if (prefix === 'INC') return EIR_INC_CODELIST_SEARCH;
+        if (prefix === 'EXC') return EIR_EXC_CODELIST_SEARCH;
+        return '';
+    }
+
+    function eirApplyCodeListTargets(items) {
+        var stats = {
+            rowsReviewed: items.length,
+            staged: 0,
+            alreadyMatched: 0,
+            noIeCode: 0,
+            ambiguous: 0
+        };
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var prefix = eirDetectIePrefix(item);
+            if (prefix === 'AMBIGUOUS') {
+                stats.ambiguous++;
+                continue;
+            }
+            if (!prefix) {
+                stats.noIeCode++;
+                continue;
+            }
+            var search = eirGetCodeListSearchForPrefix(prefix);
+            if (!search) {
+                stats.noIeCode++;
+                continue;
+            }
+            if (item.originalCodeList && eirCodeListTextMatches(item.originalCodeList, search)) {
+                item.desiredCodeListSearch = '';
+                item.desiredCodeListPrefix = '';
+                item.newCodeList = item.originalCodeList;
+                stats.alreadyMatched++;
+                continue;
+            }
+            item.desiredCodeListSearch = search;
+            item.desiredCodeListPrefix = prefix;
+            item.newCodeList = search;
+            stats.staged++;
+        }
+        return stats;
+    }
+
+    function eirShowUpdateCodeListConfirm(onConfirm) {
+        var root = document.createElement('div');
+        root.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;';
+        var msg = document.createElement('div');
+        msg.textContent = 'This will stage Code List updates for every INC/EXC item currently listed. You must be on either the Inclusion or Exclusion item group item reference page. Any already-staged Name, Prompt, SAS Field Name, or Origin changes will be saved together when you press Confirm.';
+        msg.style.cssText = 'line-height:1.4;color:#ddd;';
+        root.appendChild(msg);
+        var warning = document.createElement('div');
+        warning.textContent = 'After this step, review the staged changes in the overview. Nothing is posted to ClinSpark until you press the main Confirm button.';
+        warning.style.cssText = 'padding:9px 10px;border-left:3px solid #f59e0b;background:#2a210f;color:#facc15;line-height:1.35;';
+        root.appendChild(warning);
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;';
+        var confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.textContent = 'Update Codelist';
+        confirmBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #0ea5e9;background:#075985;color:#fff;cursor:pointer;font-weight:700;';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        root.appendChild(actions);
+        var popup = createPopup({
+            title: 'Update Codelist',
+            content: root,
+            width: '540px',
+            height: 'auto',
+            maxHeight: '85%'
+        });
+        cancelBtn.addEventListener('click', function() { popup.close(); });
+        confirmBtn.addEventListener('click', function() {
+            popup.close();
+            onConfirm();
+        });
+    }
+
+    function eirFindCodeListSelect(form) {
+        return form.querySelector('select#codeList, select[name="codeList"], select[name="codeList.id"], select[id*="codeList"], select[name*="codeList"]');
+    }
+
+    function eirResolveCodeListOption(form, searchText) {
+        var sel = eirFindCodeListSelect(form);
+        if (!sel) throw new Error('Code List dropdown was not found on the edit page.');
+        var opts = sel.querySelectorAll('option');
+        var selectedOpt = null;
+        for (var i = 0; i < opts.length; i++) {
+            if (opts[i].selected || opts[i].hasAttribute('selected')) {
+                selectedOpt = opts[i];
+                break;
+            }
+        }
+        if (selectedOpt && eirCodeListTextMatches(selectedOpt.textContent || '', searchText)) {
+            return {
+                name: sel.getAttribute('name') || '',
+                value: selectedOpt.value || selectedOpt.getAttribute('value') || '',
+                text: eirCollapseWhitespace(selectedOpt.textContent || ''),
+                alreadyMatched: true
+            };
+        }
+        for (var oi = 0; oi < opts.length; oi++) {
+            var opt = opts[oi];
+            var value = opt.value || opt.getAttribute('value') || '';
+            if (!value || opt.disabled) continue;
+            if (eirCodeListTextMatches(opt.textContent || '', searchText)) {
+                return {
+                    name: sel.getAttribute('name') || '',
+                    value: value,
+                    text: eirCollapseWhitespace(opt.textContent || ''),
+                    alreadyMatched: false
+                };
+            }
+        }
+        throw new Error('No Code List option matched "' + searchText + '".');
+    }
+
+    function eirEscapeHtml(str) {
+        var d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
+    }
+
+    function eirBuildUpdateFormData(form, item) {
+        var codeListSelection = null;
+        if (item.desiredCodeListSearch) {
+            codeListSelection = eirResolveCodeListOption(form, item.desiredCodeListSearch);
+            item.newCodeList = codeListSelection.text || item.desiredCodeListSearch;
+            log('[EIR] Code List resolved for ' + item.originalName + ': ' + item.newCodeList + (codeListSelection.alreadyMatched ? ' (already matched)' : ''));
+        }
+        var changedById = {
+            'name': item.newName,
+            'question': item.newPrompt,
+            'sasFieldName': item.newSasFieldName,
+            'itemDataOrigin': item.newOrigin
+        };
+        var changedByName = {
+            'name': item.newName,
+            'question': item.newPrompt,
+            'sasFieldName': item.newSasFieldName,
+            'itemDataOrigin': item.newOrigin
+        };
+        var parts = [];
+        var inputs = form.querySelectorAll('input, textarea, select');
+        for (var i = 0; i < inputs.length; i++) {
+            var inp = inputs[i];
+            var name = inp.getAttribute('name');
+            if (!name) continue;
+            var id = inp.id || '';
+            var type = (inp.getAttribute('type') || '').toLowerCase();
+            var tag = inp.tagName.toLowerCase();
+            var value = '';
+            if (changedById.hasOwnProperty(id) || changedByName.hasOwnProperty(name)) {
+                value = changedById.hasOwnProperty(id) ? changedById[id] : changedByName[name];
+            } else if (codeListSelection && (id === 'codeList' || name === 'codeList' || name === 'codeList.id' || id.toLowerCase().indexOf('codelist') !== -1 || name.toLowerCase().indexOf('codelist') !== -1)) {
+                value = codeListSelection.value;
+            } else if (tag === 'select') {
+                var selectedOpt = inp.querySelector('option[selected]');
+                value = selectedOpt ? (selectedOpt.value || selectedOpt.getAttribute('value') || '') : '';
+                if (!value) {
+                    var firstOpt = inp.querySelector('option');
+                    value = firstOpt ? (firstOpt.value || firstOpt.getAttribute('value') || '') : '';
+                }
+            } else if (type === 'checkbox' || type === 'radio') {
+                if (inp.checked || inp.hasAttribute('checked')) {
+                    value = inp.value || inp.getAttribute('value') || 'on';
+                } else {
+                    continue;
+                }
+            } else {
+                value = inp.value || inp.getAttribute('value') || '';
+            }
+            if (name === 'reasonForChange' && (!value || !value.trim())) {
+                value = 'Update';
+            }
+            parts.push(encodeURIComponent(name) + '=' + encodeURIComponent(value));
+        }
+        return parts.join('&');
+    }
+
+    async function eirUpdateItemOnServer(item) {
+        var base = getBaseUrl();
+        var showUrl = item.href.indexOf('http') === 0 ? item.href : base + item.href;
+        log('[EIR] Fetching item show page: ' + showUrl);
+        var showHtml = await fetchPage(showUrl);
+        var showDoc = parseHtml(showHtml);
+
+        var editLink = null;
+        var links = showDoc.querySelectorAll('a[href]');
+        for (var li = 0; li < links.length; li++) {
+            var h = (links[li].getAttribute('href') || '').toLowerCase();
+            if (h.indexOf('/update/item/') !== -1) {
+                var txt = (links[li].textContent || '').trim().toLowerCase();
+                if (txt.indexOf('edit') !== -1) {
+                    editLink = links[li].getAttribute('href');
+                    break;
+                }
+            }
+        }
+        if (!editLink) {
+            if (item.href.indexOf('/show/item/') !== -1) {
+                editLink = item.href.replace('/show/item/', '/update/item/');
+            }
+        }
+        if (!editLink) throw new Error('No update link found for ' + item.originalName);
+
+        var updateUrl = editLink.indexOf('http') === 0 ? editLink : base + editLink;
+        log('[EIR] Fetching update page: ' + updateUrl);
+        var editHtml = await fetchPage(updateUrl);
+        var editDoc = parseHtml(editHtml);
+        var form = editDoc.querySelector('form');
+        if (!form) throw new Error('No edit form found for ' + item.originalName);
+
+        var postUrl = form.getAttribute('action') || '';
+        if (!postUrl) postUrl = updateUrl;
+        if (postUrl.indexOf('http') !== 0) postUrl = base + postUrl;
+        var formData = eirBuildUpdateFormData(form, item);
+        log('[EIR] Posting update for ' + item.originalName);
+        var result = await submitForm(postUrl, formData);
+        var resultDoc = parseHtml(result);
+        var errorAlert = resultDoc.querySelector('div.alert.alert-danger, div.alert-error, div.text-danger, .error');
+        if (errorAlert) {
+            var errText = (errorAlert.textContent || '').trim();
+            throw new Error(errText);
+        }
+    }
+
+    async function eirProcessItemReferenceUpdates(changed) {
+        EIR_CANCELLED = false;
+        var progressRoot = document.createElement('div');
+        progressRoot.style.cssText = 'display:flex;flex-direction:column;gap:10px;padding:16px;';
+
+        var progressStatus = document.createElement('div');
+        progressStatus.textContent = 'Starting updates...';
+        progressStatus.style.fontWeight = '600';
+        progressRoot.appendChild(progressStatus);
+
+        var progressBar = document.createElement('div');
+        progressBar.style.cssText = 'height:6px;border-radius:3px;background:#333;overflow:hidden;';
+        var progressFill = document.createElement('div');
+        progressFill.style.cssText = 'height:100%;width:0%;background:linear-gradient(90deg, #667eea, #764ba2);border-radius:3px;transition:width 0.3s;';
+        progressBar.appendChild(progressFill);
+        progressRoot.appendChild(progressBar);
+
+        var progressLog = document.createElement('div');
+        progressLog.style.cssText = 'max-height:200px;overflow-y:auto;font-size:12px;color:#ccc;white-space:pre-wrap;word-break:break-word;';
+        progressRoot.appendChild(progressLog);
+
+        function plog(msg) {
+            log('[EIR] ' + msg);
+            var line = document.createElement('div');
+            line.textContent = msg;
+            progressLog.appendChild(line);
+            progressLog.scrollTop = progressLog.scrollHeight;
+        }
+
+        EIR_PROGRESS_POPUP_REF = createPopup({
+            title: EIR_FEATURE_NAME + ' - Updating',
+            content: progressRoot,
+            width: '600px',
+            height: 'auto',
+            maxHeight: '85%',
+            onClose: function() {
+                EIR_CANCELLED = true;
+            }
+        });
+
+        var failed = [];
+        var succeeded = 0;
+        for (var i = 0; i < changed.length; i++) {
+            if (EIR_CANCELLED) {
+                plog('Cancelled by user.');
+                break;
+            }
+            var item = changed[i];
+            progressStatus.textContent = 'Updating ' + (i + 1) + ' of ' + changed.length + ': ' + item.newName;
+            plog('Updating: ' + item.originalName + (item.originalName !== item.newName ? ' -> ' + item.newName : ''));
+            try {
+                await eirUpdateItemOnServer(item);
+                succeeded++;
+                plog('Updated: ' + item.newName);
+            } catch (err) {
+                var msg = String(err);
+                failed.push({ item: item, error: msg });
+                plog('Failed: ' + item.newName + ' - ' + msg);
+            }
+            var pct = changed.length ? Math.round(((i + 1) / changed.length) * 100) : 0;
+            progressFill.style.width = pct + '%';
+            await sleep(300);
+        }
+
+        try { EIR_PROGRESS_POPUP_REF.close(); } catch (e) {}
+        EIR_PROGRESS_POPUP_REF = null;
+        eirShowSummary(succeeded, failed);
+    }
+
+    function eirShowSummary(succeeded, failed) {
+        var glass = isGlassTheme();
+        var root = document.createElement('div');
+        root.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;';
+
+        var stats = document.createElement('div');
+        stats.style.cssText = 'display:flex;gap:16px;flex-wrap:wrap;';
+
+        function statCard(label, count, color) {
+            var card = document.createElement('div');
+            card.style.cssText = 'padding:10px 16px;border-radius:8px;background:' + (glass ? 'rgba(15,10,40,0.4)' : '#1a1a1a') + ';border:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';text-align:center;min-width:80px;';
+            var num = document.createElement('div');
+            num.textContent = String(count);
+            num.style.cssText = 'font-size:22px;font-weight:700;color:' + color + ';';
+            var lbl = document.createElement('div');
+            lbl.textContent = label;
+            lbl.style.cssText = 'font-size:11px;color:' + (glass ? 'rgba(255,255,255,0.65)' : '#999') + ';';
+            card.appendChild(num);
+            card.appendChild(lbl);
+            return card;
+        }
+        stats.appendChild(statCard('Succeeded', succeeded, '#10b981'));
+        stats.appendChild(statCard('Failed', failed.length, '#ef4444'));
+        root.appendChild(stats);
+
+        if (failed.length > 0) {
+            var failDiv = document.createElement('div');
+            failDiv.style.cssText = 'color:#ef4444;font-weight:500;';
+            failDiv.textContent = 'Failed items:';
+            root.appendChild(failDiv);
+            for (var fi = 0; fi < failed.length; fi++) {
+                var fline = document.createElement('div');
+                fline.textContent = '  * ' + failed[fi].item.originalName + ' - ' + failed[fi].error;
+                fline.style.cssText = 'font-size:12px;padding-left:8px;word-break:break-word;';
+                root.appendChild(fline);
+            }
+        }
+
+        var summaryPopup = createPopup({
+            title: EIR_FEATURE_NAME + ' - Summary',
+            content: root,
+            width: '500px',
+            height: 'auto',
+            maxHeight: '85%'
+        });
+
+        var okBtn = document.createElement('button');
+        okBtn.textContent = 'OK';
+        okBtn.style.cssText = 'padding:8px 22px;border-radius:8px;border:none;background:#5b43c7;color:#fff;cursor:pointer;font-weight:700;font-size:14px;align-self:flex-end;';
+        okBtn.addEventListener('click', function() {
+            summaryPopup.close();
+        });
+        root.appendChild(okBtn);
+    }
+
+    function eirRenderEditItemReferencePanel(items) {
+        if (EIR_POPUP_REF) {
+            try { EIR_POPUP_REF.close(); } catch (e) {}
+            EIR_POPUP_REF = null;
+        }
+        EIR_CANCELLED = false;
+        var glass = isGlassTheme();
+
+        var selectedIdx = 0;
+        var locked = false;
+
+        var root = document.createElement('div');
+        root.style.cssText = 'display:flex;flex-direction:column;height:100%;gap:0;';
+
+        var eirIsFullscreen = false;
+        try { eirIsFullscreen = localStorage.getItem('activityPlanState.eir.fullscreen') === 'true'; } catch (e) {}
+        var eirFullscreenBtn = document.createElement('button');
+        eirFullscreenBtn.id = 'eirFullscreenBtn';
+        eirFullscreenBtn.textContent = eirIsFullscreen ? '\u2716\u26F6' : '\u26F6';
+        eirFullscreenBtn.title = eirIsFullscreen ? 'Exit Full Screen' : 'Toggle Full Screen';
+        eirFullscreenBtn.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #555;background:#333;color:#fff;font-size:14px;cursor:pointer;line-height:1;width:32px;height:32px;display:flex;align-items:center;justify-content:center;';
+
+        var topRow = document.createElement('div');
+        topRow.style.cssText = 'display:flex;flex:1;overflow:hidden;gap:10px;min-height:0;';
+
+        var EIR_OVERVIEW_WIDTH_KEY = 'eirOverviewPanelWidth';
+        var savedOverviewWidth = (function() {
+            try {
+                var v = window.localStorage.getItem(EIR_OVERVIEW_WIDTH_KEY);
+                return v ? parseInt(v, 10) : 0;
+            } catch (e) { return 0; }
+        })();
+        var overviewWidth = (savedOverviewWidth > 260 && savedOverviewWidth <= 560) ? savedOverviewWidth : 400;
+
+        var overviewPanel = document.createElement('div');
+        overviewPanel.style.cssText = 'flex:0 0 ' + overviewWidth + 'px;display:flex;flex-direction:column;gap:6px;position:relative;min-width:260px;max-width:560px;';
+
+        var overviewSizer = document.createElement('div');
+        overviewSizer.style.cssText = 'position:absolute;top:0;right:0;bottom:0;width:6px;cursor:col-resize;z-index:2;background:rgba(255,255,255,0.08);transition:background 0.15s;';
+        overviewSizer.title = 'Drag to resize';
+        overviewSizer.addEventListener('mouseenter', function() { overviewSizer.style.background = 'rgba(255,255,255,0.25)'; });
+        overviewSizer.addEventListener('mouseleave', function() { overviewSizer.style.background = 'rgba(255,255,255,0.08)'; });
+        overviewSizer.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            var startX = e.clientX;
+            var startWidth = overviewPanel.getBoundingClientRect().width;
+            function onMove(ev) {
+                var newW = startWidth + (ev.clientX - startX);
+                if (newW < 260) newW = 260;
+                if (newW > 560) newW = 560;
+                overviewPanel.style.flex = '0 0 ' + newW + 'px';
+                try { window.localStorage.setItem(EIR_OVERVIEW_WIDTH_KEY, String(newW)); } catch (err) {}
+            }
+            function onUp() {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+        overviewPanel.appendChild(overviewSizer);
+
+        var overviewHeader = document.createElement('div');
+        overviewHeader.textContent = 'Overview';
+        overviewHeader.style.cssText = 'font-weight:600;font-size:14px;padding:0 4px;';
+        overviewPanel.appendChild(overviewHeader);
+
+        var overviewList = document.createElement('div');
+        overviewList.style.cssText = 'flex:1;overflow:auto;border:1px solid ' + (glass ? 'rgba(255,255,255,0.18)' : '#444') + ';border-radius:6px;background:' + (glass ? 'rgba(15,10,40,0.35)' : '#1a1a1a') + ';';
+        overviewPanel.appendChild(overviewList);
+
+        var rightPanel = document.createElement('div');
+        rightPanel.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:10px;min-width:300px;';
+
+        var rightTitle = document.createElement('div');
+        rightTitle.textContent = 'Item Configuration';
+        rightTitle.style.cssText = 'font-weight:600;font-size:14px;margin-bottom:2px;';
+        rightPanel.appendChild(rightTitle);
+
+        function makeField(id, labelText, type, options) {
+            var wrap = document.createElement('div');
+            wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+
+            var label = document.createElement('label');
+            label.textContent = labelText;
+            label.style.cssText = 'font-size:11px;color:' + (glass ? 'rgba(255,255,255,0.65)' : '#999') + ';';
+            if (id) label.setAttribute('for', id);
+
+            var input;
+            if (type === 'select') {
+                input = document.createElement('select');
+                input.id = id;
+                input.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid ' + (glass ? 'rgba(255,255,255,0.25)' : '#555') + ';background:' + (glass ? 'rgba(15,10,40,0.55)' : '#222') + ';color:#fff;font-size:13px;outline:none;';
+                if (options) {
+                    for (var oi = 0; oi < options.length; oi++) {
+                        var opt = document.createElement('option');
+                        opt.value = options[oi];
+                        opt.textContent = options[oi];
+                        input.appendChild(opt);
+                    }
+                }
+            } else if (type === 'textarea') {
+                input = document.createElement('textarea');
+                input.id = id;
+                input.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid ' + (glass ? 'rgba(255,255,255,0.25)' : '#555') + ';background:' + (glass ? 'rgba(15,10,40,0.55)' : '#222') + ';color:#fff;font-size:13px;outline:none;resize:vertical;min-height:60px;white-space:pre-wrap;word-wrap:break-word;font-family:inherit;line-height:1.4;';
+            } else {
+                input = document.createElement('input');
+                input.type = 'text';
+                input.id = id;
+                input.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid ' + (glass ? 'rgba(255,255,255,0.25)' : '#555') + ';background:' + (glass ? 'rgba(15,10,40,0.55)' : '#222') + ';color:#fff;font-size:13px;outline:none;';
+                if (type === 'sas') input.setAttribute('maxlength', '8');
+            }
+
+            var origSpan = document.createElement('span');
+            origSpan.style.cssText = 'font-size:11px;color:#f59e0b;display:none;';
+
+            wrap.appendChild(label);
+            wrap.appendChild(input);
+            wrap.appendChild(origSpan);
+            rightPanel.appendChild(wrap);
+            return { input: input, origSpan: origSpan };
+        }
+
+        var nameField = makeField('eirItemName', 'Name', 'text');
+        var promptField = makeField('eirItemPrompt', 'Prompt', 'textarea');
+        var sasField = makeField('eirItemSas', 'SAS Field Name', 'sas');
+        var codeListField = makeField('eirItemCodeList', 'Code List', 'text');
+        var originField = makeField('eirItemOrigin', 'Origin', 'select', EIR_ORIGIN_OPTIONS);
+
+        var nameInput = nameField.input;
+        var promptInput = promptField.input;
+        var sasInput = sasField.input;
+        var codeListInput = codeListField.input;
+        var originSelect = originField.input;
+        codeListInput.readOnly = true;
+        codeListInput.title = 'Use Update Codelist to stage this field.';
+        codeListInput.style.setProperty('background', '#1f2937', 'important');
+        codeListInput.style.setProperty('background-color', '#1f2937', 'important');
+        codeListInput.style.setProperty('color', '#f9fafb', 'important');
+        codeListInput.style.setProperty('-webkit-text-fill-color', '#f9fafb', 'important');
+        codeListInput.style.setProperty('border-color', '#4b5563', 'important');
+
+        var bottomBar = document.createElement('div');
+        bottomBar.style.cssText = 'display:flex;justify-content:flex-end;align-items:center;gap:12px;padding-top:10px;border-top:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';margin-top:8px;';
+
+        var errorMsg = document.createElement('div');
+        errorMsg.style.cssText = 'flex:1;color:#ef4444;font-size:12px;font-weight:500;';
+
+        var confirmBtn = document.createElement('button');
+        confirmBtn.textContent = 'Confirm';
+        confirmBtn.style.cssText = 'padding:8px 22px;border-radius:8px;border:none;background:#5b43c7;color:#fff;cursor:pointer;font-weight:700;font-size:14px;';
+
+        var updateCodeListBtn = document.createElement('button');
+        updateCodeListBtn.textContent = 'Update Codelist';
+        updateCodeListBtn.style.cssText = 'padding:8px 14px;border-radius:8px;border:1px solid #0ea5e9;background:#075985;color:#fff;cursor:pointer;font-weight:700;font-size:13px;';
+
+        var applyIeBtn = document.createElement('button');
+        applyIeBtn.textContent = 'Apply Renames for I/E';
+        applyIeBtn.style.cssText = 'padding:8px 14px;border-radius:8px;border:1px solid #2ea043;background:#1f6f34;color:#fff;cursor:pointer;font-weight:700;font-size:13px;';
+
+        bottomBar.appendChild(errorMsg);
+        bottomBar.appendChild(updateCodeListBtn);
+        bottomBar.appendChild(applyIeBtn);
+        bottomBar.appendChild(confirmBtn);
+
+        topRow.appendChild(overviewPanel);
+        topRow.appendChild(rightPanel);
+        root.appendChild(topRow);
+        root.appendChild(bottomBar);
+
+        function updateOriginalIndicators() {
+            var item = items[selectedIdx];
+            if (!item) return;
+            var changes = eirGetChangedFields(item);
+            function setOrig(field, changed, origVal, label) {
+                field.origSpan.style.display = changed ? 'block' : 'none';
+                field.origSpan.textContent = changed ? 'Original ' + label + ': ' + (origVal === '' ? '(blank)' : origVal) : '';
+            }
+            setOrig(nameField, changes.name, item.originalName, 'Name');
+            setOrig(promptField, changes.prompt, item.originalPrompt, 'Prompt');
+            setOrig(sasField, changes.sasFieldName, item.originalSasFieldName, 'SAS Field Name');
+            setOrig(codeListField, changes.codeList, item.originalCodeList, 'Code List');
+            setOrig(originField, changes.origin, item.originalOrigin, 'Origin');
+        }
+
+        function displayValue(v) {
+            return (v === '' || v === null || v === undefined) ? '(blank)' : String(v);
+        }
+
+        function renderOverview() {
+            overviewList.innerHTML = '';
+            if (items.length === 0) return;
+
+            var headerRow = document.createElement('div');
+            headerRow.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.2fr) minmax(70px,0.8fr) minmax(100px,1.2fr) minmax(70px,0.8fr);gap:8px;padding:6px 10px;font-size:11px;font-weight:600;color:' + (glass ? 'rgba(255,255,255,0.65)' : '#999') + ';border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';position:sticky;top:0;background:' + (glass ? 'rgba(15,10,40,0.85)' : '#1a1a1a') + ';z-index:1;';
+            var colHeaders = ['Name', 'Prompt', 'SAS', 'Code List', 'Origin'];
+            for (var chi = 0; chi < colHeaders.length; chi++) {
+                var hCell = document.createElement('div');
+                hCell.textContent = colHeaders[chi];
+                headerRow.appendChild(hCell);
+            }
+            overviewList.appendChild(headerRow);
+
+            for (var oi = 0; oi < items.length; oi++) {
+                (function(idx) {
+                    var item = items[idx];
+                    var changes = eirGetChangedFields(item);
+                    var changed = changes.name || changes.prompt || changes.sasFieldName || changes.codeList || changes.origin;
+                    var row = document.createElement('div');
+                    row.setAttribute('data-eir-overview-idx', idx);
+                    row.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.2fr) minmax(70px,0.8fr) minmax(100px,1.2fr) minmax(70px,0.8fr);gap:8px;padding:6px 10px;font-size:12px;border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.08)' : '#333') + ';cursor:pointer;transition:background 0.15s;align-items:start;';
+                    if (idx === selectedIdx) {
+                        row.style.background = glass ? 'rgba(167,139,250,0.22)' : 'rgba(91,67,199,0.25)';
+                    } else {
+                        row.style.background = 'transparent';
+                    }
+                    row.style.borderLeft = changed ? '3px solid #f59e0b' : '3px solid transparent';
+
+                    function addCell(origVal, newVal, isChanged) {
+                        var cell = document.createElement('div');
+                        cell.style.cssText = 'white-space:normal;word-wrap:break-word;overflow-wrap:anywhere;';
+                        if (isChanged) {
+                            var origSpan = document.createElement('span');
+                            var origText = displayValue(origVal);
+                            origSpan.textContent = origText;
+                            origSpan.style.cssText = 'color:#9ca3af;text-decoration:line-through;margin-right:4px;';
+                            origSpan.title = 'Original: ' + origText;
+
+                            var arrow = document.createElement('span');
+                            arrow.textContent = '→';
+                            arrow.style.cssText = 'color:#f59e0b;margin:0 4px;';
+
+                            var newSpan = document.createElement('span');
+                            var newText = displayValue(newVal);
+                            newSpan.textContent = newText;
+                            newSpan.style.cssText = 'font-weight:600;color:#fff;';
+                            newSpan.title = 'Updated: ' + newText;
+
+                            cell.appendChild(origSpan);
+                            cell.appendChild(arrow);
+                            cell.appendChild(newSpan);
+                        } else {
+                            var text = displayValue(newVal);
+                            cell.textContent = text;
+                            cell.title = text;
+                            cell.style.color = '#e5e7eb';
+                        }
+                        row.appendChild(cell);
+                    }
+
+                    addCell(item.originalName, item.newName, changes.name);
+                    addCell(item.originalPrompt, item.newPrompt, changes.prompt);
+                    addCell(item.originalSasFieldName, item.newSasFieldName, changes.sasFieldName);
+                    addCell(item.originalCodeList, item.newCodeList, changes.codeList);
+                    addCell(item.originalOrigin, item.newOrigin, changes.origin);
+
+                    row.addEventListener('mouseenter', function() {
+                        if (idx !== selectedIdx) row.style.background = glass ? 'rgba(255,255,255,0.08)' : '#2a2a2a';
+                    });
+                    row.addEventListener('mouseleave', function() {
+                        row.style.background = idx === selectedIdx ? (glass ? 'rgba(167,139,250,0.22)' : 'rgba(91,67,199,0.25)') : 'transparent';
+                    });
+                    row.addEventListener('click', function() {
+                        selectedIdx = idx;
+                        renderRight();
+                        renderOverview();
+                        setTimeout(function() { nameInput.focus(); nameInput.select(); }, 0);
+                    });
+                    overviewList.appendChild(row);
+                })(oi);
+            }
+        }
+
+        function renderRight() {
+            var item = items[selectedIdx];
+            if (!item) {
+                rightTitle.textContent = 'No item selected';
+                nameInput.value = '';
+                promptInput.value = '';
+                sasInput.value = '';
+                codeListInput.value = '';
+                originSelect.innerHTML = '';
+                nameInput.disabled = true;
+                promptInput.disabled = true;
+                sasInput.disabled = true;
+                codeListInput.disabled = true;
+                originSelect.disabled = true;
+                return;
+            }
+            rightTitle.textContent = item.newName;
+            nameInput.disabled = false;
+            promptInput.disabled = false;
+            sasInput.disabled = false;
+            codeListInput.disabled = false;
+            originSelect.disabled = false;
+            nameInput.value = item.newName;
+            promptInput.value = item.newPrompt;
+            sasInput.value = item.newSasFieldName;
+            codeListInput.value = item.newCodeList || '';
+
+            originSelect.innerHTML = '';
+            if (!item.newOrigin) {
+                var ph = document.createElement('option');
+                ph.value = '';
+                ph.textContent = 'Select...';
+                ph.disabled = true;
+                originSelect.appendChild(ph);
+            } else if (EIR_ORIGIN_OPTIONS.indexOf(item.newOrigin) === -1) {
+                var origOpt = document.createElement('option');
+                origOpt.value = item.newOrigin;
+                origOpt.textContent = item.newOrigin + ' (original)';
+                origOpt.disabled = true;
+                originSelect.appendChild(origOpt);
+            }
+            for (var oi = 0; oi < EIR_ORIGIN_OPTIONS.length; oi++) {
+                var opt = document.createElement('option');
+                opt.value = EIR_ORIGIN_OPTIONS[oi];
+                opt.textContent = EIR_ORIGIN_OPTIONS[oi];
+                originSelect.appendChild(opt);
+            }
+            originSelect.value = item.newOrigin;
+
+            updateOriginalIndicators();
+        }
+
+        function moveSelection(delta) {
+            if (items.length === 0) return;
+            var nextIdx = selectedIdx + delta;
+            if (nextIdx < 0) nextIdx = items.length - 1;
+            if (nextIdx >= items.length) nextIdx = 0;
+            selectedIdx = nextIdx;
+            renderRight();
+            renderOverview();
+            setTimeout(function() { nameInput.focus(); nameInput.select(); }, 0);
+            var rowDiv = null;
+            var children = overviewList.children;
+            for (var ci = 0; ci < children.length; ci++) {
+                if (parseInt(children[ci].getAttribute('data-eir-overview-idx'), 10) === selectedIdx) {
+                    rowDiv = children[ci];
+                    break;
+                }
+            }
+            if (rowDiv) rowDiv.scrollIntoView({ block: 'nearest' });
+        }
+
+        function validate() {
+            var hasChanges = false;
+            for (var hi = 0; hi < items.length; hi++) {
+                if (eirIsItemChanged(items[hi])) {
+                    hasChanges = true;
+                    break;
+                }
+            }
+            errorMsg.textContent = '';
+            confirmBtn.disabled = !hasChanges || locked;
+            confirmBtn.style.opacity = hasChanges && !locked ? '1' : '0.5';
+            confirmBtn.style.cursor = hasChanges && !locked ? 'pointer' : 'default';
+        }
+
+        function saveCurrentItem() {
+            var item = items[selectedIdx];
+            if (!item) return;
+            item.newName = nameInput.value;
+            item.newPrompt = promptInput.value;
+            item.newSasFieldName = sasInput.value;
+            item.newOrigin = originSelect.value;
+            updateOriginalIndicators();
+            renderOverview();
+            validate();
+        }
+
+        nameInput.addEventListener('input', saveCurrentItem);
+        promptInput.addEventListener('input', saveCurrentItem);
+        sasInput.addEventListener('input', saveCurrentItem);
+        originSelect.addEventListener('change', saveCurrentItem);
+
+        updateCodeListBtn.addEventListener('click', function() {
+            if (locked) return;
+            eirShowUpdateCodeListConfirm(function() {
+                var stats = eirApplyCodeListTargets(items);
+                renderRight();
+                renderOverview();
+                validate();
+                errorMsg.style.color = stats.staged > 0 ? '#10b981' : '#f59e0b';
+                errorMsg.textContent = 'Code List staged: ' + stats.staged + ' row(s). ' +
+                    stats.alreadyMatched + ' already matched; ' + stats.noIeCode + ' missing INC/EXC; ' +
+                    stats.ambiguous + ' ambiguous.';
+                log('[EIR] Update Codelist staged rows=' + stats.staged + ', alreadyMatched=' + stats.alreadyMatched + ', missing=' + stats.noIeCode + ', ambiguous=' + stats.ambiguous);
+            });
+        });
+
+        applyIeBtn.addEventListener('click', function() {
+            if (locked) return;
+            eirShowApplyIeRenameConfirm(function(groupType) {
+                var stats = eirApplyIeRenamesToItems(items, groupType);
+                renderRight();
+                renderOverview();
+                validate();
+                errorMsg.style.color = stats.fieldsChanged > 0 ? '#10b981' : '#f59e0b';
+                errorMsg.textContent = 'I/E rename staged: ' + stats.rowsChanged + ' row(s), ' + stats.fieldsChanged + ' field(s). ' +
+                    stats.alreadyMatched + ' already matched; ' + stats.missingPromptNumber + ' missing prompt #; ' +
+                    stats.missingNameCode + ' missing ' + stats.prefix + ' in Name; ' + stats.missingSasCode + ' missing ' + stats.prefix + ' in SAS' +
+                    (stats.blankSas ? '; ' + stats.blankSas + ' blank SAS' : '') +
+                    (stats.targetCodeTooLong ? '; ' + stats.targetCodeTooLong + ' code(s) too long for SAS' : '') + '.';
+                log('[EIR] Apply Renames for I/E staged rows=' + stats.rowsChanged + ', fields=' + stats.fieldsChanged + ', prefix=' + stats.prefix);
+            });
+        });
+
+        root.addEventListener('keydown', function(e) {
+            var key = e.key || e.code || '';
+            if ((key === 'ArrowUp' || key === 'ArrowDown') && ['INPUT', 'TEXTAREA', 'SELECT'].indexOf(e.target.tagName) === -1) {
+                e.preventDefault();
+                moveSelection(key === 'ArrowUp' ? -1 : 1);
+            }
+        });
+
+        confirmBtn.addEventListener('click', function() {
+            if (confirmBtn.disabled || locked) return;
+            var changed = [];
+            for (var ci = 0; ci < items.length; ci++) {
+                if (eirIsItemChanged(items[ci])) changed.push(items[ci]);
+            }
+            if (changed.length === 0) {
+                errorMsg.textContent = 'No changes to confirm.';
+                return;
+            }
+            locked = true;
+            if (EIR_POPUP_REF) {
+                try { EIR_POPUP_REF.close(); } catch (e) {}
+                EIR_POPUP_REF = null;
+            }
+            eirProcessItemReferenceUpdates(changed);
+        });
+
+        EIR_POPUP_REF = createPopup({
+            title: EIR_FEATURE_NAME,
+            description: 'Edit item references and click Confirm to update ClinSpark.',
+            content: root,
+            width: '900px',
+            height: '620px',
+            maxWidth: '95%',
+            maxHeight: '90%',
+            onClose: function() {
+                EIR_POPUP_REF = null;
+                EIR_CANCELLED = true;
+            }
+        });
+
+        function applyEirFullscreen() {
+            var popup = EIR_POPUP_REF && EIR_POPUP_REF.element;
+            if (!popup) return;
+            if (eirIsFullscreen) {
+                popup.dataset.eirOrigWidth = popup.style.width || '';
+                popup.dataset.eirOrigHeight = popup.style.height || '';
+                popup.dataset.eirOrigMaxWidth = popup.style.maxWidth || '';
+                popup.dataset.eirOrigMaxHeight = popup.style.maxHeight || '';
+                popup.style.width = 'calc(100vw - 16px)';
+                popup.style.maxWidth = 'calc(100vw - 16px)';
+                popup.style.height = 'calc(100vh - 16px)';
+                popup.style.maxHeight = 'calc(100vh - 16px)';
+                popup.style.top = '8px';
+                popup.style.left = '8px';
+                popup.style.transform = 'none';
+                eirFullscreenBtn.textContent = '\u2716\u26F6';
+                eirFullscreenBtn.title = 'Exit Full Screen';
+            } else {
+                popup.style.width = popup.dataset.eirOrigWidth || '900px';
+                popup.style.maxWidth = popup.dataset.eirOrigMaxWidth || '95%';
+                popup.style.height = popup.dataset.eirOrigHeight || '620px';
+                popup.style.maxHeight = popup.dataset.eirOrigMaxHeight || '90%';
+                popup.style.top = '50%';
+                popup.style.left = '50%';
+                popup.style.transform = 'translate(-50%, -50%)';
+                eirFullscreenBtn.textContent = '\u26F6';
+                eirFullscreenBtn.title = 'Toggle Full Screen';
+            }
+        }
+        clinsparkPlaceHeaderControl(EIR_POPUP_REF, eirFullscreenBtn);
+        eirFullscreenBtn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+        eirFullscreenBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            eirIsFullscreen = !eirIsFullscreen;
+            try { localStorage.setItem('activityPlanState.eir.fullscreen', String(eirIsFullscreen)); } catch (ignore) {}
+            applyEirFullscreen();
+        });
+        applyEirFullscreen();
+
+        renderRight();
+        renderOverview();
+        validate();
+        setTimeout(function() { nameInput.focus(); nameInput.select(); }, 50);
+    }
+
+    async function runEditItemReference() {
+        log('[EIR] Button clicked');
+        if (!eirIsItemGroupPage()) {
+            eirShowWrongPageWarning();
+            return;
+        }
+        var items = eirCollectItemReferences();
+        if (!items || items.length === 0) {
+            var empty = document.createElement('div');
+            empty.style.cssText = 'padding:20px;text-align:center;';
+            empty.textContent = 'No item references found on this page.';
+            createPopup({
+                title: EIR_FEATURE_NAME,
+                content: empty,
+                width: '360px',
+                height: 'auto'
+            });
+            return;
+        }
+        eirRenderEditItemReferencePanel(items);
+    }
+
+    //==========================
+    //==========================
     // RUN BARCODE FEATURE
     //==========================
     // This section contains all functions related to barcode lookup and data entry.
@@ -49402,6 +50642,24 @@
             editSE_start();
         });
 
+        var editItemRefBtn = document.createElement('button');
+        editItemRefBtn.textContent = 'Edit Item Reference';
+        editItemRefBtn.style.background = '#5b43c7';
+        editItemRefBtn.style.color = '#fff';
+        editItemRefBtn.style.border = 'none';
+        editItemRefBtn.style.borderRadius = scale(BUTTON_BORDER_RADIUS_PX);
+        editItemRefBtn.style.padding = scale(BUTTON_PADDING_PX);
+        editItemRefBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
+        editItemRefBtn.style.cursor = 'pointer';
+        editItemRefBtn.style.fontWeight = '500';
+        editItemRefBtn.style.transition = 'background 0.2s';
+        editItemRefBtn.onmouseenter = function() { this.style.background = '#4a37a0'; };
+        editItemRefBtn.onmouseleave = function() { this.style.background = '#5b43c7'; };
+        editItemRefBtn.addEventListener('click', async function() {
+            log('Edit Item Reference: button clicked');
+            await runEditItemReference();
+        });
+
         var pauseBtn = document.createElement("button");
         pauseBtn.textContent = isPaused() ? "Resume" : "Pause";
         pauseBtn.style.background = "#6c757d";
@@ -49595,7 +50853,7 @@
 
         // Apply glassmorphism theme to all panel buttons if glass theme is active
         if (glass) {
-            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, parseMethodBtn, searchMethodsBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, findFormAndEventsBtn, editStudyEventsBtn, pullLabBarcodeBtn, clearMappingBtn, collectAllBtn, svcBtn, downloadDtsBtn];
+            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, parseMethodBtn, searchMethodsBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, findFormAndEventsBtn, editStudyEventsBtn, editItemRefBtn, pullLabBarcodeBtn, clearMappingBtn, collectAllBtn, svcBtn, downloadDtsBtn];
             for (var gi = 0; gi < allPanelBtns.length; gi++) {
                 var gb = allPanelBtns[gi];
                 gb.className = "ie-btn-primary";
@@ -49637,6 +50895,7 @@
             "Item Method Forms": parseMethodBtn,
             "Find Form & Events": findFormAndEventsBtn,
             "Edit Study Events List": editStudyEventsBtn,
+            "Edit Item Reference": editItemRefBtn,
             "Set Visibility Condition" : svcBtn,
             "Download DTS Report": downloadDtsBtn,
             "Pause": pauseBtn,

@@ -170,6 +170,8 @@
     var EIR_PROGRESS_POPUP_REF = null;
     var EIR_CANCELLED = false;
     var EIR_ORIGIN_OPTIONS = ['Protocol', 'CRF'];
+    var EIR_INC_CODELIST_SEARCH = 'a_YES/NO, SF/N/A';
+    var EIR_EXC_CODELIST_SEARCH = 'IE_NO/YES, SF/NA';
 
     // Edit Forms Feature
     var EDIT_FORMS_LIST_URL = "https://cenexel.clinspark.com/secure/crfdesign/studylibrary/list/form";
@@ -45037,6 +45039,10 @@
             newPrompt: eirExtractLabeledValue(row, 'Prompt:'),
             originalSasFieldName: eirExtractLabeledValue(row, 'SAS Field Name:'),
             newSasFieldName: eirExtractLabeledValue(row, 'SAS Field Name:'),
+            originalCodeList: eirExtractLabeledValue(row, 'Code List:'),
+            newCodeList: eirExtractLabeledValue(row, 'Code List:'),
+            desiredCodeListSearch: '',
+            desiredCodeListPrefix: '',
             originalOrigin: eirExtractLabeledValue(row, 'Origin:'),
             newOrigin: eirExtractLabeledValue(row, 'Origin:')
         };
@@ -45064,13 +45070,346 @@
             name: item.newName !== item.originalName,
             prompt: item.newPrompt !== item.originalPrompt,
             sasFieldName: item.newSasFieldName !== item.originalSasFieldName,
+            codeList: !!item.desiredCodeListSearch && item.newCodeList !== item.originalCodeList,
             origin: item.newOrigin !== item.originalOrigin
         };
     }
 
     function eirIsItemChanged(item) {
         var changes = eirGetChangedFields(item);
-        return changes.name || changes.prompt || changes.sasFieldName || changes.origin;
+        return changes.name || changes.prompt || changes.sasFieldName || changes.codeList || changes.origin;
+    }
+
+    function eirExtractIePromptNumber(promptText) {
+        var text = String(promptText || '');
+        var match = text.match(/#\s*(\d+)\s*([A-Za-z]{0,2})(?=\b|[^A-Za-z0-9])/);
+        if (!match) return null;
+        var numberPart = match[1] || '';
+        var letterPart = match[2] || '';
+        if (!numberPart) return null;
+        var padded = numberPart.length < 3 ? ('000' + numberPart).slice(-3) : numberPart;
+        return padded + letterPart;
+    }
+
+    function eirReplaceIeCode(value, prefix, targetCode) {
+        var original = String(value == null ? '' : value);
+        if (!original) {
+            return { value: original, changed: false, reason: 'blank' };
+        }
+        var pattern = new RegExp('(^|[^A-Za-z0-9])(' + prefix + '[\\s_-]*0*\\d+[A-Za-z]*)(?=$|[^A-Za-z0-9])', 'i');
+        var match = original.match(pattern);
+        if (!match) {
+            return { value: original, changed: false, reason: 'missingCode' };
+        }
+        var matchedNormalized = String(match[2] || '').replace(/[\s_-]/g, '').toUpperCase();
+        if (matchedNormalized === String(targetCode || '').toUpperCase()) {
+            return { value: original, changed: false, reason: 'alreadyMatched' };
+        }
+        return {
+            value: original.replace(pattern, function(full, leading) {
+                return leading + targetCode;
+            }),
+            changed: true,
+            reason: 'changed'
+        };
+    }
+
+    function eirApplyIeRenamesToItems(items, groupType) {
+        var prefix = groupType === 'inclusion' ? 'INC' : 'EXC';
+        var stats = {
+            prefix: prefix,
+            rowsReviewed: items.length,
+            rowsChanged: 0,
+            fieldsChanged: 0,
+            alreadyMatched: 0,
+            missingPromptNumber: 0,
+            missingNameCode: 0,
+            missingSasCode: 0,
+            blankSas: 0,
+            targetCodeTooLong: 0
+        };
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var suffix = eirExtractIePromptNumber(item.newPrompt || item.originalPrompt || '');
+            if (!suffix) {
+                stats.missingPromptNumber++;
+                continue;
+            }
+            var targetCode = prefix + suffix;
+            if (targetCode.length > 8) {
+                stats.targetCodeTooLong++;
+                continue;
+            }
+            var rowChanged = false;
+            var rowAlreadyMatched = false;
+            var nameResult = eirReplaceIeCode(item.newName, prefix, targetCode);
+            if (nameResult.changed) {
+                item.newName = nameResult.value;
+                stats.fieldsChanged++;
+                rowChanged = true;
+            } else if (nameResult.reason === 'missingCode') {
+                stats.missingNameCode++;
+            } else if (nameResult.reason === 'alreadyMatched') {
+                rowAlreadyMatched = true;
+            }
+            var sasResult = eirReplaceIeCode(item.newSasFieldName, prefix, targetCode);
+            if (sasResult.changed) {
+                item.newSasFieldName = sasResult.value;
+                stats.fieldsChanged++;
+                rowChanged = true;
+            } else if (sasResult.reason === 'blank') {
+                stats.blankSas++;
+            } else if (sasResult.reason === 'missingCode') {
+                stats.missingSasCode++;
+            } else if (sasResult.reason === 'alreadyMatched') {
+                rowAlreadyMatched = true;
+            }
+            if (rowChanged) {
+                stats.rowsChanged++;
+            } else if (rowAlreadyMatched) {
+                stats.alreadyMatched++;
+            }
+        }
+        return stats;
+    }
+
+    function eirShowApplyIeRenameConfirm(onConfirm) {
+        var root = document.createElement('div');
+        root.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;';
+
+        var msg = document.createElement('div');
+        msg.textContent = 'Apply I/E renames to every item currently listed. This will stage Name and SAS Field Name changes based on the number after # in each Prompt. Review the staged changes before pressing Confirm.';
+        msg.style.cssText = 'line-height:1.4;color:#ddd;';
+        root.appendChild(msg);
+
+        var choiceLabel = document.createElement('div');
+        choiceLabel.textContent = 'Which item group is this?';
+        choiceLabel.style.cssText = 'font-weight:700;color:#fff;';
+        root.appendChild(choiceLabel);
+
+        var selectedType = '';
+        var choices = document.createElement('div');
+        choices.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+        root.appendChild(choices);
+
+        var confirmBtn = document.createElement('button');
+        function makeChoice(label, value) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = label;
+            btn.style.cssText = 'padding:8px 12px;border-radius:6px;border:1px solid #555;background:#262626;color:#fff;cursor:pointer;font-weight:600;';
+            btn.addEventListener('click', function() {
+                selectedType = value;
+                var all = choices.querySelectorAll('button');
+                for (var i = 0; i < all.length; i++) {
+                    all[i].style.background = '#262626';
+                    all[i].style.borderColor = '#555';
+                }
+                btn.style.background = '#1f6f34';
+                btn.style.borderColor = '#2ea043';
+                confirmBtn.disabled = false;
+                confirmBtn.style.opacity = '1';
+                confirmBtn.style.cursor = 'pointer';
+            });
+            choices.appendChild(btn);
+        }
+        makeChoice('Inclusion', 'inclusion');
+        makeChoice('Exclusion', 'exclusion');
+
+        var warning = document.createElement('div');
+        warning.textContent = 'Proceed only if this page is the matching Inclusion or Exclusion item group reference list.';
+        warning.style.cssText = 'padding:9px 10px;border-left:3px solid #f59e0b;background:#2a210f;color:#facc15;line-height:1.35;';
+        root.appendChild(warning);
+
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;';
+        confirmBtn.type = 'button';
+        confirmBtn.textContent = 'Apply Renames';
+        confirmBtn.disabled = true;
+        confirmBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #2ea043;background:#1f6f34;color:#fff;cursor:default;opacity:0.5;font-weight:700;';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        root.appendChild(actions);
+
+        var popup = createPopup({
+            title: 'Apply Renames for I/E',
+            content: root,
+            width: '520px',
+            height: 'auto',
+            maxHeight: '85%'
+        });
+        cancelBtn.addEventListener('click', function() { popup.close(); });
+        confirmBtn.addEventListener('click', function() {
+            if (!selectedType) return;
+            popup.close();
+            onConfirm(selectedType);
+        });
+    }
+
+    function eirNormalizeOptionText(value) {
+        return String(value == null ? '' : value).toLowerCase().replace(/&nbsp;/g, ' ').replace(/\s+/g, '');
+    }
+
+    function eirCodeListTextMatches(text, search) {
+        var hay = eirNormalizeOptionText(text);
+        var needle = eirNormalizeOptionText(search);
+        if (!hay || !needle) return false;
+        if (hay.indexOf(needle) !== -1) return true;
+        var relaxedHay = hay.replace(/n\/a/g, 'na');
+        var relaxedNeedle = needle.replace(/n\/a/g, 'na');
+        return relaxedHay.indexOf(relaxedNeedle) !== -1;
+    }
+
+    function eirDetectIePrefix(item) {
+        var sources = [
+            item.newName,
+            item.originalName,
+            item.newSasFieldName,
+            item.originalSasFieldName,
+            item.newPrompt,
+            item.originalPrompt
+        ];
+        var found = {};
+        for (var i = 0; i < sources.length; i++) {
+            var text = String(sources[i] || '');
+            var matches = text.match(/\b(INC|EXC)(?=\s*#|[\s_-]*0*\d+)/ig);
+            if (!matches) continue;
+            for (var m = 0; m < matches.length; m++) {
+                found[String(matches[m]).toUpperCase()] = true;
+            }
+        }
+        var hasInc = !!found.INC;
+        var hasExc = !!found.EXC;
+        if (hasInc && hasExc) return 'AMBIGUOUS';
+        if (hasInc) return 'INC';
+        if (hasExc) return 'EXC';
+        return '';
+    }
+
+    function eirGetCodeListSearchForPrefix(prefix) {
+        if (prefix === 'INC') return EIR_INC_CODELIST_SEARCH;
+        if (prefix === 'EXC') return EIR_EXC_CODELIST_SEARCH;
+        return '';
+    }
+
+    function eirApplyCodeListTargets(items) {
+        var stats = {
+            rowsReviewed: items.length,
+            staged: 0,
+            alreadyMatched: 0,
+            noIeCode: 0,
+            ambiguous: 0
+        };
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var prefix = eirDetectIePrefix(item);
+            if (prefix === 'AMBIGUOUS') {
+                stats.ambiguous++;
+                continue;
+            }
+            if (!prefix) {
+                stats.noIeCode++;
+                continue;
+            }
+            var search = eirGetCodeListSearchForPrefix(prefix);
+            if (!search) {
+                stats.noIeCode++;
+                continue;
+            }
+            if (item.originalCodeList && eirCodeListTextMatches(item.originalCodeList, search)) {
+                item.desiredCodeListSearch = '';
+                item.desiredCodeListPrefix = '';
+                item.newCodeList = item.originalCodeList;
+                stats.alreadyMatched++;
+                continue;
+            }
+            item.desiredCodeListSearch = search;
+            item.desiredCodeListPrefix = prefix;
+            item.newCodeList = search;
+            stats.staged++;
+        }
+        return stats;
+    }
+
+    function eirShowUpdateCodeListConfirm(onConfirm) {
+        var root = document.createElement('div');
+        root.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;';
+        var msg = document.createElement('div');
+        msg.textContent = 'This will stage Code List updates for every INC/EXC item currently listed. You must be on either the Inclusion or Exclusion item group item reference page. Any already-staged Name, Prompt, SAS Field Name, or Origin changes will be saved together when you press Confirm.';
+        msg.style.cssText = 'line-height:1.4;color:#ddd;';
+        root.appendChild(msg);
+        var warning = document.createElement('div');
+        warning.textContent = 'After this step, review the staged changes in the overview. Nothing is posted to ClinSpark until you press the main Confirm button.';
+        warning.style.cssText = 'padding:9px 10px;border-left:3px solid #f59e0b;background:#2a210f;color:#facc15;line-height:1.35;';
+        root.appendChild(warning);
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;';
+        var confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.textContent = 'Update Codelist';
+        confirmBtn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid #0ea5e9;background:#075985;color:#fff;cursor:pointer;font-weight:700;';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        root.appendChild(actions);
+        var popup = createPopup({
+            title: 'Update Codelist',
+            content: root,
+            width: '540px',
+            height: 'auto',
+            maxHeight: '85%'
+        });
+        cancelBtn.addEventListener('click', function() { popup.close(); });
+        confirmBtn.addEventListener('click', function() {
+            popup.close();
+            onConfirm();
+        });
+    }
+
+    function eirFindCodeListSelect(form) {
+        return form.querySelector('select#codeList, select[name="codeList"], select[name="codeList.id"], select[id*="codeList"], select[name*="codeList"]');
+    }
+
+    function eirResolveCodeListOption(form, searchText) {
+        var sel = eirFindCodeListSelect(form);
+        if (!sel) throw new Error('Code List dropdown was not found on the edit page.');
+        var opts = sel.querySelectorAll('option');
+        var selectedOpt = null;
+        for (var i = 0; i < opts.length; i++) {
+            if (opts[i].selected || opts[i].hasAttribute('selected')) {
+                selectedOpt = opts[i];
+                break;
+            }
+        }
+        if (selectedOpt && eirCodeListTextMatches(selectedOpt.textContent || '', searchText)) {
+            return {
+                name: sel.getAttribute('name') || '',
+                value: selectedOpt.value || selectedOpt.getAttribute('value') || '',
+                text: eirCollapseWhitespace(selectedOpt.textContent || ''),
+                alreadyMatched: true
+            };
+        }
+        for (var oi = 0; oi < opts.length; oi++) {
+            var opt = opts[oi];
+            var value = opt.value || opt.getAttribute('value') || '';
+            if (!value || opt.disabled) continue;
+            if (eirCodeListTextMatches(opt.textContent || '', searchText)) {
+                return {
+                    name: sel.getAttribute('name') || '',
+                    value: value,
+                    text: eirCollapseWhitespace(opt.textContent || ''),
+                    alreadyMatched: false
+                };
+            }
+        }
+        throw new Error('No Code List option matched "' + searchText + '".');
     }
 
     function eirEscapeHtml(str) {
@@ -45080,6 +45419,12 @@
     }
 
     function eirBuildUpdateFormData(form, item) {
+        var codeListSelection = null;
+        if (item.desiredCodeListSearch) {
+            codeListSelection = eirResolveCodeListOption(form, item.desiredCodeListSearch);
+            item.newCodeList = codeListSelection.text || item.desiredCodeListSearch;
+            log('[EIR] Code List resolved for ' + item.originalName + ': ' + item.newCodeList + (codeListSelection.alreadyMatched ? ' (already matched)' : ''));
+        }
         var changedById = {
             'name': item.newName,
             'question': item.newPrompt,
@@ -45104,6 +45449,8 @@
             var value = '';
             if (changedById.hasOwnProperty(id) || changedByName.hasOwnProperty(name)) {
                 value = changedById.hasOwnProperty(id) ? changedById[id] : changedByName[name];
+            } else if (codeListSelection && (id === 'codeList' || name === 'codeList' || name === 'codeList.id' || id.toLowerCase().indexOf('codelist') !== -1 || name.toLowerCase().indexOf('codelist') !== -1)) {
+                value = codeListSelection.value;
             } else if (tag === 'select') {
                 var selectedOpt = inp.querySelector('option[selected]');
                 value = selectedOpt ? (selectedOpt.value || selectedOpt.getAttribute('value') || '') : '';
@@ -45425,12 +45772,21 @@
         var nameField = makeField('eirItemName', 'Name', 'text');
         var promptField = makeField('eirItemPrompt', 'Prompt', 'textarea');
         var sasField = makeField('eirItemSas', 'SAS Field Name', 'sas');
+        var codeListField = makeField('eirItemCodeList', 'Code List', 'text');
         var originField = makeField('eirItemOrigin', 'Origin', 'select', EIR_ORIGIN_OPTIONS);
 
         var nameInput = nameField.input;
         var promptInput = promptField.input;
         var sasInput = sasField.input;
+        var codeListInput = codeListField.input;
         var originSelect = originField.input;
+        codeListInput.readOnly = true;
+        codeListInput.title = 'Use Update Codelist to stage this field.';
+        codeListInput.style.setProperty('background', '#1f2937', 'important');
+        codeListInput.style.setProperty('background-color', '#1f2937', 'important');
+        codeListInput.style.setProperty('color', '#f9fafb', 'important');
+        codeListInput.style.setProperty('-webkit-text-fill-color', '#f9fafb', 'important');
+        codeListInput.style.setProperty('border-color', '#4b5563', 'important');
 
         var bottomBar = document.createElement('div');
         bottomBar.style.cssText = 'display:flex;justify-content:flex-end;align-items:center;gap:12px;padding-top:10px;border-top:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';margin-top:8px;';
@@ -45442,7 +45798,17 @@
         confirmBtn.textContent = 'Confirm';
         confirmBtn.style.cssText = 'padding:8px 22px;border-radius:8px;border:none;background:#5b43c7;color:#fff;cursor:pointer;font-weight:700;font-size:14px;';
 
+        var updateCodeListBtn = document.createElement('button');
+        updateCodeListBtn.textContent = 'Update Codelist';
+        updateCodeListBtn.style.cssText = 'padding:8px 14px;border-radius:8px;border:1px solid #0ea5e9;background:#075985;color:#fff;cursor:pointer;font-weight:700;font-size:13px;';
+
+        var applyIeBtn = document.createElement('button');
+        applyIeBtn.textContent = 'Apply Renames for I/E';
+        applyIeBtn.style.cssText = 'padding:8px 14px;border-radius:8px;border:1px solid #2ea043;background:#1f6f34;color:#fff;cursor:pointer;font-weight:700;font-size:13px;';
+
         bottomBar.appendChild(errorMsg);
+        bottomBar.appendChild(updateCodeListBtn);
+        bottomBar.appendChild(applyIeBtn);
         bottomBar.appendChild(confirmBtn);
 
         topRow.appendChild(overviewPanel);
@@ -45461,6 +45827,7 @@
             setOrig(nameField, changes.name, item.originalName, 'Name');
             setOrig(promptField, changes.prompt, item.originalPrompt, 'Prompt');
             setOrig(sasField, changes.sasFieldName, item.originalSasFieldName, 'SAS Field Name');
+            setOrig(codeListField, changes.codeList, item.originalCodeList, 'Code List');
             setOrig(originField, changes.origin, item.originalOrigin, 'Origin');
         }
 
@@ -45473,8 +45840,8 @@
             if (items.length === 0) return;
 
             var headerRow = document.createElement('div');
-            headerRow.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.5fr) minmax(70px,0.9fr) minmax(70px,0.9fr);gap:8px;padding:6px 10px;font-size:11px;font-weight:600;color:' + (glass ? 'rgba(255,255,255,0.65)' : '#999') + ';border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';position:sticky;top:0;background:' + (glass ? 'rgba(15,10,40,0.85)' : '#1a1a1a') + ';z-index:1;';
-            var colHeaders = ['Name', 'Prompt', 'SAS', 'Origin'];
+            headerRow.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.2fr) minmax(70px,0.8fr) minmax(100px,1.2fr) minmax(70px,0.8fr);gap:8px;padding:6px 10px;font-size:11px;font-weight:600;color:' + (glass ? 'rgba(255,255,255,0.65)' : '#999') + ';border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.15)' : '#333') + ';position:sticky;top:0;background:' + (glass ? 'rgba(15,10,40,0.85)' : '#1a1a1a') + ';z-index:1;';
+            var colHeaders = ['Name', 'Prompt', 'SAS', 'Code List', 'Origin'];
             for (var chi = 0; chi < colHeaders.length; chi++) {
                 var hCell = document.createElement('div');
                 hCell.textContent = colHeaders[chi];
@@ -45486,10 +45853,10 @@
                 (function(idx) {
                     var item = items[idx];
                     var changes = eirGetChangedFields(item);
-                    var changed = changes.name || changes.prompt || changes.sasFieldName || changes.origin;
+                    var changed = changes.name || changes.prompt || changes.sasFieldName || changes.codeList || changes.origin;
                     var row = document.createElement('div');
                     row.setAttribute('data-eir-overview-idx', idx);
-                    row.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.5fr) minmax(70px,0.9fr) minmax(70px,0.9fr);gap:8px;padding:6px 10px;font-size:12px;border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.08)' : '#333') + ';cursor:pointer;transition:background 0.15s;align-items:start;';
+                    row.style.cssText = 'display:grid;grid-template-columns:minmax(80px,1fr) minmax(130px,2.2fr) minmax(70px,0.8fr) minmax(100px,1.2fr) minmax(70px,0.8fr);gap:8px;padding:6px 10px;font-size:12px;border-bottom:1px solid ' + (glass ? 'rgba(255,255,255,0.08)' : '#333') + ';cursor:pointer;transition:background 0.15s;align-items:start;';
                     if (idx === selectedIdx) {
                         row.style.background = glass ? 'rgba(167,139,250,0.22)' : 'rgba(91,67,199,0.25)';
                     } else {
@@ -45532,6 +45899,7 @@
                     addCell(item.originalName, item.newName, changes.name);
                     addCell(item.originalPrompt, item.newPrompt, changes.prompt);
                     addCell(item.originalSasFieldName, item.newSasFieldName, changes.sasFieldName);
+                    addCell(item.originalCodeList, item.newCodeList, changes.codeList);
                     addCell(item.originalOrigin, item.newOrigin, changes.origin);
 
                     row.addEventListener('mouseenter', function() {
@@ -45558,10 +45926,12 @@
                 nameInput.value = '';
                 promptInput.value = '';
                 sasInput.value = '';
+                codeListInput.value = '';
                 originSelect.innerHTML = '';
                 nameInput.disabled = true;
                 promptInput.disabled = true;
                 sasInput.disabled = true;
+                codeListInput.disabled = true;
                 originSelect.disabled = true;
                 return;
             }
@@ -45569,10 +45939,12 @@
             nameInput.disabled = false;
             promptInput.disabled = false;
             sasInput.disabled = false;
+            codeListInput.disabled = false;
             originSelect.disabled = false;
             nameInput.value = item.newName;
             promptInput.value = item.newPrompt;
             sasInput.value = item.newSasFieldName;
+            codeListInput.value = item.newCodeList || '';
 
             originSelect.innerHTML = '';
             if (!item.newOrigin) {
@@ -45649,6 +46021,38 @@
         promptInput.addEventListener('input', saveCurrentItem);
         sasInput.addEventListener('input', saveCurrentItem);
         originSelect.addEventListener('change', saveCurrentItem);
+
+        updateCodeListBtn.addEventListener('click', function() {
+            if (locked) return;
+            eirShowUpdateCodeListConfirm(function() {
+                var stats = eirApplyCodeListTargets(items);
+                renderRight();
+                renderOverview();
+                validate();
+                errorMsg.style.color = stats.staged > 0 ? '#10b981' : '#f59e0b';
+                errorMsg.textContent = 'Code List staged: ' + stats.staged + ' row(s). ' +
+                    stats.alreadyMatched + ' already matched; ' + stats.noIeCode + ' missing INC/EXC; ' +
+                    stats.ambiguous + ' ambiguous.';
+                log('[EIR] Update Codelist staged rows=' + stats.staged + ', alreadyMatched=' + stats.alreadyMatched + ', missing=' + stats.noIeCode + ', ambiguous=' + stats.ambiguous);
+            });
+        });
+
+        applyIeBtn.addEventListener('click', function() {
+            if (locked) return;
+            eirShowApplyIeRenameConfirm(function(groupType) {
+                var stats = eirApplyIeRenamesToItems(items, groupType);
+                renderRight();
+                renderOverview();
+                validate();
+                errorMsg.style.color = stats.fieldsChanged > 0 ? '#10b981' : '#f59e0b';
+                errorMsg.textContent = 'I/E rename staged: ' + stats.rowsChanged + ' row(s), ' + stats.fieldsChanged + ' field(s). ' +
+                    stats.alreadyMatched + ' already matched; ' + stats.missingPromptNumber + ' missing prompt #; ' +
+                    stats.missingNameCode + ' missing ' + stats.prefix + ' in Name; ' + stats.missingSasCode + ' missing ' + stats.prefix + ' in SAS' +
+                    (stats.blankSas ? '; ' + stats.blankSas + ' blank SAS' : '') +
+                    (stats.targetCodeTooLong ? '; ' + stats.targetCodeTooLong + ' code(s) too long for SAS' : '') + '.';
+                log('[EIR] Apply Renames for I/E staged rows=' + stats.rowsChanged + ', fields=' + stats.fieldsChanged + ', prefix=' + stats.prefix);
+            });
+        });
 
         root.addEventListener('keydown', function(e) {
             var key = e.key || e.code || '';
