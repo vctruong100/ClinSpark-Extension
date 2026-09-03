@@ -17912,6 +17912,7 @@
     var BPL_PENDING_ARCHIVE_CLEANUP = null;
     var STORAGE_BPL_HIDE_EXISTING = "activityPlanState.bpl.hideExisting";
     var STORAGE_BPL_SHOW_UPDATED_ONLY = "activityPlanState.bpl.showUpdatedOnly";
+    var STORAGE_BPL_WINDOW_DEFAULTS = "activityPlanState.bpl.windowDefaults";
 
     function clearBPLStorage() {
         try {
@@ -19784,6 +19785,59 @@
             };
         }
 
+        function bplLoadWindowDefaults() {
+            try {
+                var raw = localStorage.getItem(STORAGE_BPL_WINDOW_DEFAULTS);
+                if (!raw) return { hasSaved: false, preWindow: "", postWindow: "" };
+                var parsed = JSON.parse(raw);
+                if (!parsed || parsed.hasSaved !== true) return { hasSaved: false, preWindow: "", postWindow: "" };
+                return {
+                    hasSaved: true,
+                    preWindow: parsed.preWindow == null ? "" : String(parsed.preWindow),
+                    postWindow: parsed.postWindow == null ? "" : String(parsed.postWindow)
+                };
+            } catch (e) {
+                log("BPL: failed to load saved window defaults - " + String(e));
+                return { hasSaved: false, preWindow: "", postWindow: "" };
+            }
+        }
+
+        var bplWindowDefaults = bplLoadWindowDefaults();
+
+        function bplSaveWindowDefaults(preWindow, postWindow) {
+            bplWindowDefaults = {
+                hasSaved: true,
+                preWindow: preWindow == null ? "" : String(preWindow),
+                postWindow: postWindow == null ? "" : String(postWindow)
+            };
+            try {
+                localStorage.setItem(STORAGE_BPL_WINDOW_DEFAULTS, JSON.stringify(bplWindowDefaults));
+            } catch (e) {
+                log("BPL: failed to persist saved window defaults - " + String(e));
+            }
+            log("BPL: saved window defaults pre='" + bplWindowDefaults.preWindow + "', post='" + bplWindowDefaults.postWindow + "'");
+            return bplWindowDefaults;
+        }
+
+        function bplFormatSavedWindowValue(value) {
+            var text = value == null ? "" : String(value);
+            return text === "" ? "(blank)" : text;
+        }
+
+        function bplBuildSavedWindowStatus() {
+            if (!bplWindowDefaults || !bplWindowDefaults.hasSaved) {
+                return "No saved window default";
+            }
+            return "Saved: Pre " + bplFormatSavedWindowValue(bplWindowDefaults.preWindow) + " | Post " + bplFormatSavedWindowValue(bplWindowDefaults.postWindow);
+        }
+
+        function applyBPLWindowDefaultsToNewForm(formData) {
+            if (!formData || !bplWindowDefaults || !bplWindowDefaults.hasSaved) return formData;
+            formData.preWindow = bplWindowDefaults.preWindow;
+            formData.postWindow = bplWindowDefaults.postWindow;
+            return formData;
+        }
+
         function showCopyToast(message, event) {
             var tooltip = document.createElement("div");
             tooltip.textContent = message || "Copied!";
@@ -20388,6 +20442,26 @@
             timeBody.appendChild(createBPLCheckbox("Hidden?", "bplHidden", data.hidden));
             timeBody.appendChild(createBPLCheckbox("Mandatory", "bplMandatory", data.mandatory));
             timeBody.appendChild(createBPLCheckbox("Enforce Data Collection Order", "bplEnforce", data.enforce));
+            var saveWindowsRow = document.createElement("div");
+            saveWindowsRow.style.cssText = "margin-top:8px;margin-bottom:8px;padding-top:8px;border-top:1px solid #333;";
+            var saveWindowsBtn = document.createElement("button");
+            saveWindowsBtn.type = "button";
+            saveWindowsBtn.textContent = "Save Windows";
+            saveWindowsBtn.style.cssText = "width:100%;padding:6px 10px;border-radius:4px;border:1px solid #2ea043;background:#1f6f34;color:#fff;font-size:12px;font-weight:600;cursor:pointer;";
+            var saveWindowsStatus = document.createElement("div");
+            saveWindowsStatus.id = "bplSavedWindowsStatus";
+            saveWindowsStatus.textContent = bplBuildSavedWindowStatus();
+            saveWindowsStatus.style.cssText = "margin-top:4px;color:#aaa;font-size:10px;line-height:1.3;overflow-wrap:anywhere;";
+            saveWindowsBtn.addEventListener("click", function() {
+                var preWindowInput = document.getElementById("bplPreWindow");
+                var postWindowInput = document.getElementById("bplPostWindow");
+                bplSaveWindowDefaults(preWindowInput ? preWindowInput.value.trim() : "", postWindowInput ? postWindowInput.value.trim() : "");
+                saveWindowsStatus.textContent = bplBuildSavedWindowStatus();
+                showCopyToast("Saved Pre/Post Window defaults", null);
+            });
+            saveWindowsRow.appendChild(saveWindowsBtn);
+            saveWindowsRow.appendChild(saveWindowsStatus);
+            timeBody.appendChild(saveWindowsRow);
             timeBody.appendChild(createBPLTextInput("Pre-Window", "bplPreWindow"));
             timeBody.appendChild(createBPLTextInput("Post-Window", "bplPostWindow"));
             timeBody.appendChild(createBPLCheckbox("Reference Activity", "bplRefActivity", data.refActivity));
@@ -21216,6 +21290,7 @@
                             segmentFormMap[segVal] = existingForms;
                             var newKey = getFormDataKey(segVal, fData.value, newIndex);
                             var newFormData = getDefaultFormData();
+                            applyBPLWindowDefaultsToNewForm(newFormData);
                             var segRef = getSegmentRefDateTime(segVal);
                             newFormData.segmentRefDateTime = segRef;
                             newFormData.exampleTime = bplComputeExampleTime(segRef, "0:00:00", false);

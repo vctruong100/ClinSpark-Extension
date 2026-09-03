@@ -6811,6 +6811,7 @@
     var BPL_PENDING_ARCHIVE_CLEANUP = null;
     var STORAGE_BPL_HIDE_EXISTING = "activityPlanState.bpl.hideExisting";
     var STORAGE_BPL_SHOW_UPDATED_ONLY = "activityPlanState.bpl.showUpdatedOnly";
+    var STORAGE_BPL_WINDOW_DEFAULTS = "activityPlanState.bpl.windowDefaults";
 
     function clearBPLStorage() {
         try {
@@ -8603,6 +8604,59 @@
             };
         }
 
+        function bplLoadWindowDefaults() {
+            try {
+                var raw = localStorage.getItem(STORAGE_BPL_WINDOW_DEFAULTS);
+                if (!raw) return { hasSaved: false, preWindow: "", postWindow: "" };
+                var parsed = JSON.parse(raw);
+                if (!parsed || parsed.hasSaved !== true) return { hasSaved: false, preWindow: "", postWindow: "" };
+                return {
+                    hasSaved: true,
+                    preWindow: parsed.preWindow == null ? "" : String(parsed.preWindow),
+                    postWindow: parsed.postWindow == null ? "" : String(parsed.postWindow)
+                };
+            } catch (e) {
+                log("BPL: failed to load saved window defaults - " + String(e));
+                return { hasSaved: false, preWindow: "", postWindow: "" };
+            }
+        }
+
+        var bplWindowDefaults = bplLoadWindowDefaults();
+
+        function bplSaveWindowDefaults(preWindow, postWindow) {
+            bplWindowDefaults = {
+                hasSaved: true,
+                preWindow: preWindow == null ? "" : String(preWindow),
+                postWindow: postWindow == null ? "" : String(postWindow)
+            };
+            try {
+                localStorage.setItem(STORAGE_BPL_WINDOW_DEFAULTS, JSON.stringify(bplWindowDefaults));
+            } catch (e) {
+                log("BPL: failed to persist saved window defaults - " + String(e));
+            }
+            log("BPL: saved window defaults pre='" + bplWindowDefaults.preWindow + "', post='" + bplWindowDefaults.postWindow + "'");
+            return bplWindowDefaults;
+        }
+
+        function bplFormatSavedWindowValue(value) {
+            var text = value == null ? "" : String(value);
+            return text === "" ? "(blank)" : text;
+        }
+
+        function bplBuildSavedWindowStatus() {
+            if (!bplWindowDefaults || !bplWindowDefaults.hasSaved) {
+                return "No saved window default";
+            }
+            return "Saved: Pre " + bplFormatSavedWindowValue(bplWindowDefaults.preWindow) + " | Post " + bplFormatSavedWindowValue(bplWindowDefaults.postWindow);
+        }
+
+        function applyBPLWindowDefaultsToNewForm(formData) {
+            if (!formData || !bplWindowDefaults || !bplWindowDefaults.hasSaved) return formData;
+            formData.preWindow = bplWindowDefaults.preWindow;
+            formData.postWindow = bplWindowDefaults.postWindow;
+            return formData;
+        }
+
         function showCopyToast(message, event) {
             var tooltip = document.createElement("div");
             tooltip.textContent = message || "Copied!";
@@ -9335,6 +9389,26 @@
             timeBody.appendChild(createBPLCheckbox("Hidden?", "bplHidden", data.hidden));
             timeBody.appendChild(createBPLCheckbox("Mandatory", "bplMandatory", data.mandatory));
             timeBody.appendChild(createBPLCheckbox("Enforce Data Collection Order", "bplEnforce", data.enforce));
+            var saveWindowsRow = document.createElement("div");
+            saveWindowsRow.style.cssText = "margin-top:8px;margin-bottom:8px;padding-top:8px;border-top:1px solid #333;";
+            var saveWindowsBtn = document.createElement("button");
+            saveWindowsBtn.type = "button";
+            saveWindowsBtn.textContent = "Save Windows";
+            saveWindowsBtn.style.cssText = "width:100%;padding:6px 10px;border-radius:4px;border:1px solid #2ea043;background:#1f6f34;color:#fff;font-size:12px;font-weight:600;cursor:pointer;";
+            var saveWindowsStatus = document.createElement("div");
+            saveWindowsStatus.id = "bplSavedWindowsStatus";
+            saveWindowsStatus.textContent = bplBuildSavedWindowStatus();
+            saveWindowsStatus.style.cssText = "margin-top:4px;color:#aaa;font-size:10px;line-height:1.3;overflow-wrap:anywhere;";
+            saveWindowsBtn.addEventListener("click", function() {
+                var preWindowInput = document.getElementById("bplPreWindow");
+                var postWindowInput = document.getElementById("bplPostWindow");
+                bplSaveWindowDefaults(preWindowInput ? preWindowInput.value.trim() : "", postWindowInput ? postWindowInput.value.trim() : "");
+                saveWindowsStatus.textContent = bplBuildSavedWindowStatus();
+                showCopyToast("Saved Pre/Post Window defaults", null);
+            });
+            saveWindowsRow.appendChild(saveWindowsBtn);
+            saveWindowsRow.appendChild(saveWindowsStatus);
+            timeBody.appendChild(saveWindowsRow);
             timeBody.appendChild(createBPLTextInput("Pre-Window", "bplPreWindow"));
             timeBody.appendChild(createBPLTextInput("Post-Window", "bplPostWindow"));
             timeBody.appendChild(createBPLCheckbox("Reference Activity", "bplRefActivity", data.refActivity));
@@ -10163,6 +10237,7 @@
                             segmentFormMap[segVal] = existingForms;
                             var newKey = getFormDataKey(segVal, fData.value, newIndex);
                             var newFormData = getDefaultFormData();
+                            applyBPLWindowDefaultsToNewForm(newFormData);
                             var segRef = getSegmentRefDateTime(segVal);
                             newFormData.segmentRefDateTime = segRef;
                             newFormData.exampleTime = bplComputeExampleTime(segRef, "0:00:00", false);
@@ -26447,6 +26522,10 @@
     var FP_LIST_URL = "https://cenexel.clinspark.com/secure/crfdesign/studylibrary/list/form";
     var FP_LIST_URL_TEST = "https://cenexeltest.clinspark.com/secure/crfdesign/studylibrary/list/form";
     var FP_CANCELLED = false;
+    var FP_DOCUMENT_CACHE = null;
+    var FP_FORM_CONCURRENCY = 2;
+    var FP_GROUP_CONCURRENCY = 4;
+    var FP_ITEM_CONCURRENCY = 6;
 
     function fpLog(msg) {
         log("[FormPreview] " + msg);
@@ -26485,6 +26564,72 @@
         return /^yes\b/i.test(fpCleanText(value));
     }
 
+    function fpMakeCancelError() {
+        var err = new Error("Form Preview cancelled");
+        err.cancelled = true;
+        return err;
+    }
+
+    function fpIsCancelError(err) {
+        return !!(err && (err.cancelled || String(err.message || err).indexOf("Form Preview cancelled") !== -1));
+    }
+
+    function fpThrowIfCancelled() {
+        if (FP_CANCELLED) throw fpMakeCancelError();
+    }
+
+    async function fpMapLimit(items, limit, worker) {
+        var source = Array.prototype.slice.call(items || []);
+        var max = Math.max(1, Math.min(limit || 1, source.length || 1));
+        var results = new Array(source.length);
+        var nextIndex = 0;
+        var active = 0;
+        var resolved = false;
+        return new Promise(function(resolve, reject) {
+            function launch() {
+                if (resolved) return;
+                if (FP_CANCELLED) {
+                    resolved = true;
+                    reject(fpMakeCancelError());
+                    return;
+                }
+                if (nextIndex >= source.length && active === 0) {
+                    resolved = true;
+                    resolve(results);
+                    return;
+                }
+                while (active < max && nextIndex < source.length) {
+                    (function(idx) {
+                        active++;
+                        nextIndex++;
+                        Promise.resolve()
+                            .then(function() {
+                                fpThrowIfCancelled();
+                                return worker(source[idx], idx);
+                            })
+                            .then(function(result) {
+                                results[idx] = result;
+                                active--;
+                                launch();
+                            })
+                            .catch(function(err) {
+                                active--;
+                                if (resolved) return;
+                                if (fpIsCancelError(err)) {
+                                    resolved = true;
+                                    reject(err);
+                                } else {
+                                    resolved = true;
+                                    reject(err);
+                                }
+                            });
+                    })(nextIndex);
+                }
+            }
+            launch();
+        });
+    }
+
     function fpCollectFormsFromTable() {
         var rows = document.querySelectorAll("#listTable tbody tr, tbody tr");
         var forms = [];
@@ -26516,10 +26661,25 @@
     }
 
     async function fpFetchDocument(url) {
-        var resp = await fetch(url, { credentials: "same-origin" });
-        if (!resp.ok) throw new Error("Failed to load " + url + " (" + resp.status + ")");
-        var html = await resp.text();
-        return new DOMParser().parseFromString(html, "text/html");
+        fpThrowIfCancelled();
+        var key = fpAbsoluteUrl(url || "");
+        if (!FP_DOCUMENT_CACHE) FP_DOCUMENT_CACHE = {};
+        if (!FP_DOCUMENT_CACHE[key]) {
+            FP_DOCUMENT_CACHE[key] = (async function() {
+                var resp = await fetch(key, { credentials: "same-origin" });
+                fpThrowIfCancelled();
+                if (!resp.ok) throw new Error("Failed to load " + key + " (" + resp.status + ")");
+                var html = await resp.text();
+                fpThrowIfCancelled();
+                return new DOMParser().parseFromString(html, "text/html");
+            })();
+        }
+        try {
+            return await FP_DOCUMENT_CACHE[key];
+        } catch (err) {
+            delete FP_DOCUMENT_CACHE[key];
+            throw err;
+        }
     }
 
     function fpParseVisibilityCondition(doc) {
@@ -26562,6 +26722,7 @@
         try {
             return fpParseVisibilityCondition(await fpFetchDocument(visibilityUrl));
         } catch (err) {
+            if (fpIsCancelError(err)) throw err;
             return { item: "", itemValue: "", message: "Visibility condition could not be loaded: " + String(err && err.message ? err.message : err) };
         }
     }
@@ -26672,6 +26833,7 @@
                 });
             }
         } catch (err) {
+            if (fpIsCancelError(err)) throw err;
             codelist.message = "Codelist values could not be loaded: " + String(err && err.message ? err.message : err);
         }
         return codelist;
@@ -26705,6 +26867,7 @@
             item.codelist = fpFindPropertyLink(doc, "Code List", "/codelist/") || fpFindPropertyLink(doc, "Codelist", "/codelist/") || fpExtractFirstCodelistLink(doc);
             if (item.codelist) await fpCollectCodelistValues(item.codelist);
         } catch (err) {
+            if (fpIsCancelError(err)) throw err;
             item.message = "Item details could not be loaded: " + String(err && err.message ? err.message : err);
             item.dataType = fallbackDataType || item.dataType || "";
         }
@@ -26721,6 +26884,7 @@
         itemGroup.domain = fpFindProperty(doc, "Domain");
         itemGroup.items = [];
         var rows = doc.querySelectorAll("tr[id^='ir_']");
+        var items = [];
         for (var i = 0; i < rows.length; i++) {
             var row = rows[i];
             var cells = row.cells || [];
@@ -26746,12 +26910,15 @@
                 visibilityCondition: null,
                 codelist: null
             };
+            items.push(item);
+        }
+        itemGroup.items = await fpMapLimit(items, FP_ITEM_CONCURRENCY, async function(item) {
             await fpCollectItemDetails(item, item.dataType);
             if (fpIsYes(item.hidden) && item.visibilityUrl) {
                 item.visibilityCondition = await fpCollectVisibilityCondition(item.visibilityUrl);
             }
-            itemGroup.items.push(item);
-        }
+            return item;
+        });
         return itemGroup;
     }
 
@@ -26771,6 +26938,7 @@
             if (titleText) preview.pageTitle = titleText;
         }
         var rows = doc.querySelectorAll("tr[id^='igr_']");
+        var groups = [];
         for (var i = 0; i < rows.length; i++) {
             var row = rows[i];
             var cells = row.cells || [];
@@ -26789,17 +26957,24 @@
                 helpText: "",
                 items: []
             };
-            if (progressCb) progressCb("Loading item group " + (i + 1) + " of " + rows.length + ": " + group.name);
+            groups.push(group);
+        }
+        var completedGroups = 0;
+        if (progressCb) progressCb("Loading " + groups.length + " item groups...");
+        preview.itemGroups = await fpMapLimit(groups, FP_GROUP_CONCURRENCY, async function(group, idx) {
             try {
                 await fpCollectItemGroup(group);
                 if (fpIsYes(group.hidden) && group.visibilityUrl) {
                     group.visibilityCondition = await fpCollectVisibilityCondition(group.visibilityUrl);
                 }
             } catch (err) {
+                if (fpIsCancelError(err)) throw err;
                 group.message = "Item group could not be loaded: " + String(err && err.message ? err.message : err);
             }
-            preview.itemGroups.push(group);
-        }
+            completedGroups++;
+            if (progressCb) progressCb("Loaded item group " + completedGroups + " of " + groups.length + ": " + group.name);
+            return group;
+        });
         return preview;
     }
 
@@ -27304,6 +27479,7 @@
 
     async function fpCollectSelectedAndPreview(selectedForms) {
         FP_CANCELLED = false;
+        FP_DOCUMENT_CACHE = {};
         var box = document.createElement("div");
         box.style.cssText = "padding:22px;text-align:center;min-width:420px;";
         var title = document.createElement("div");
@@ -27321,23 +27497,37 @@
         box.appendChild(cancel);
         var pop = createPopup({ title: "Form Preview", content: box, width: "480px", height: "auto" });
         cancel.onclick = function() { FP_CANCELLED = true; if (pop && pop.close) pop.close(); };
+        var completedForms = 0;
+        status.textContent = "Collecting " + selectedForms.length + " form" + (selectedForms.length === 1 ? "" : "s") + "...";
+        progress.textContent = "Opening form pages...";
         var previews = [];
-        for (var i = 0; i < selectedForms.length; i++) {
-            if (FP_CANCELLED) return;
-            var form = selectedForms[i];
-            status.textContent = "Form " + (i + 1) + " of " + selectedForms.length + ": " + form.name;
-            progress.textContent = "Opening form page...";
-            try {
-                var preview = await fpCollectFormPreview(form, function(msg) { progress.textContent = msg; });
-                previews.push(preview);
-                fpLog("preview collected for " + form.name);
-            } catch (err) {
-                fpLog("failed preview for " + form.name + ": " + String(err));
-                previews.push({ id: form.id, name: form.name, description: form.description, link: form.link, itemGroups: [], error: String(err) });
+        try {
+            previews = await fpMapLimit(selectedForms, FP_FORM_CONCURRENCY, async function(form, idx) {
+                if (FP_CANCELLED) throw fpMakeCancelError();
+                try {
+                    var preview = await fpCollectFormPreview(form, function(msg) {
+                        progress.textContent = form.name + " - " + msg;
+                    });
+                    completedForms++;
+                    status.textContent = "Completed " + completedForms + " of " + selectedForms.length + " forms";
+                    fpLog("preview collected for " + form.name);
+                    return preview;
+                } catch (err) {
+                    if (fpIsCancelError(err)) throw err;
+                    completedForms++;
+                    status.textContent = "Completed " + completedForms + " of " + selectedForms.length + " forms";
+                    fpLog("failed preview for " + form.name + ": " + String(err));
+                    return { id: form.id, name: form.name, description: form.description, link: form.link, itemGroups: [], error: String(err) };
+                }
+            });
+        } catch (err) {
+            if (!fpIsCancelError(err)) {
+                fpLog("preview collection stopped: " + String(err));
             }
         }
         if (pop && pop.close) pop.close();
         if (previews.length > 0 && !FP_CANCELLED) fpShowPreviewWorkspace(previews);
+        FP_DOCUMENT_CACHE = null;
     }
 
     async function runFormPreview() {
