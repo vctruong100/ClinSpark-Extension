@@ -17,6 +17,7 @@
     var STORAGE_PANEL_WIDTH = "activityPlanState.panel.width";
     var STORAGE_PANEL_HEIGHT = "activityPlanState.panel.height";
     var STORAGE_PANEL_DOCK = "activityPlanState.panel.dock";
+    var PANEL_LAUNCHER_ID = "activityPlanStatePanelLauncher";
     // UI Scale Constants
     var UI_SCALE = 1.0; // Master scale factor (will be initialized after function definitions)
     var PANEL_DEFAULT_WIDTH = 360;
@@ -28287,6 +28288,7 @@
         var panel = document.getElementById(PANEL_ID);
         if (!panel) {
             log("Hotkey toggle: panel element not found; nothing to toggle");
+            updatePanelLauncherVisibility();
             return;
         }
         var isHidden = getPanelHidden();
@@ -28304,6 +28306,7 @@
             setPanelHidden(true);
             log("Hotkey toggle: panel hidden");
         }
+        updatePanelLauncherVisibility();
     }
 
     function resetStudyEventsOnList() {
@@ -50116,6 +50119,7 @@
     function applyPanelHiddenState(panel) {
         if (!panel) {
             log("applyPanelHiddenState: panel not found");
+            updatePanelLauncherVisibility();
             return;
         }
         var hidden = getPanelHidden();
@@ -50131,6 +50135,113 @@
             applySidePanelOffset(panel);
             log("applyPanelHiddenState: applied visible");
         }
+        updatePanelLauncherVisibility();
+    }
+
+    function getOrCreatePanelLauncher() {
+        if (!document.body) {
+            return null;
+        }
+        var existing = document.getElementById(PANEL_LAUNCHER_ID);
+        if (existing) {
+            return existing;
+        }
+
+        var launcher = document.createElement("button");
+        launcher.id = PANEL_LAUNCHER_ID;
+        launcher.type = "button";
+        launcher.title = "Toggle ClinSpark Test Automator panel";
+        launcher.setAttribute("aria-label", "Toggle ClinSpark Test Automator panel");
+        launcher.setAttribute("data-aps-panel-launcher", "1");
+        launcher.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="28" height="28" focusable="false"><path fill="#38bdf8" d="M13 2L4 14h7l-1 8 10-13h-7l0-7z"></path></svg>';
+        launcher.style.position = "fixed";
+        launcher.style.right = "18px";
+        launcher.style.bottom = "18px";
+        launcher.style.width = "48px";
+        launcher.style.height = "48px";
+        launcher.style.borderRadius = "14px";
+        launcher.style.border = "1px solid rgba(56,189,248,0.55)";
+        launcher.style.background = "linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%)";
+        launcher.style.color = "#ffffff";
+        launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
+        launcher.style.cursor = "pointer";
+        launcher.style.display = "flex";
+        launcher.style.alignItems = "center";
+        launcher.style.justifyContent = "center";
+        launcher.style.fontFamily = "Arial, Helvetica, sans-serif";
+        launcher.style.fontSize = "14px";
+        launcher.style.fontWeight = "800";
+        launcher.style.letterSpacing = "0";
+        launcher.style.lineHeight = "1";
+        launcher.style.padding = "0";
+        launcher.style.zIndex = String(PANEL_Z_INDEX + 5);
+        launcher.style.transition = "transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease";
+        launcher.style.userSelect = "none";
+        launcher.style.WebkitUserSelect = "none";
+        launcher.style.outline = "none";
+
+        function lift() {
+            launcher.style.transform = "translateY(-2px)";
+            launcher.style.boxShadow = "0 18px 38px rgba(15, 23, 42, 0.38)";
+        }
+        function settle() {
+            launcher.style.transform = "translateY(0)";
+            launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
+        }
+        launcher.addEventListener("mouseenter", lift);
+        launcher.addEventListener("mouseleave", settle);
+        launcher.addEventListener("focus", lift);
+        launcher.addEventListener("blur", settle);
+        launcher.addEventListener("click", function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            var panel = document.getElementById(PANEL_ID);
+            var shouldHide = panel && !getPanelHidden();
+            if (shouldHide) {
+                setPanelHidden(true);
+                applyPanelHiddenState(panel);
+                log("Panel launcher: panel hidden");
+            } else {
+                setPanelHidden(false);
+                if (panel) {
+                    applySidePanelLayout(panel, panel.querySelector("[data-aps-panel-body='1']"));
+                } else {
+                    makePanel();
+                }
+                log("Panel launcher: panel opened");
+            }
+            updatePanelLauncherVisibility();
+        });
+
+        document.body.appendChild(launcher);
+        return launcher;
+    }
+
+    function updatePanelLauncherVisibility() {
+        var launcher = getOrCreatePanelLauncher();
+        if (!launcher) {
+            return;
+        }
+        var panel = document.getElementById(PANEL_ID);
+        var hidden = getPanelHidden() || !panel;
+        var rightOffset = 18;
+        var bottomOffset = 18;
+        if (panel && !hidden) {
+            var rect = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
+            var dock = getPanelDock();
+            if (dock === "bottom" && rect) {
+                bottomOffset = Math.min(Math.max(Math.round(rect.height) + 18, 18), Math.max((window.innerHeight || 800) - 64, 18));
+            } else if (rect) {
+                rightOffset = Math.min(Math.max(Math.round(rect.width) + 18, 18), Math.max((window.innerWidth || 1280) - 64, 18));
+            }
+        }
+        launcher.style.right = String(rightOffset) + "px";
+        launcher.style.bottom = String(bottomOffset) + "px";
+        launcher.style.display = "flex";
+        launcher.style.pointerEvents = "auto";
+        launcher.style.opacity = "1";
+        launcher.title = hidden ? "Open ClinSpark Test Automator panel" : "Hide ClinSpark Test Automator panel";
+        launcher.setAttribute("aria-label", hidden ? "Open ClinSpark Test Automator panel" : "Hide ClinSpark Test Automator panel");
     }
 
     function normalizeKeyForMatch(e) {
@@ -51784,6 +51895,7 @@
         applyPanelHiddenState(panel);
         setPanelCollapsed(false);
         applySidePanelLayout(panel, bodyContainer);
+        updatePanelLauncherVisibility();
 
         var t = pxToInt(panel.style.top);
         var r2 = pxToInt(panel.style.right);
@@ -51836,9 +51948,11 @@
                 var currentPanel = document.getElementById(PANEL_ID);
                 if (!currentPanel || getPanelHidden()) {
                     removeSidePanelOffset();
+                    updatePanelLauncherVisibility();
                     return;
                 }
                 applySidePanelLayout(currentPanel, currentPanel.querySelector("[data-aps-panel-body='1']"));
+                updatePanelLauncherVisibility();
             });
         }
 
