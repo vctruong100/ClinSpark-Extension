@@ -35565,6 +35565,276 @@
         return false;
     }
 
+    function normalizeCollectAllFilterText(value) {
+        return (value == null ? "" : String(value)).replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    function uniqueCollectAllValues(values) {
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < values.length; i++) {
+            var v = values[i] == null ? "" : String(values[i]);
+            if (!v || seen[v]) continue;
+            seen[v] = true;
+            out.push(v);
+        }
+        return out;
+    }
+
+    function getCollectAllSelectedStudyEventValues() {
+        var sel = document.getElementById("studyEventId");
+        var values = [];
+        if (sel && sel.options) {
+            for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].selected) {
+                    values.push(String(sel.options[i].value || ""));
+                }
+            }
+        }
+        if (values.length > 0 || !sel) {
+            return uniqueCollectAllValues(values);
+        }
+
+        var choiceNodes = document.querySelectorAll("#s2id_studyEventId .select2-search-choice div");
+        for (var c = 0; c < choiceNodes.length; c++) {
+            var choiceText = normalizeCollectAllFilterText(choiceNodes[c].textContent || "");
+            if (!choiceText) continue;
+            for (var o = 0; o < sel.options.length; o++) {
+                var optionText = normalizeCollectAllFilterText(sel.options[o].textContent || "");
+                if (optionText === choiceText) {
+                    values.push(String(sel.options[o].value || ""));
+                    break;
+                }
+            }
+        }
+        return uniqueCollectAllValues(values);
+    }
+
+    function getCollectAllStudyEventFilterState() {
+        var sel = document.getElementById("studyEventId");
+        var values = getCollectAllSelectedStudyEventValues();
+        var texts = [];
+        var textMap = {};
+        if (sel && sel.options) {
+            for (var i = 0; i < sel.options.length; i++) {
+                var opt = sel.options[i];
+                if (values.indexOf(String(opt.value || "")) !== -1) {
+                    var text = (opt.textContent || "").replace(/\s+/g, " ").trim();
+                    if (text && !textMap[normalizeCollectAllFilterText(text)]) {
+                        texts.push(text);
+                        textMap[normalizeCollectAllFilterText(text)] = true;
+                    }
+                }
+            }
+        }
+        if (!texts.length) {
+            var choiceNodes = document.querySelectorAll("#s2id_studyEventId .select2-search-choice div");
+            for (var c = 0; c < choiceNodes.length; c++) {
+                var choiceText = (choiceNodes[c].textContent || "").replace(/\s+/g, " ").trim();
+                var normChoice = normalizeCollectAllFilterText(choiceText);
+                if (choiceText && !textMap[normChoice]) {
+                    texts.push(choiceText);
+                    textMap[normChoice] = true;
+                }
+            }
+        }
+        var enabled = values.length > 0 || texts.length > 0;
+        if (enabled) {
+            log("CollectAll: preserving Study Event filter: " + texts.join(", "));
+        } else {
+            log("CollectAll: no Study Event filter selected at start");
+        }
+        return {
+            enabled: enabled,
+            values: values,
+            texts: texts,
+            textMap: textMap
+        };
+    }
+
+    function collectAllArraysSameUnordered(a, b) {
+        var aa = uniqueCollectAllValues(a || []).sort();
+        var bb = uniqueCollectAllValues(b || []).sort();
+        if (aa.length !== bb.length) return false;
+        for (var i = 0; i < aa.length; i++) {
+            if (aa[i] !== bb[i]) return false;
+        }
+        return true;
+    }
+
+    function refreshCollectAllStudyEventSelect2Display(filterState, appliedValues) {
+        var sel = document.getElementById("studyEventId");
+        var container = document.getElementById("s2id_studyEventId");
+        if (!sel || !container) return;
+        var choices = container.querySelector("ul.select2-choices");
+        if (!choices) return;
+
+        var existing = choices.querySelectorAll("li.select2-search-choice");
+        for (var i = 0; i < existing.length; i++) {
+            if (existing[i] && existing[i].parentNode) {
+                existing[i].parentNode.removeChild(existing[i]);
+            }
+        }
+
+        var searchField = choices.querySelector("li.select2-search-field");
+        for (var v = 0; v < appliedValues.length; v++) {
+            var value = appliedValues[v];
+            var text = "";
+            for (var o = 0; o < sel.options.length; o++) {
+                if (String(sel.options[o].value || "") === String(value)) {
+                    text = (sel.options[o].textContent || "").replace(/\s+/g, " ").trim();
+                    break;
+                }
+            }
+            if (!text && filterState && filterState.texts && filterState.texts[v]) {
+                text = filterState.texts[v];
+            }
+            if (!text) continue;
+            var li = document.createElement("li");
+            li.className = "select2-search-choice";
+            var div = document.createElement("div");
+            div.textContent = text;
+            var close = document.createElement("a");
+            close.href = "#";
+            close.className = "select2-search-choice-close";
+            close.tabIndex = -1;
+            li.appendChild(div);
+            li.appendChild(close);
+            choices.insertBefore(li, searchField || null);
+        }
+    }
+
+    function collectAllFindFilterSubmitButton() {
+        var sel = document.getElementById("studyEventId");
+        var form = sel ? sel.closest("form") : null;
+        if (!form) return null;
+        var candidates = form.querySelectorAll("button, input[type='submit'], input[type='button'], a.btn");
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            var text = normalizeCollectAllFilterText((el.textContent || el.value || el.getAttribute("title") || ""));
+            if (text === "search" || text === "filter" || text === "apply" || text.indexOf("search") !== -1) {
+                return el;
+            }
+        }
+        return null;
+    }
+
+    async function waitForCollectAllStudyEventFilterApplied(filterState, timeoutMs) {
+        if (!filterState || !filterState.enabled) return true;
+        var max = typeof timeoutMs === "number" ? timeoutMs : 8000;
+        var start = Date.now();
+        var lastRowCount = -1;
+        var stableTicks = 0;
+        while (Date.now() - start < max) {
+            if (COLLECT_ALL_CANCELLED || isPaused()) return false;
+            var current = getCollectAllSelectedStudyEventValues();
+            if (collectAllArraysSameUnordered(current, filterState.values)) {
+                var body = document.querySelector("tbody#formDataTableBody");
+                var rowCount = body ? body.querySelectorAll("tr[id^='formDataRow_']").length : 0;
+                if (rowCount === lastRowCount) {
+                    stableTicks = stableTicks + 1;
+                } else {
+                    stableTicks = 0;
+                    lastRowCount = rowCount;
+                }
+                if (stableTicks >= 1) return true;
+            }
+            await sleep(300);
+        }
+        log("CollectAll: Study Event filter restore wait timed out; continuing cautiously");
+        return false;
+    }
+
+    async function ensureCollectAllStudyEventFilter(filterState, reason) {
+        if (!filterState || !filterState.enabled) return true;
+        var current = getCollectAllSelectedStudyEventValues();
+        if (collectAllArraysSameUnordered(current, filterState.values)) {
+            return true;
+        }
+
+        log("CollectAll: Study Event filter changed/reset after " + String(reason || "step") + "; restoring " + filterState.texts.join(", "));
+        var sel = document.getElementById("studyEventId");
+        if (!sel || !sel.options) {
+            log("CollectAll: cannot restore Study Event filter because select#studyEventId is missing");
+            return false;
+        }
+
+        var wantedValueMap = {};
+        var wantedTextMap = {};
+        for (var i = 0; i < filterState.values.length; i++) {
+            wantedValueMap[String(filterState.values[i])] = true;
+        }
+        for (var t = 0; t < filterState.texts.length; t++) {
+            wantedTextMap[normalizeCollectAllFilterText(filterState.texts[t])] = true;
+        }
+
+        var appliedValues = [];
+        for (var o = 0; o < sel.options.length; o++) {
+            var opt = sel.options[o];
+            var shouldSelect = wantedValueMap[String(opt.value || "")] || wantedTextMap[normalizeCollectAllFilterText(opt.textContent || "")];
+            opt.selected = !!shouldSelect;
+            if (shouldSelect) {
+                appliedValues.push(String(opt.value || ""));
+            }
+        }
+        appliedValues = uniqueCollectAllValues(appliedValues);
+        if (!appliedValues.length) {
+            log("CollectAll: Study Event filter restore found no matching options; leaving page unchanged");
+            return false;
+        }
+
+        try {
+            if (window.jQuery) {
+                try {
+                    window.jQuery(sel).val(appliedValues);
+                    if (window.jQuery.fn && typeof window.jQuery.fn.select2 === "function") {
+                        window.jQuery(sel).select2("val", appliedValues);
+                    }
+                    window.jQuery(sel).trigger("change");
+                } catch (jqErr) {
+                    log("CollectAll: jQuery/select2 restore failed; using native change - " + String(jqErr));
+                }
+            }
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch (e) {
+            log("CollectAll: native Study Event filter change failed - " + String(e));
+        }
+
+        refreshCollectAllStudyEventSelect2Display(filterState, appliedValues);
+        await sleep(500);
+
+        var submitBtn = collectAllFindFilterSubmitButton();
+        if (submitBtn) {
+            log("CollectAll: clicking filter Search/Apply after Study Event restore");
+            submitBtn.click();
+            await sleep(1200);
+        } else {
+            log("CollectAll: filter Search/Apply button not found; waiting for Select2 change to refresh table");
+            await sleep(900);
+        }
+
+        return await waitForCollectAllStudyEventFilterApplied(filterState, 9000);
+    }
+
+    function getStudyEventTextFromFormDataRow(tr) {
+        if (!tr) return "";
+        var candidates = tr.querySelectorAll("span.tooltips[data-original-title], [data-original-title]");
+        for (var i = 0; i < candidates.length; i++) {
+            var title = normalizeCollectAllFilterText(candidates[i].getAttribute("data-original-title") || "");
+            if (title.indexOf("study event") !== -1 || title === "event") {
+                return (candidates[i].textContent || "").replace(/\s+/g, " ").trim();
+            }
+        }
+        return "";
+    }
+
+    function collectAllRowMatchesStudyEventFilter(tr, filterState) {
+        if (!filterState || !filterState.enabled) return true;
+        var rowEvent = getStudyEventTextFromFormDataRow(tr);
+        if (!rowEvent) return true;
+        return !!filterState.textMap[normalizeCollectAllFilterText(rowEvent)];
+    }
+
 
     // Fetch barcode completely in the background without opening a new tab.
     // Uses the subject ID directly if available, or uses a hidden iframe to search.
@@ -35908,6 +36178,12 @@
 
         COLLECT_ALL_POPUP_REF = pop;
 
+        var studyEventFilterState = getCollectAllStudyEventFilterState();
+        if (studyEventFilterState.enabled) {
+            await ensureCollectAllStudyEventFilter(studyEventFilterState, "startup");
+            await sleep(500);
+        }
+
         // Function to update the status text with animation
         var animDots = 1;
         var animTimer = setInterval(function () {
@@ -35989,6 +36265,9 @@
                 return;
             }
 
+            await ensureCollectAllStudyEventFilter(studyEventFilterState, "before selecting next form");
+            await sleep(studyEventFilterState.enabled ? 250 : 0);
+
             var rows = getFormDataRows();
             if (!rows || rows.length === 0) {
                 log("CollectAll: no form rows found; finishing");
@@ -36004,6 +36283,12 @@
                 if (fid && fid.length > 0) {
                     var already = processed[fid] === true;
                     if (!already) {
+                        if (!collectAllRowMatchesStudyEventFilter(tr, studyEventFilterState)) {
+                            log("CollectAll: skipping formId=" + String(fid) + " because row Study Event is outside the preserved filter");
+                            processed[fid] = true;
+                            i = i + 1;
+                            continue;
+                        }
                         pickedRow = tr;
                         pickedFormId = fid;
                         break;
@@ -36103,6 +36388,7 @@
                 cleanupCollectAllModalArtifacts();
                 addFormToList(formName, "Skipped - form did not open", pickedFormId);
                 await waitForFormTableRefresh(1000);
+                await ensureCollectAllStudyEventFilter(studyEventFilterState, "skipped form");
                 await sleep(250);
                 safety = safety + 1;
                 continue;
@@ -36148,7 +36434,8 @@
             addFormToList(formName, formStatus, pickedFormId);
 
             await waitForFormTableRefresh(1000);
-            await sleep(100);
+            await ensureCollectAllStudyEventFilter(studyEventFilterState, "collecting " + String(formName || pickedFormId));
+            await sleep(studyEventFilterState.enabled ? 500 : 100);
             safety = safety + 1;
         }
 
