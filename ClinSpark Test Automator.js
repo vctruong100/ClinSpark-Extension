@@ -121,6 +121,7 @@
     const RUNMODE_ELIG_IMPORT = "eligibilityImport";
     const STORAGE_ELIG_CHECKITEM_CACHE = "activityPlanState.eligibility.checkItemCache";
     const STORAGE_ELIG_IMPORT_PENDING_POPUP = "activityPlanState.eligibility.importPendingPopup";
+    const STORAGE_IMPORT_IE_COHORT_KEYWORDS = "activityPlanState.importIE.cohortKeywords";
     const ELIGIBILITY_LIST_URL_PROD = "https://cenexel.clinspark.com/secure/crfdesign/studylibrary/eligibility/list";
     const ELIGIBILITY_VALID_HOSTNAMES = ["cenexeltest.clinspark.com", "cenexel.clinspark.com"];
     const ELIGIBILITY_LIST_PATH = "/secure/crfdesign/studylibrary/eligibility/list";
@@ -12627,6 +12628,1182 @@
 
 
     //==========================
+    // FORM PREVIEW FEATURE
+    //==========================
+    // Renders a read-only data-collection-style preview from Study Library form metadata.
+    //==========================
+
+    var FP_LIST_URL = "https://cenexel.clinspark.com/secure/crfdesign/studylibrary/list/form";
+    var FP_LIST_URL_TEST = "https://cenexeltest.clinspark.com/secure/crfdesign/studylibrary/list/form";
+    var FP_CANCELLED = false;
+    var FP_DOCUMENT_CACHE = null;
+    var FP_FORM_CONCURRENCY = 2;
+    var FP_GROUP_CONCURRENCY = 4;
+    var FP_ITEM_CONCURRENCY = 6;
+
+    function fpLog(msg) {
+        log("[FormPreview] " + msg);
+    }
+
+    function fpIsFormListPage() {
+        var href = location.href.toLowerCase();
+        return href.indexOf("cenexel.clinspark.com/secure/crfdesign/studylibrary/list/form") !== -1 ||
+            href.indexOf("cenexeltest.clinspark.com/secure/crfdesign/studylibrary/list/form") !== -1;
+    }
+
+    function fpIsActivityPlanShowPage() {
+        var path = location.pathname || "";
+        return path.indexOf("/secure/crfdesign/activityplans/show/") === 0;
+    }
+
+    function fpCleanText(value) {
+        return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+    }
+
+    function fpDecodeHtml(value) {
+        var html = String(value == null ? "" : value);
+        if (!html) return "";
+        var textarea = document.createElement("textarea");
+        textarea.innerHTML = html;
+        return textarea.value;
+    }
+
+    function fpNormalizeHelpHtml(value) {
+        var html = String(value == null ? "" : value).trim();
+        if (!html) return "";
+        var decoded = fpDecodeHtml(html);
+        return decoded || html;
+    }
+
+    function fpAbsoluteUrl(href) {
+        try { return new URL(href, location.origin).href; } catch (e) { return href || ""; }
+    }
+
+    function fpIsYes(value) {
+        return /^yes\b/i.test(fpCleanText(value));
+    }
+
+    function fpMakeCancelError() {
+        var err = new Error("Form Preview cancelled");
+        err.cancelled = true;
+        return err;
+    }
+
+    function fpIsCancelError(err) {
+        return !!(err && (err.cancelled || String(err.message || err).indexOf("Form Preview cancelled") !== -1));
+    }
+
+    function fpThrowIfCancelled() {
+        if (FP_CANCELLED) throw fpMakeCancelError();
+    }
+
+    async function fpMapLimit(items, limit, worker) {
+        var source = Array.prototype.slice.call(items || []);
+        var max = Math.max(1, Math.min(limit || 1, source.length || 1));
+        var results = new Array(source.length);
+        var nextIndex = 0;
+        var active = 0;
+        var resolved = false;
+        return new Promise(function(resolve, reject) {
+            function launch() {
+                if (resolved) return;
+                if (FP_CANCELLED) {
+                    resolved = true;
+                    reject(fpMakeCancelError());
+                    return;
+                }
+                if (nextIndex >= source.length && active === 0) {
+                    resolved = true;
+                    resolve(results);
+                    return;
+                }
+                while (active < max && nextIndex < source.length) {
+                    (function(idx) {
+                        active++;
+                        nextIndex++;
+                        Promise.resolve()
+                            .then(function() {
+                                fpThrowIfCancelled();
+                                return worker(source[idx], idx);
+                            })
+                            .then(function(result) {
+                                results[idx] = result;
+                                active--;
+                                launch();
+                            })
+                            .catch(function(err) {
+                                active--;
+                                if (resolved) return;
+                                if (fpIsCancelError(err)) {
+                                    resolved = true;
+                                    reject(err);
+                                } else {
+                                    resolved = true;
+                                    reject(err);
+                                }
+                            });
+                    })(nextIndex);
+                }
+            }
+            launch();
+        });
+    }
+
+    function fpCollectFormsFromTable() {
+        var rows = document.querySelectorAll("#listTable tbody tr, #saTableBody tr, tbody tr");
+        var forms = [];
+        var seen = {};
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            if (!row || row.id === "listTableNoRecordId" || window.getComputedStyle(row).display === "none") continue;
+            var link = row.querySelector("a[href*='/secure/crfdesign/studylibrary/show/form/'], a[href*='/studylibrary/show/form/']");
+            if (!link) continue;
+            var href = link.getAttribute("href") || "";
+            var m = href.match(/\/show\/form\/(\d+)/);
+            var id = m ? m[1] : href;
+            if (seen[id]) continue;
+            seen[id] = true;
+            var cells = row.cells || [];
+            var segment = "";
+            var studyEvent = "";
+            var description = "";
+            if (row.closest("#saTableBody")) {
+                segment = cells[1] ? fpCleanText(cells[1].textContent) : "";
+                studyEvent = cells[2] ? fpCleanText(cells[2].textContent) : "";
+                description = [segment ? "Segment: " + segment : "", studyEvent ? "Study Event: " + studyEvent : ""].filter(function(part) { return part; }).join(" | ");
+            } else {
+                description = cells[2] ? fpCleanText(cells[2].textContent) : "";
+            }
+            forms.push({
+                id: id,
+                name: fpCleanText(link.textContent),
+                link: fpAbsoluteUrl(href),
+                locked: cells[1] ? fpCleanText(cells[1].textContent) : "",
+                description: description,
+                segment: segment,
+                studyEvent: studyEvent,
+                selected: false,
+                status: "Pending",
+                message: ""
+            });
+        }
+        fpLog("collected " + forms.length + " forms from " + (fpIsActivityPlanShowPage() ? "activity plan page" : "list page"));
+        return forms;
+    }
+
+    function fpDelay(ms) {
+        return new Promise(function(resolve) { setTimeout(resolve, ms); });
+    }
+
+    async function fpWaitForFormsFromTable(timeoutMs) {
+        var timeout = Math.max(1000, timeoutMs || 10000);
+        var started = Date.now();
+        var forms = [];
+        while (!FP_CANCELLED) {
+            forms = fpCollectFormsFromTable();
+            if (forms.length > 0) return forms;
+            if (Date.now() - started >= timeout) return forms;
+            await fpDelay(250);
+        }
+        return forms;
+    }
+
+    async function fpFetchDocument(url) {
+        fpThrowIfCancelled();
+        var key = fpAbsoluteUrl(url || "");
+        if (!FP_DOCUMENT_CACHE) FP_DOCUMENT_CACHE = {};
+        if (!FP_DOCUMENT_CACHE[key]) {
+            FP_DOCUMENT_CACHE[key] = (async function() {
+                var resp = await fetch(key, { credentials: "same-origin" });
+                fpThrowIfCancelled();
+                if (!resp.ok) throw new Error("Failed to load " + key + " (" + resp.status + ")");
+                var html = await resp.text();
+                fpThrowIfCancelled();
+                return new DOMParser().parseFromString(html, "text/html");
+            })();
+        }
+        try {
+            return await FP_DOCUMENT_CACHE[key];
+        } catch (err) {
+            delete FP_DOCUMENT_CACHE[key];
+            throw err;
+        }
+    }
+
+    function fpParseVisibilityCondition(doc) {
+        var condition = { item: "", itemValue: "" };
+        var groups = doc.querySelectorAll(".form-group, .control-group");
+        for (var i = 0; i < groups.length; i++) {
+            var label = groups[i].querySelector(".control-label, label");
+            if (!label) continue;
+            var labelText = fpCleanText(label.textContent).replace(/\s+/g, "").toLowerCase();
+            var valueEl = groups[i].querySelector("p.form-control-static, .form-control-static, .select2-chosen, input, select, textarea");
+            var valueText = "";
+            if (valueEl) {
+                if (valueEl.tagName === "INPUT" || valueEl.tagName === "TEXTAREA" || valueEl.tagName === "SELECT") {
+                    if (valueEl.tagName === "SELECT" && valueEl.selectedIndex >= 0 && valueEl.options[valueEl.selectedIndex]) {
+                        valueText = fpCleanText(valueEl.options[valueEl.selectedIndex].textContent || valueEl.value);
+                    } else {
+                        valueText = fpCleanText(valueEl.value || valueEl.textContent);
+                    }
+                } else {
+                    valueText = fpCleanText(valueEl.textContent);
+                }
+            }
+            if (labelText.indexOf("itemvalue") !== -1 || labelText.indexOf("value") !== -1) {
+                condition.itemValue = valueText;
+            } else if (labelText === "item" || labelText.indexOf("visibleitem") !== -1 || labelText.indexOf("conditionitem") !== -1) {
+                condition.item = valueText;
+            }
+        }
+        if (!condition.item) {
+            condition.item = fpFindProperty(doc, "Item");
+        }
+        if (!condition.itemValue) {
+            condition.itemValue = fpFindProperty(doc, "Item Value") || fpFindProperty(doc, "Value");
+        }
+        return condition.item || condition.itemValue ? condition : null;
+    }
+
+    async function fpCollectVisibilityCondition(visibilityUrl) {
+        if (!visibilityUrl) return null;
+        try {
+            return fpParseVisibilityCondition(await fpFetchDocument(visibilityUrl));
+        } catch (err) {
+            if (fpIsCancelError(err)) throw err;
+            return { item: "", itemValue: "", message: "Visibility condition could not be loaded: " + String(err && err.message ? err.message : err) };
+        }
+    }
+
+    function fpAppendVisibilityCondition(parent, condition) {
+        if (!condition) return;
+        var box = document.createElement("div");
+        box.style.cssText = "margin-top:10px;padding:7px 9px;border-left:3px solid #f0ad4e;background:#fff7e6;color:#6b4e16;font-size:12px;line-height:1.35;";
+        var label = document.createElement("div");
+        label.style.cssText = "font-weight:700;margin-bottom:2px;";
+        label.textContent = "Visibility Condition";
+        var body = document.createElement("div");
+        if (condition.message) {
+            body.textContent = condition.message;
+        } else {
+            body.textContent = (condition.item ? condition.item + ": " : "") + (condition.itemValue || "");
+        }
+        box.appendChild(label);
+        box.appendChild(body);
+        parent.appendChild(box);
+    }
+
+    function fpFindProperty(docOrEl, labelText) {
+        var wanted = String(labelText || "").replace(/:$/, "").toLowerCase();
+        var rows = docOrEl.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].cells;
+            if (!cells || cells.length < 2) continue;
+            for (var ci = 0; ci < cells.length - 1; ci += 2) {
+                var label = fpCleanText(cells[ci].textContent).replace(/:$/, "").toLowerCase();
+                if (label === wanted) return fpCleanText(cells[ci + 1].textContent);
+            }
+        }
+        return "";
+    }
+
+    function fpFindPropertyHtml(docOrEl, labelText) {
+        var wanted = String(labelText || "").replace(/:$/, "").toLowerCase();
+        var rows = docOrEl.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].cells;
+            if (!cells || cells.length < 2) continue;
+            for (var ci = 0; ci < cells.length - 1; ci += 2) {
+                var label = fpCleanText(cells[ci].textContent).replace(/:$/, "").toLowerCase();
+                if (label === wanted) return fpNormalizeHelpHtml(cells[ci + 1].innerHTML || "");
+            }
+        }
+        return "";
+    }
+
+    function fpFindPropertyLink(docOrEl, labelText, hrefNeedle) {
+        var wanted = String(labelText || "").replace(/:$/, "").toLowerCase();
+        var rows = docOrEl.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].cells;
+            if (!cells || cells.length < 2) continue;
+            for (var ci = 0; ci < cells.length - 1; ci += 2) {
+                var label = fpCleanText(cells[ci].textContent).replace(/:$/, "").toLowerCase();
+                if (label !== wanted) continue;
+                var a = hrefNeedle ? cells[ci + 1].querySelector("a[href*='" + hrefNeedle + "']") : cells[ci + 1].querySelector("a[href]");
+                if (a) return { text: fpCleanText(a.textContent), href: fpAbsoluteUrl(a.getAttribute("href") || "") };
+            }
+        }
+        return null;
+    }
+
+    function fpParseMetadataCell(cell) {
+        var out = {};
+        if (!cell) return out;
+        var rows = cell.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].cells;
+            if (!cells || cells.length < 2) continue;
+            var key = fpCleanText(cells[0].textContent).replace(/:$/, "");
+            var val = fpCleanText(cells[1].textContent);
+            if (key) out[key] = val;
+        }
+        return out;
+    }
+
+    function fpExtractFirstCodelistLink(doc) {
+        var selectors = [
+            "a[href*='/studylibrary/show/codelist/']",
+            "a[href*='/crfdesign/studylibrary/show/codelist/']",
+            "a[href*='/codelist/']"
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var a = doc.querySelector(selectors[i]);
+            if (a) return { text: fpCleanText(a.textContent), href: fpAbsoluteUrl(a.getAttribute("href") || "") };
+        }
+        return null;
+    }
+
+    async function fpCollectCodelistValues(codelist) {
+        if (!codelist || !codelist.href) return codelist;
+        codelist.items = [];
+        try {
+            var doc = await fpFetchDocument(codelist.href);
+            codelist.name = fpFindProperty(doc, "Name") || codelist.text || "";
+            var rows = doc.querySelectorAll("tr[id^='cli_']");
+            for (var i = 0; i < rows.length; i++) {
+                var cells = rows[i].cells || [];
+                if (cells.length < 2) continue;
+                codelist.items.push({
+                    codedValue: fpCleanText(cells[0].textContent),
+                    decode: fpCleanText(cells[1].textContent),
+                    isDefault: cells[2] ? fpCleanText(cells[2].textContent) : ""
+                });
+            }
+        } catch (err) {
+            if (fpIsCancelError(err)) throw err;
+            codelist.message = "Codelist values could not be loaded: " + String(err && err.message ? err.message : err);
+        }
+        return codelist;
+    }
+
+    function fpBuildFormatText(item) {
+        var lenRaw = fpCleanText(item.length);
+        var sigRaw = fpCleanText(item.significantDigits);
+        var len = parseInt(lenRaw, 10);
+        var sig = parseInt(sigRaw, 10);
+        if (!len || len < 1) return "";
+        if (len > 4 && (!sig || sig < 1)) return "max " + len;
+        if (sig && sig > 0) {
+            var left = Math.max(1, len - sig);
+            return new Array(left + 1).join("#") + "." + new Array(sig + 1).join("#");
+        }
+        return new Array(len + 1).join("#");
+    }
+
+    async function fpCollectItemDetails(item, fallbackDataType) {
+        if (!item.itemLink) return item;
+        try {
+            var doc = await fpFetchDocument(item.itemLink);
+            item.prompt = fpFindProperty(doc, "Prompt") || fpFindProperty(doc, "Question") || fpFindProperty(doc, "Text") || fpFindProperty(doc, "Description") || "";
+            item.dataType = fpFindProperty(doc, "Data Type") || fallbackDataType || item.dataType || "";
+            item.helpTextHtml = fpFindPropertyHtml(doc, "Help Text");
+            item.helpText = fpCleanText(item.helpTextHtml);
+            item.length = fpFindProperty(doc, "Length");
+            item.significantDigits = fpFindProperty(doc, "Significant Digits");
+            item.formatText = fpBuildFormatText(item);
+            item.codelist = fpFindPropertyLink(doc, "Code List", "/codelist/") || fpFindPropertyLink(doc, "Codelist", "/codelist/") || fpExtractFirstCodelistLink(doc);
+            if (item.codelist) await fpCollectCodelistValues(item.codelist);
+        } catch (err) {
+            if (fpIsCancelError(err)) throw err;
+            item.message = "Item details could not be loaded: " + String(err && err.message ? err.message : err);
+            item.dataType = fallbackDataType || item.dataType || "";
+        }
+        return item;
+    }
+
+    async function fpCollectItemGroup(itemGroup) {
+        var doc = await fpFetchDocument(itemGroup.link);
+        itemGroup.name = fpFindProperty(doc, "Name") || itemGroup.name;
+        itemGroup.helpTextHtml = fpFindPropertyHtml(doc, "Help Text");
+        itemGroup.helpText = fpCleanText(itemGroup.helpTextHtml);
+        itemGroup.repeating = fpFindProperty(doc, "Repeating?") || itemGroup.repeating;
+        itemGroup.device = fpFindPropertyLink(doc, "Device", "/devices/") || null;
+        itemGroup.domain = fpFindProperty(doc, "Domain");
+        itemGroup.items = [];
+        var rows = doc.querySelectorAll("tr[id^='ir_']");
+        var items = [];
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var cells = row.cells || [];
+            var itemLink = cells[0] ? cells[0].querySelector("a[href*='/studylibrary/show/item/']") : null;
+            if (!itemLink) continue;
+            var metadata = fpParseMetadataCell(cells[1]);
+            var itemVisibilityLink = row.querySelector("a[href*='visiblecondition']");
+            var itemHidden = cells[5] ? fpCleanText(cells[5].textContent) : "";
+            var item = {
+                name: fpCleanText(itemLink.textContent),
+                itemLink: fpAbsoluteUrl(itemLink.getAttribute("href") || ""),
+                prompt: "",
+                dataType: metadata["Data Type"] || "",
+                origin: metadata["Origin"] || "",
+                sasFieldName: metadata["SAS Field Name"] || "",
+                sdsVarName: metadata["SDS Var Name"] || "",
+                roleRestriction: cells[2] ? fpCleanText(cells[2].textContent) : "",
+                mandatory: cells[3] ? fpCleanText(cells[3].textContent) : "",
+                method: cells[4] ? fpCleanText(cells[4].textContent) : "",
+                hidden: itemHidden,
+                connectivity: cells[6] ? fpCleanText(cells[6].textContent) : "",
+                visibilityUrl: itemVisibilityLink ? fpAbsoluteUrl(itemVisibilityLink.getAttribute("href") || "") : "",
+                visibilityCondition: null,
+                codelist: null
+            };
+            items.push(item);
+        }
+        itemGroup.items = await fpMapLimit(items, FP_ITEM_CONCURRENCY, async function(item) {
+            await fpCollectItemDetails(item, item.dataType);
+            if (fpIsYes(item.hidden) && item.visibilityUrl) {
+                item.visibilityCondition = await fpCollectVisibilityCondition(item.visibilityUrl);
+            }
+            return item;
+        });
+        return itemGroup;
+    }
+
+    async function fpCollectFormPreview(form, progressCb) {
+        var doc = await fpFetchDocument(form.link);
+        var preview = {
+            id: form.id,
+            name: form.name,
+            description: form.description,
+            link: form.link,
+            helpTextHtml: fpFindPropertyHtml(doc, "Help Text"),
+            itemGroups: []
+        };
+        var title = doc.querySelector("h3, h2, h1");
+        if (title) {
+            var titleText = fpCleanText(title.textContent).replace(/^Form\s*/i, "");
+            if (titleText) preview.pageTitle = titleText;
+        }
+        var rows = doc.querySelectorAll("tr[id^='igr_']");
+        var groups = [];
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var cells = row.cells || [];
+            var link = cells[0] ? cells[0].querySelector("a[href*='/studylibrary/show/itemgroup/']") : null;
+            if (!link) continue;
+            var groupHidden = cells[4] ? fpCleanText(cells[4].textContent) : "";
+            var groupVisibilityLink = row.querySelector("a[href*='visiblecondition']");
+            var group = {
+                name: fpCleanText(link.textContent),
+                link: fpAbsoluteUrl(link.getAttribute("href") || ""),
+                mandatory: cells[2] ? fpCleanText(cells[2].textContent) : "",
+                repeating: cells[3] ? fpCleanText(cells[3].textContent) : "",
+                hidden: groupHidden,
+                visibilityUrl: groupVisibilityLink ? fpAbsoluteUrl(groupVisibilityLink.getAttribute("href") || "") : "",
+                visibilityCondition: null,
+                helpText: "",
+                items: []
+            };
+            groups.push(group);
+        }
+        var completedGroups = 0;
+        if (progressCb) progressCb("Loading " + groups.length + " item groups...");
+        preview.itemGroups = await fpMapLimit(groups, FP_GROUP_CONCURRENCY, async function(group, idx) {
+            try {
+                await fpCollectItemGroup(group);
+                if (fpIsYes(group.hidden) && group.visibilityUrl) {
+                    group.visibilityCondition = await fpCollectVisibilityCondition(group.visibilityUrl);
+                }
+            } catch (err) {
+                if (fpIsCancelError(err)) throw err;
+                group.message = "Item group could not be loaded: " + String(err && err.message ? err.message : err);
+            }
+            completedGroups++;
+            if (progressCb) progressCb("Loaded item group " + completedGroups + " of " + groups.length + ": " + group.name);
+            return group;
+        });
+        return preview;
+    }
+
+    function fpButton(text, bg) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = text;
+        btn.style.cssText = "background:" + (bg || "#5b43c7") + ";border:none;color:white;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;";
+        return btn;
+    }
+
+    function fpBuildSelectionPanel(forms, onConfirm) {
+        var overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.62);z-index:30000;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',Tahoma,sans-serif;";
+        var panel = document.createElement("div");
+        panel.style.cssText = "width:760px;max-width:94vw;height:76vh;background:#111;border:1px solid #333;border-radius:12px;box-shadow:0 16px 45px rgba(0,0,0,0.55);display:flex;flex-direction:column;overflow:hidden;color:#fff;";
+        var header = document.createElement("div");
+        header.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#222;border-bottom:1px solid #333;";
+        var title = document.createElement("div");
+        title.textContent = "Form Preview - Select Forms";
+        title.style.cssText = "font-weight:700;font-size:15px;";
+        var close = fpButton("Close", "#555");
+        header.appendChild(title);
+        header.appendChild(close);
+        var search = document.createElement("input");
+        search.type = "text";
+        search.placeholder = "Search forms...";
+        search.style.cssText = "margin:10px 12px;padding:9px 11px;background:#202020;border:1px solid #444;border-radius:7px;color:#fff;outline:none;";
+        var list = document.createElement("div");
+        list.style.cssText = "flex:1;overflow:auto;padding:0 10px 10px;";
+        var footer = document.createElement("div");
+        footer.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#222;border-top:1px solid #333;";
+        var count = document.createElement("span");
+        count.style.cssText = "font-size:12px;color:#bbb;";
+        var btns = document.createElement("div");
+        btns.style.cssText = "display:flex;gap:8px;";
+        var selectAll = fpButton("Select All", "#356c9b");
+        var selectVisible = fpButton("Select Visible", "#356c9b");
+        var clear = fpButton("Clear", "#666");
+        var confirm = fpButton("Confirm", "#238636");
+        btns.appendChild(selectAll);
+        btns.appendChild(selectVisible);
+        btns.appendChild(clear);
+        btns.appendChild(confirm);
+        footer.appendChild(count);
+        footer.appendChild(btns);
+        panel.appendChild(header);
+        panel.appendChild(search);
+        panel.appendChild(list);
+        panel.appendChild(footer);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+
+        function selectedCount() {
+            var n = 0;
+            for (var i = 0; i < forms.length; i++) if (forms[i].selected) n++;
+            return n;
+        }
+        function render() {
+            list.innerHTML = "";
+            var filter = search.value;
+            var visible = 0;
+            for (var i = 0; i < forms.length; i++) {
+                (function(form) {
+                    var hay = (form.name + " " + form.description).toLowerCase();
+                    if (filter && !matchesCommaSeparatedSearch(hay, filter)) return;
+                    visible++;
+                    var row = document.createElement("label");
+                    row.style.cssText = "display:flex;align-items:center;gap:9px;padding:8px 10px;margin:2px 0;border-radius:6px;cursor:pointer;background:" + (form.selected ? "#182a1f" : "transparent") + ";border:1px solid " + (form.selected ? "#2c7a3f" : "transparent") + ";";
+                    var cb = document.createElement("input");
+                    cb.type = "checkbox";
+                    cb.checked = form.selected;
+                    cb.style.cssText = "width:16px;height:16px;accent-color:#2ea043;";
+                    cb.onchange = function() { form.selected = cb.checked; render(); };
+                    var text = document.createElement("div");
+                    text.style.cssText = "min-width:0;flex:1;";
+                    var name = document.createElement("div");
+                    name.textContent = form.name;
+                    name.style.cssText = "font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    var desc = document.createElement("div");
+                    desc.textContent = form.description || form.link;
+                    desc.style.cssText = "font-size:11px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    text.appendChild(name);
+                    text.appendChild(desc);
+                    row.appendChild(cb);
+                    row.appendChild(text);
+                    list.appendChild(row);
+                })(forms[i]);
+            }
+            count.textContent = selectedCount() + " selected | " + visible + " visible | " + forms.length + " total";
+            confirm.disabled = selectedCount() === 0;
+            confirm.style.opacity = confirm.disabled ? "0.55" : "1";
+            confirm.style.cursor = confirm.disabled ? "not-allowed" : "pointer";
+            selectAll.textContent = selectedCount() === forms.length && forms.length > 0 ? "Deselect All" : "Select All";
+        }
+        close.onclick = function() { FP_CANCELLED = true; overlay.remove(); };
+        overlay.onclick = function(e) { if (e.target === overlay) close.click(); };
+        search.oninput = render;
+        selectAll.onclick = function() {
+            var shouldSelect = selectedCount() !== forms.length;
+            for (var i = 0; i < forms.length; i++) forms[i].selected = shouldSelect;
+            render();
+        };
+        selectVisible.onclick = function() {
+            var filter = search.value;
+            for (var i = 0; i < forms.length; i++) {
+                var hay = (forms[i].name + " " + forms[i].description).toLowerCase();
+                if (!filter || matchesCommaSeparatedSearch(hay, filter)) forms[i].selected = true;
+            }
+            render();
+        };
+        clear.onclick = function() { for (var i = 0; i < forms.length; i++) forms[i].selected = false; render(); };
+        confirm.onclick = function() {
+            var selected = [];
+            for (var i = 0; i < forms.length; i++) if (forms[i].selected) selected.push(forms[i]);
+            if (selected.length === 0) return;
+            overlay.remove();
+            onConfirm(selected);
+        };
+        render();
+    }
+
+    function fpBuildSelect2Segment(label, widthPx) {
+        var seg = document.createElement("div");
+        seg.className = "select2-container collectInput";
+        seg.style.cssText = "max-width:596px;width:" + widthPx + "px;display:inline-block;margin-right:4px;vertical-align:middle;";
+        var choice = document.createElement("a");
+        choice.href = "javascript:void(0)";
+        choice.className = "select2-choice select2-default";
+        choice.tabIndex = -1;
+        choice.style.cssText = "height:28px;line-height:28px;border:1px solid #aaa;background:#fff;color:#555;border-radius:4px;display:block;text-decoration:none;padding-left:8px;position:relative;";
+        var chosen = document.createElement("span");
+        chosen.className = "select2-chosen";
+        chosen.textContent = label;
+        var arrow = document.createElement("span");
+        arrow.className = "select2-arrow";
+        arrow.style.cssText = "position:absolute;right:0;top:0;width:22px;height:26px;border-left:1px solid #aaa;text-align:center;";
+        arrow.innerHTML = "<b role='presentation'></b>";
+        choice.appendChild(chosen);
+        choice.appendChild(arrow);
+        var drop = document.createElement("div");
+        drop.className = "select2-drop select2-display-none select2-with-searchbox";
+        drop.style.display = "none";
+        drop.innerHTML = '<div class="select2-search"><input type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" class="select2-input" role="combobox" aria-expanded="true" aria-autocomplete="list" placeholder=""></div><ul class="select2-results" role="listbox"></ul>';
+        seg.appendChild(choice);
+        seg.appendChild(drop);
+        return seg;
+    }
+
+    function fpRenderDateTimeControl(item, dt) {
+        var wrap = document.createElement("span");
+        var timing = document.createElement("div");
+        timing.className = "timingSelects";
+        if (dt.indexOf("time") === -1 || dt.indexOf("date") !== -1) {
+            timing.appendChild(fpBuildSelect2Segment("DD", 75));
+            timing.appendChild(fpBuildSelect2Segment("MMM", 90));
+            timing.appendChild(fpBuildSelect2Segment("YYYY", 95));
+        }
+        if (dt.indexOf("time") !== -1) {
+            timing.appendChild(fpBuildSelect2Segment("HH", 75));
+            timing.appendChild(document.createTextNode(":"));
+            timing.appendChild(fpBuildSelect2Segment("mm", 75));
+            timing.appendChild(document.createTextNode(":"));
+            timing.appendChild(fpBuildSelect2Segment("ss", 75));
+        }
+        var buttons = document.createElement("div");
+        buttons.className = "timeSetButtons";
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn btn-xs dark";
+        b.disabled = true;
+        b.innerHTML = "<i class='fa fa-clock-o'></i>Current Time";
+        buttons.appendChild(b);
+        wrap.appendChild(timing);
+        wrap.appendChild(buttons);
+        return wrap;
+    }
+
+    function fpRenderFileUploadControl() {
+        var span = document.createElement("span");
+        span.className = "edcDeviceParameterInput";
+        span.innerHTML = '<button type="button" class="btn default" disabled="disabled"><i class="fa fa-paperclip"></i> Select File</button>';
+        return span;
+    }
+
+    function fpRenderCodelistControl(item) {
+        var outer = document.createElement("span");
+        var radioList = document.createElement("div");
+        radioList.className = "radio-list";
+        var values = item.codelist && item.codelist.items && item.codelist.items.length ? item.codelist.items : [];
+        if (values.length === 0) {
+            var empty = document.createElement("div");
+            empty.style.cssText = "font-size:12px;color:#777;";
+            empty.textContent = item.codelist && item.codelist.message ? item.codelist.message : "Codelist values unavailable";
+            radioList.appendChild(empty);
+        }
+        for (var i = 0; i < values.length; i++) {
+            var label = document.createElement("label");
+            label.style.cssText = "display:block;font-weight:400;";
+            var radio = document.createElement("div");
+            radio.className = "radio";
+            radio.style.display = "inline-block";
+            var rSpan = document.createElement("span");
+            var input = document.createElement("input");
+            input.type = "radio";
+            input.disabled = true;
+            input.value = values[i].codedValue;
+            rSpan.appendChild(input);
+            radio.appendChild(rSpan);
+            label.appendChild(radio);
+            label.appendChild(document.createTextNode(" " + (values[i].decode || values[i].codedValue)));
+            radioList.appendChild(label);
+        }
+        outer.appendChild(radioList);
+        return outer;
+    }
+
+    function fpRenderItemControl(item) {
+        var wrap = document.createElement("div");
+        var dt = (item.dataType || "").toLowerCase();
+        if (item.codelist) {
+            wrap.appendChild(fpRenderCodelistControl(item));
+        } else if (dt.indexOf("file") !== -1 || dt.indexOf("upload") !== -1) {
+            wrap.appendChild(fpRenderFileUploadControl());
+        } else if (dt.indexOf("date") !== -1 || dt.indexOf("time") !== -1) {
+            wrap.appendChild(fpRenderDateTimeControl(item, dt));
+        } else if (dt.indexOf("integer") !== -1 || dt.indexOf("float") !== -1 || dt.indexOf("decimal") !== -1 || dt.indexOf("number") !== -1) {
+            var num = document.createElement("input");
+            num.className = "collectInput " + (dt.indexOf("integer") !== -1 ? "integer" : "float");
+            num.type = "text";
+            num.readOnly = true;
+            num.disabled = true;
+            num.maxLength = item.length || "";
+            num.style.cssText = "width:90px;max-width:110px;height:28px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;background:#f9f9f9;color:#555;";
+            wrap.appendChild(num);
+        } else if (dt.indexOf("boolean") !== -1 || dt.indexOf("radio") !== -1) {
+            var yes = document.createElement("label");
+            yes.style.marginRight = "12px";
+            var ycb = document.createElement("input");
+            ycb.type = "radio";
+            ycb.disabled = true;
+            yes.appendChild(ycb);
+            yes.appendChild(document.createTextNode(" Yes"));
+            var no = document.createElement("label");
+            var ncb = document.createElement("input");
+            ncb.type = "radio";
+            ncb.disabled = true;
+            no.appendChild(ncb);
+            no.appendChild(document.createTextNode(" No"));
+            wrap.appendChild(yes);
+            wrap.appendChild(no);
+        } else {
+            if (dt.indexOf("text") !== -1) {
+                var ta = document.createElement("textarea");
+                ta.className = "form-control input-sm";
+                ta.disabled = true;
+                ta.rows = 3;
+                ta.style.minHeight = "72px";
+                ta.placeholder = item.dataType || "text";
+                wrap.appendChild(ta);
+            } else {
+                var text = document.createElement("input");
+                text.className = "form-control input-sm";
+                text.disabled = true;
+                text.placeholder = item.dataType || "text";
+                wrap.appendChild(text);
+            }
+        }
+        var meta = document.createElement("div");
+        meta.style.cssText = "font-size:11px;color:#777;margin-top:4px;";
+        meta.textContent = "Data Type: " + (item.dataType || "Unknown") + (item.codelist ? " | Codelist: " + (item.codelist.name || item.codelist.text || "") : "");
+        wrap.appendChild(meta);
+        return wrap;
+    }
+
+    function fpRenderCollectionModal(preview, options) {
+        var renderOptions = options || {};
+        var showVisibilityConditions = renderOptions.showVisibilityConditions !== false;
+        var modal = document.createElement("div");
+        modal.id = "formDataCollectDiv";
+        modal.className = "modal-content";
+        modal.style.cssText = "background:#fff;color:#333;width:100%;box-shadow:none;border-radius:0;";
+        var header = document.createElement("div");
+        header.className = "modal-header";
+        header.style.cssText = "border-bottom:none;padding-bottom:0;";
+        var crumb = document.createElement("ul");
+        crumb.className = "page-breadcrumb breadcrumb";
+        crumb.style.marginBottom = "5px";
+        var actions = document.createElement("li");
+        actions.className = "btn-group";
+        var actionsBtn = document.createElement("button");
+        actionsBtn.className = "btn btn-default dropdown-toggle";
+        actionsBtn.type = "button";
+        actionsBtn.disabled = true;
+        actionsBtn.innerHTML = "<span>Form Actions</span> <i class='fa fa-angle-down'></i>";
+        actions.appendChild(actionsBtn);
+        crumb.appendChild(actions);
+        var bits = ["Study Library Preview", "Preview Subject", "Preview Event", preview.name];
+        for (var i = 0; i < bits.length; i++) {
+            var li = document.createElement("li");
+            li.textContent = bits[i] + (i < bits.length - 1 ? " " : "");
+            if (i < bits.length - 1) {
+                var icon = document.createElement("i");
+                icon.className = "fa fa-angle-right";
+                icon.style.marginLeft = "6px";
+                li.appendChild(icon);
+            }
+            crumb.appendChild(li);
+        }
+        var note = document.createElement("div");
+        note.style.cssText = "margin-top:10px;font-size:12px;color:#777;";
+        note.innerHTML = "<strong>Preview only:</strong> rendered from Study Library metadata. No formData, scheduled activity, audit, or subject values are created.";
+        header.appendChild(crumb);
+        header.appendChild(note);
+        if (preview.helpTextHtml) {
+            var formHelpWrap = document.createElement("div");
+            formHelpWrap.style.cssText = "font-size:80%;";
+            var formHelp = document.createElement("div");
+            formHelp.style.cssText = "padding-left:8px;font-style:italic;";
+            formHelp.innerHTML = "<i class='fa fa-question-circle' style='color:#428bca;'></i> " + preview.helpTextHtml;
+            formHelpWrap.appendChild(formHelp);
+            header.appendChild(formHelpWrap);
+        }
+        var contents = document.createElement("div");
+        contents.id = "modalcontents";
+        var body = document.createElement("div");
+        body.className = "modal-body";
+        body.style.paddingTop = "20px";
+        var form = document.createElement("form");
+        form.id = "modalInput";
+        form.className = "form-horizontal";
+        for (var gi = 0; gi < preview.itemGroups.length; gi++) {
+            var g = preview.itemGroups[gi];
+            var gWrap = document.createElement("div");
+            gWrap.id = "itemGroupData_preview_" + gi;
+            gWrap.style.display = "inherit";
+            var top = document.createElement("div");
+            var groupActions = document.createElement("div");
+            groupActions.className = "btn-group pull-right";
+            groupActions.style.clear = "both";
+            var groupBtn = document.createElement("button");
+            groupBtn.className = "btn btn-default btn-sm dropdown-toggle";
+            groupBtn.type = "button";
+            groupBtn.disabled = true;
+            groupBtn.innerHTML = "<span>Item Group Actions</span> <i class='fa fa-angle-down'></i>";
+            groupActions.appendChild(groupBtn);
+            top.appendChild(groupActions);
+            var h4 = document.createElement("h4");
+            var hspan = document.createElement("span");
+            hspan.textContent = g.name;
+            h4.appendChild(hspan);
+            if (g.helpTextHtml || g.helpText) {
+                var helpDiv = document.createElement("div");
+                var help = document.createElement("span");
+                help.className = "itemGroupNote";
+                help.innerHTML = "<i class='fa fa-question-circle' style='color:#428bca;'></i> " + (g.helpTextHtml || fpCleanText(g.helpText));
+                helpDiv.appendChild(help);
+                h4.appendChild(helpDiv);
+            }
+            if (showVisibilityConditions) fpAppendVisibilityCondition(h4, g.visibilityCondition);
+            top.appendChild(h4);
+            gWrap.appendChild(top);
+            var tableWrap = document.createElement("div");
+            tableWrap.style.cssText = "margin-bottom:25px;padding-top:5px;";
+            var responsive = document.createElement("div");
+            responsive.className = "table-responsive";
+            var table = document.createElement("table");
+            table.className = "table table-striped table-hover";
+            table.style.borderBottom = "1px solid #ddd";
+            var tbody = document.createElement("tbody");
+            for (var ii = 0; ii < g.items.length; ii++) {
+                var item = g.items[ii];
+                var tr = document.createElement("tr");
+                tr.id = "itemDataCollectRow_preview_" + gi + "_" + ii;
+                var tdText = document.createElement("td");
+                tdText.className = "itemText";
+                tdText.style.color = "inherit";
+                tdText.textContent = item.prompt || item.name;
+                if (item.helpTextHtml || item.helpText) {
+                    var help = document.createElement("div");
+                    help.className = "itemHelpText";
+                    help.style.cssText = "margin-left:4px;margin-top:3px;";
+                    help.innerHTML = "<i class='fa fa-question-circle' style='color:#428bca;'></i> " + (item.helpTextHtml || fpCleanText(item.helpText));
+                    tdText.appendChild(help);
+                }
+                if (showVisibilityConditions) fpAppendVisibilityCondition(tdText, item.visibilityCondition);
+                var tdControl = document.createElement("td");
+                tdControl.className = "itemControl";
+                tdControl.style.verticalAlign = "middle";
+                tdControl.appendChild(fpRenderItemControl(item));
+                var tdMeta = document.createElement("td");
+                tdMeta.className = "itemMeta";
+                var metaList = document.createElement("ul");
+                metaList.className = "metaList";
+                metaList.style.cssText = "font-size:11px;color:#666;margin:0;padding-left:18px;clear:both;";
+                function addMetaLine(text) {
+                    if (!text) return;
+                    var liMeta = document.createElement("li");
+                    liMeta.textContent = text;
+                    metaList.appendChild(liMeta);
+                }
+                addMetaLine("Mandatory: " + (item.mandatory || "-"));
+                addMetaLine("Hidden: " + (item.hidden || "-"));
+                if (item.method) addMetaLine("Method: " + item.method);
+                if (item.formatText) addMetaLine("Format: " + item.formatText);
+                if (item.roleRestriction) addMetaLine("Role Restriction: " + item.roleRestriction);
+                tdMeta.appendChild(metaList);
+                tr.appendChild(tdText);
+                tr.appendChild(tdControl);
+                tr.appendChild(tdMeta);
+                tbody.appendChild(tr);
+            }
+            if (g.items.length === 0) {
+                var empty = document.createElement("tr");
+                var emptyTd = document.createElement("td");
+                emptyTd.colSpan = 3;
+                emptyTd.textContent = g.message || "No item references found.";
+                emptyTd.style.color = "#777";
+                empty.appendChild(emptyTd);
+                tbody.appendChild(empty);
+            }
+            table.appendChild(tbody);
+            responsive.appendChild(table);
+            tableWrap.appendChild(responsive);
+            gWrap.appendChild(tableWrap);
+            form.appendChild(gWrap);
+        }
+        if (preview.itemGroups.length === 0) {
+            var noGroups = document.createElement("div");
+            noGroups.className = "alert alert-warning";
+            noGroups.textContent = "No Item Group References were found for this form.";
+            form.appendChild(noGroups);
+        }
+        body.appendChild(form);
+        contents.appendChild(body);
+        modal.appendChild(header);
+        modal.appendChild(contents);
+        return modal;
+    }
+
+    function fpBuildPrintHtml(previews, showVisibilityConditions) {
+        var sections = [];
+        for (var i = 0; i < previews.length; i++) {
+            var holder = document.createElement("div");
+            holder.className = "fp-print-section";
+            if (i > 0) holder.style.pageBreakBefore = "always";
+            holder.appendChild(fpRenderCollectionModal(previews[i], {
+                showVisibilityConditions: showVisibilityConditions
+            }));
+            sections.push(holder.outerHTML);
+        }
+        var sourceStyles = "";
+        var styleNodes = document.querySelectorAll("link[rel='stylesheet'], style");
+        for (var si = 0; si < styleNodes.length; si++) sourceStyles += styleNodes[si].outerHTML + "\n";
+        var printStyles = "<style>" +
+            "@page{size:auto;margin:12mm;}" +
+            "html,body{background:#fff!important;color:#333!important;font-family:Arial,Helvetica,sans-serif;font-size:12px;}" +
+            ".fp-print-toolbar{display:none!important;}" +
+            ".fp-print-section{break-after:page;page-break-after:always;}" +
+            ".fp-print-section:last-child{break-after:auto;page-break-after:auto;}" +
+            ".modal-content{box-shadow:none!important;border:none!important;}" +
+            ".table-responsive{overflow:visible!important;}" +
+            "table{width:100%!important;border-collapse:collapse!important;}" +
+            "tr,td,th,h4{break-inside:avoid;page-break-inside:avoid;}" +
+            "td,th{border-color:#ddd!important;}" +
+            "button,input,textarea,select{print-color-adjust:exact;-webkit-print-color-adjust:exact;}" +
+            "</style>";
+        return "<!doctype html><html><head><meta charset='utf-8'><title>Form Preview PDF</title>" + sourceStyles + printStyles + "</head><body>" + sections.join("") + "</body></html>";
+    }
+
+    function fpDownloadMergedPreviewPdf(previews, showVisibilityConditions) {
+        try {
+            var win = window.open("", "_blank");
+            if (!win) {
+                createPopup({
+                    title: "Form Preview PDF",
+                    content: '<div style="padding:20px;color:#ffb74d;">The browser blocked the PDF window. Allow popups for ClinSpark, then click Download PDF again.</div>',
+                    width: "460px",
+                    height: "auto"
+                });
+                return;
+            }
+            win.document.open();
+            win.document.write(fpBuildPrintHtml(previews, showVisibilityConditions));
+            win.document.close();
+            setTimeout(function() {
+                try {
+                    win.focus();
+                    win.print();
+                } catch (printErr) {
+                    fpLog("PDF print trigger failed: " + String(printErr && printErr.message ? printErr.message : printErr));
+                }
+            }, 350);
+        } catch (err) {
+            createPopup({
+                title: "Form Preview PDF",
+                content: '<div style="padding:20px;color:#ffb74d;">Could not prepare the merged PDF view: ' + fpCleanText(err && err.message ? err.message : err) + '</div>',
+                width: "520px",
+                height: "auto"
+            });
+        }
+    }
+
+    function fpShowPreviewWorkspace(previews) {
+        var overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:30000;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',Tahoma,sans-serif;";
+        var shell = document.createElement("div");
+        shell.style.cssText = "width:96vw;height:92vh;background:#f5f5f5;border-radius:10px;box-shadow:0 18px 55px rgba(0,0,0,0.55);display:flex;flex-direction:column;overflow:hidden;";
+        var header = document.createElement("div");
+        header.style.cssText = "display:flex;justify-content:space-between;align-items:center;background:#1f2937;color:white;padding:10px 14px;";
+        var title = document.createElement("div");
+        title.textContent = "Form Preview";
+        title.style.cssText = "font-weight:700;";
+        var headerControls = document.createElement("div");
+        headerControls.style.cssText = "display:flex;align-items:center;gap:10px;";
+        var visibilityToggleLabel = document.createElement("label");
+        visibilityToggleLabel.style.cssText = "display:flex;align-items:center;gap:6px;margin:0;font-size:12px;font-weight:500;cursor:pointer;user-select:none;";
+        var visibilityToggle = document.createElement("input");
+        visibilityToggle.type = "checkbox";
+        visibilityToggle.checked = true;
+        visibilityToggle.style.cssText = "margin:0;accent-color:#2ea043;";
+        var visibilityToggleText = document.createElement("span");
+        visibilityToggleText.textContent = "Show Visibility Conditions";
+        visibilityToggleLabel.appendChild(visibilityToggle);
+        visibilityToggleLabel.appendChild(visibilityToggleText);
+        var pdfBtn = fpButton("Download PDF", "#0d9488");
+        var close = fpButton("Close", "#555");
+        header.appendChild(title);
+        headerControls.appendChild(visibilityToggleLabel);
+        headerControls.appendChild(pdfBtn);
+        headerControls.appendChild(close);
+        header.appendChild(headerControls);
+        var main = document.createElement("div");
+        main.style.cssText = "display:flex;flex:1;min-height:0;";
+        var side = document.createElement("div");
+        side.style.cssText = "width:280px;background:#111;color:#eee;border-right:1px solid #333;overflow:auto;padding:8px;";
+        var previewArea = document.createElement("div");
+        previewArea.style.cssText = "flex:1;overflow:auto;background:#fff;padding:0;";
+        main.appendChild(side);
+        main.appendChild(previewArea);
+        shell.appendChild(header);
+        shell.appendChild(main);
+        overlay.appendChild(shell);
+        document.body.appendChild(overlay);
+        var activeIndex = 0;
+        function show(index) {
+            activeIndex = index;
+            previewArea.innerHTML = "";
+            previewArea.appendChild(fpRenderCollectionModal(previews[index], {
+                showVisibilityConditions: visibilityToggle.checked
+            }));
+            var rows = side.querySelectorAll("[data-fp-index]");
+            for (var r = 0; r < rows.length; r++) {
+                rows[r].style.background = Number(rows[r].getAttribute("data-fp-index")) === index ? "#263344" : "transparent";
+            }
+        }
+        for (var i = 0; i < previews.length; i++) {
+            (function(idx) {
+                var row = document.createElement("div");
+                row.setAttribute("data-fp-index", String(idx));
+                row.textContent = previews[idx].name;
+                row.title = previews[idx].name;
+                row.style.cssText = "padding:8px 9px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px;";
+                row.onclick = function() { show(idx); };
+                side.appendChild(row);
+            })(i);
+        }
+        visibilityToggle.onchange = function() {
+            show(activeIndex);
+        };
+        pdfBtn.onclick = function() {
+            fpDownloadMergedPreviewPdf(previews, visibilityToggle.checked);
+        };
+        close.onclick = function() { overlay.remove(); };
+        overlay.onclick = function(e) { if (e.target === overlay) close.click(); };
+        show(0);
+    }
+
+    async function fpCollectSelectedAndPreview(selectedForms) {
+        FP_CANCELLED = false;
+        FP_DOCUMENT_CACHE = {};
+        var box = document.createElement("div");
+        box.style.cssText = "padding:22px;text-align:center;min-width:420px;";
+        var title = document.createElement("div");
+        title.textContent = "Collecting form preview data...";
+        title.style.cssText = "font-size:16px;font-weight:700;color:#9df;margin-bottom:10px;";
+        var status = document.createElement("div");
+        status.style.cssText = "font-size:12px;color:#ddd;margin-bottom:12px;";
+        var progress = document.createElement("div");
+        progress.style.cssText = "font-size:11px;color:#aaa;";
+        var cancel = fpButton("Cancel", "#a93226");
+        cancel.style.marginTop = "14px";
+        box.appendChild(title);
+        box.appendChild(status);
+        box.appendChild(progress);
+        box.appendChild(cancel);
+        var pop = createPopup({ title: "Form Preview", content: box, width: "480px", height: "auto" });
+        cancel.onclick = function() { FP_CANCELLED = true; if (pop && pop.close) pop.close(); };
+        var completedForms = 0;
+        status.textContent = "Collecting " + selectedForms.length + " form" + (selectedForms.length === 1 ? "" : "s") + "...";
+        progress.textContent = "Opening form pages...";
+        var previews = [];
+        try {
+            previews = await fpMapLimit(selectedForms, FP_FORM_CONCURRENCY, async function(form, idx) {
+                if (FP_CANCELLED) throw fpMakeCancelError();
+                try {
+                    var preview = await fpCollectFormPreview(form, function(msg) {
+                        progress.textContent = form.name + " - " + msg;
+                    });
+                    completedForms++;
+                    status.textContent = "Completed " + completedForms + " of " + selectedForms.length + " forms";
+                    fpLog("preview collected for " + form.name);
+                    return preview;
+                } catch (err) {
+                    if (fpIsCancelError(err)) throw err;
+                    completedForms++;
+                    status.textContent = "Completed " + completedForms + " of " + selectedForms.length + " forms";
+                    fpLog("failed preview for " + form.name + ": " + String(err));
+                    return { id: form.id, name: form.name, description: form.description, link: form.link, itemGroups: [], error: String(err) };
+                }
+            });
+        } catch (err) {
+            if (!fpIsCancelError(err)) {
+                fpLog("preview collection stopped: " + String(err));
+            }
+        }
+        if (pop && pop.close) pop.close();
+        if (previews.length > 0 && !FP_CANCELLED) fpShowPreviewWorkspace(previews);
+        FP_DOCUMENT_CACHE = null;
+    }
+
+    async function runFormPreview() {
+        fpLog("button clicked");
+        FP_CANCELLED = false;
+        if (!fpIsFormListPage() && !fpIsActivityPlanShowPage()) {
+            showWrongPagePopup("Form Preview", FP_LIST_URL_TEST, location.href, FP_LIST_URL_TEST);
+            return;
+        }
+        var waitBox = document.createElement("div");
+        waitBox.style.padding = "18px";
+        waitBox.style.textAlign = "center";
+        waitBox.style.color = "#e5e7eb";
+        waitBox.innerHTML = '<div style="font-weight:600;margin-bottom:8px;">Scanning forms...</div><div style="font-size:13px;color:#9ca3af;margin-bottom:14px;">Waiting for the form table to finish loading.</div>';
+        var cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.style.padding = "7px 14px";
+        cancelBtn.style.borderRadius = "6px";
+        cancelBtn.style.border = "1px solid #555";
+        cancelBtn.style.background = "#333";
+        cancelBtn.style.color = "#fff";
+        cancelBtn.style.cursor = "pointer";
+        waitBox.appendChild(cancelBtn);
+        var waitPopup = createPopup({ title: "Form Preview", content: waitBox, width: "420px", height: "auto" });
+        cancelBtn.addEventListener("click", function() {
+            FP_CANCELLED = true;
+            if (waitPopup && waitPopup.close) waitPopup.close();
+        });
+        var forms = await fpWaitForFormsFromTable(fpIsActivityPlanShowPage() ? 15000 : 10000);
+        if (waitPopup && waitPopup.close) waitPopup.close();
+        if (FP_CANCELLED) {
+            FP_CANCELLED = false;
+            return;
+        }
+        if (forms.length === 0) {
+            createPopup({
+                title: "Form Preview",
+                content: '<div style="padding:20px;text-align:center;color:#ffb74d;">No forms found in the form library or activity plan table.</div>',
+                width: "420px",
+                height: "auto"
+            });
+            return;
+        }
+        fpBuildSelectionPanel(forms, function(selected) {
+            fpCollectSelectedAndPreview(selected);
+        });
+    }
+
+
+
+
+    //==========================
     // METHODS LIBRARY FEATURE
     //==========================
     // Methods Library Configuration
@@ -13741,6 +14918,3676 @@
         } catch (e) {}
     }
 
+    //==========================
+    // FORMAL EXPRESSION EDITOR
+    //==========================
+    var MFE_DRAFTS_KEY = "activityPlanState.methodFormalExpressionEditor.drafts";
+    var MFE_COLLECTED_KEY = "activityPlanState.methodFormalExpressionEditor.collected";
+    var MFE_OVERLAY_ID = "methodFormalExpressionEditorOverlay";
+    var MFE_CANCELLED = false;
+
+    function mfeIsMethodListPage() {
+        return location.pathname.indexOf("/secure/crfdesign/studylibrary/list/method") !== -1;
+    }
+
+    function mfeLog(msg) {
+        log("FormalExpressionEditor: " + msg);
+    }
+
+    function mfeAbsUrl(url) {
+        if (!url) return "";
+        if (url.indexOf("http") === 0) return url;
+        try {
+            return new URL(url, getBaseUrl()).href;
+        } catch (e) {
+            return getBaseUrl() + url;
+        }
+    }
+
+    function mfeNormalizeText(text) {
+        return String(text || "").replace(/\s+/g, " ").trim();
+    }
+
+    function mfeGetMethodIdFromHref(href) {
+        var m = String(href || "").match(/\/method\/(\d+)/);
+        return m ? m[1] : "";
+    }
+
+    function mfeGetDrafts() {
+        try {
+            var raw = localStorage.getItem(MFE_DRAFTS_KEY);
+            var parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function mfeSaveDrafts(drafts) {
+        try {
+            localStorage.setItem(MFE_DRAFTS_KEY, JSON.stringify(drafts || {}));
+        } catch (e) {
+            mfeLog("unable to save drafts: " + String(e));
+        }
+    }
+
+    function mfeSaveCollected(methods) {
+        var saved = {};
+        for (var i = 0; i < methods.length; i++) {
+            saved[methods[i].id] = {
+                id: methods[i].id,
+                name: methods[i].name,
+                expression: methods[i].originalExpression,
+                updateUrl: methods[i].updateUrl,
+                collectedAt: Date.now()
+            };
+        }
+        try {
+            localStorage.setItem(MFE_COLLECTED_KEY, JSON.stringify(saved));
+        } catch (e) {
+            mfeLog("unable to save collected expressions: " + String(e));
+        }
+    }
+
+    function mfeCollectMethodsFromTable() {
+        var rows = document.querySelectorAll("table tbody tr");
+        var found = [];
+        var seen = {};
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var links = row.querySelectorAll("a[href]");
+            var showHref = "";
+            var updateHref = "";
+            var id = "";
+            for (var li = 0; li < links.length; li++) {
+                var href = links[li].getAttribute("href") || "";
+                if (href.indexOf("/secure/crfdesign/studylibrary/show/method/") !== -1 || href.indexOf("/secure/crfdesign/studylibrary/update/method/") !== -1 || href.indexOf("/secure/crfdesign/studylibrary/delete/method/") !== -1) {
+                    id = id || mfeGetMethodIdFromHref(href);
+                }
+                if (!showHref && href.indexOf("/secure/crfdesign/studylibrary/show/method/") !== -1) showHref = href;
+                if (!updateHref && href.indexOf("/secure/crfdesign/studylibrary/update/method/") !== -1) updateHref = href;
+            }
+            if (!id || seen[id]) continue;
+            seen[id] = true;
+            var cells = row.querySelectorAll("td");
+            var name = "";
+            for (var ci = 0; ci < cells.length; ci++) {
+                var t = mfeNormalizeText(cells[ci].textContent || "");
+                if (!t || /^action$/i.test(t) || t.toLowerCase().indexOf("show usage") !== -1) continue;
+                name = t;
+                break;
+            }
+            if (!name) name = "Method " + id;
+            if (!updateHref && showHref) updateHref = showHref.replace("/show/method/", "/update/method/");
+            if (!showHref) showHref = "/secure/crfdesign/studylibrary/show/method/" + id;
+            if (!updateHref) updateHref = "/secure/crfdesign/studylibrary/update/method/" + id;
+            found.push({
+                id: id,
+                name: name,
+                showUrl: mfeAbsUrl(showHref),
+                updateUrl: mfeAbsUrl(updateHref),
+                originalExpression: "",
+                editedExpression: "",
+                loadError: "",
+                saveStatus: ""
+            });
+        }
+        return found;
+    }
+
+    async function mfeCollectExpression(method) {
+        var html = await fetchPage(method.updateUrl);
+        var doc = parseHtml(html);
+        var textarea = doc.querySelector("textarea#formalExpression, textarea[name='formalExpression']");
+        if (!textarea) throw new Error("Formal Expression field not found");
+        var nameInput = doc.querySelector("input#name, input[name='name']");
+        if (nameInput && nameInput.value) method.name = nameInput.value;
+        method.originalExpression = textarea.value || textarea.textContent || "";
+        return method;
+    }
+
+    async function mfeMapLimit(items, limit, iterator, progress) {
+        var results = new Array(items.length);
+        var index = 0;
+        var active = 0;
+        var done = 0;
+        return new Promise(function(resolve) {
+            function pump() {
+                if (MFE_CANCELLED) {
+                    resolve(results);
+                    return;
+                }
+                if (done >= items.length) {
+                    resolve(results);
+                    return;
+                }
+                while (active < limit && index < items.length) {
+                    (function(i) {
+                        index++;
+                        active++;
+                        Promise.resolve(iterator(items[i], i)).then(function(value) {
+                            results[i] = value;
+                        }).catch(function(err) {
+                            items[i].loadError = String(err && err.message ? err.message : err);
+                            results[i] = items[i];
+                        }).then(function() {
+                            active--;
+                            done++;
+                            if (progress) progress(done, items.length, items[i]);
+                            pump();
+                        });
+                    })(index);
+                }
+            }
+            pump();
+        });
+    }
+
+    function mfeApplySavedDrafts(methods) {
+        var drafts = mfeGetDrafts();
+        for (var i = 0; i < methods.length; i++) {
+            var method = methods[i];
+            var draft = drafts[method.id];
+            if (draft && typeof draft.editedExpression === "string" && draft.editedExpression !== method.originalExpression) {
+                method.editedExpression = draft.editedExpression;
+                method.draftApplied = true;
+            } else {
+                method.editedExpression = method.originalExpression;
+            }
+        }
+    }
+
+    function mfeEscapeHtml(str) {
+        var d = document.createElement("div");
+        d.textContent = String(str || "");
+        return d.innerHTML;
+    }
+
+    function mfeMarkedTokenHtml(raw, baseClass, start, end, marks) {
+        var mark = marks && marks[start];
+        var classes = [];
+        if (baseClass) classes.push(baseClass);
+        if (mark && mark.className) classes.push(mark.className);
+        if (classes.length === 0) return mfeEscapeHtml(raw);
+        return '<span class="' + classes.join(" ") + '"' + (mark && mark.title ? ' title="' + mfeEscapeHtml(mark.title) + '" data-mfe-mark-title="' + mfeEscapeHtml(mark.title) + '" data-mfe-mark-start="' + start + '" data-mfe-mark-end="' + end + '"' : "") + ">" + mfeEscapeHtml(raw) + "</span>";
+    }
+
+    function mfeHighlightLine(line, baseOffset, marks) {
+        var text = String(line || "");
+        baseOffset = baseOffset || 0;
+        var keywords = {
+            "var": true, "let": true, "const": true, "function": true, "return": true, "if": true, "else": true,
+            "for": true, "while": true, "try": true, "catch": true, "throw": true, "new": true, "true": true,
+            "false": true, "null": true, "undefined": true, "break": true, "continue": true, "switch": true,
+            "case": true, "default": true, "typeof": true, "await": true, "async": true
+        };
+        var out = "";
+        var i = 0;
+        while (i < text.length) {
+            var ch = text.charAt(i);
+            var next = text.charAt(i + 1);
+            if (ch === "/" && next === "/") {
+                out += mfeMarkedTokenHtml(text.slice(i), "mfe-token-comment", baseOffset + i, baseOffset + text.length, marks);
+                break;
+            }
+            if (ch === '"' || ch === "'" || ch === "`") {
+                var quote = ch;
+                var j = i + 1;
+                var escaped = false;
+                while (j < text.length) {
+                    var cj = text.charAt(j);
+                    if (escaped) {
+                        escaped = false;
+                    } else if (cj === "\\") {
+                        escaped = true;
+                    } else if (cj === quote) {
+                        j++;
+                        break;
+                    }
+                    j++;
+                }
+                out += mfeMarkedTokenHtml(text.slice(i, j), "mfe-token-string", baseOffset + i, baseOffset + j, marks);
+                i = j;
+                continue;
+            }
+            if (/[0-9]/.test(ch)) {
+                var nj = i + 1;
+                while (nj < text.length && /[0-9.]/.test(text.charAt(nj))) nj++;
+                out += mfeMarkedTokenHtml(text.slice(i, nj), "mfe-token-number", baseOffset + i, baseOffset + nj, marks);
+                i = nj;
+                continue;
+            }
+            if (/[A-Za-z_$]/.test(ch)) {
+                var ij = i + 1;
+                while (ij < text.length && /[A-Za-z0-9_$]/.test(text.charAt(ij))) ij++;
+                var word = text.slice(i, ij);
+                out += mfeMarkedTokenHtml(word, keywords[word] ? "mfe-token-keyword" : "", baseOffset + i, baseOffset + ij, marks);
+                i = ij;
+                continue;
+            }
+            out += mfeMarkedTokenHtml(ch, "", baseOffset + i, baseOffset + i + 1, marks);
+            i++;
+        }
+        return out;
+    }
+
+    function mfeCodeHtml(code, marks) {
+        var lines = String(code || "").split(/\r?\n/);
+        var html = "";
+        var offset = 0;
+        for (var i = 0; i < lines.length; i++) {
+            html += '<div class="mfe-code-line"><span class="mfe-line-no">' + (i + 1) + '</span><span class="mfe-line-code">' + (mfeHighlightLine(lines[i], offset, marks) || " ") + '</span></div>';
+            offset += lines[i].length + 1;
+        }
+        return html;
+    }
+
+    function mfeInjectStyles() {
+        if (document.getElementById("mfe-styles")) return;
+        var style = document.createElement("style");
+        style.id = "mfe-styles";
+        style.textContent = [
+            "#methodFormalExpressionEditorOverlay *{box-sizing:border-box;}",
+            "#methodFormalExpressionEditorOverlay{position:fixed;inset:0;z-index:1000005;background:#0f172a;color:#d4d4d4;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;display:flex;flex-direction:column;overflow:hidden;}",
+            ".mfe-header{height:52px;flex:0 0 52px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:#111827;border-bottom:1px solid #263247;}",
+            ".mfe-title{font-size:16px;font-weight:700;color:#f8fafc;}",
+            ".mfe-subtitle{font-size:12px;color:#94a3b8;margin-top:2px;}",
+            ".mfe-btn{border:1px solid #334155;background:#1e293b;color:#e5e7eb;border-radius:6px;padding:7px 12px;cursor:pointer;font-weight:650;font-size:12px;}",
+            ".mfe-btn:hover{background:#26364d;}",
+            ".mfe-btn-primary{background:#2563eb;border-color:#3b82f6;color:#fff;}",
+            ".mfe-btn-danger{background:#7f1d1d;border-color:#ef4444;color:#fff;}",
+            ".mfe-btn-good{background:#166534;border-color:#22c55e;color:#fff;}",
+            ".mfe-body{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;grid-template-columns:minmax(230px,320px) 6px minmax(0,1fr);}",
+            ".mfe-list{background:#111827;border-right:1px solid #263247;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;}",
+            ".mfe-search{flex:0 0 auto;margin:12px;padding:9px 10px;border-radius:6px;border:1px solid #334155;background:#020617;color:#e5e7eb;outline:none;}",
+            ".mfe-method-list{flex:1;min-height:0;overflow:auto;padding:0 8px 10px;}",
+            ".mfe-method{padding:9px 10px;border:1px solid transparent;border-radius:7px;cursor:pointer;margin-bottom:6px;color:#cbd5e1;background:transparent;}",
+            ".mfe-method:hover{background:#172033;}",
+            ".mfe-method.mfe-selected{background:#1d3157;border-color:#3b82f6;}",
+            ".mfe-method.mfe-dirty{border-color:#f59e0b;box-shadow:inset 3px 0 0 #f59e0b;}",
+            ".mfe-method.mfe-validation-error{border-color:#ef4444;box-shadow:inset 3px 0 0 #ef4444;}",
+            ".mfe-method.mfe-validation-warning{border-color:#f59e0b;}",
+            ".mfe-method.mfe-saved{border-color:#22c55e;box-shadow:inset 3px 0 0 #22c55e;}",
+            ".mfe-method-name{font-size:13px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+            ".mfe-method-meta{font-size:11px;color:#94a3b8;margin-top:3px;}",
+            ".mfe-resizer{background:#1e293b;cursor:col-resize;border-left:1px solid #334155;border-right:1px solid #0f172a;}",
+            ".mfe-editor-wrap{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:#0b1120;}",
+            ".mfe-toolbar{height:48px;flex:0 0 48px;display:flex;align-items:center;gap:8px;padding:8px 12px;background:#111827;border-bottom:1px solid #263247;}",
+            ".mfe-editor-grid{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);}",
+            ".mfe-editor-grid.mfe-compare-hidden{grid-template-columns:minmax(0,1fr) 0;}",
+            ".mfe-pane{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;border-right:1px solid #263247;}",
+            ".mfe-pane-title{height:34px;flex:0 0 34px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:#172033;color:#cbd5e1;font-size:12px;font-weight:700;}",
+            ".mfe-ace{flex:1;min-height:0;width:100%;position:relative;display:flex;background:#1e1e1e;overflow:hidden;}",
+            ".mfe-fallback-shell{flex:1 1 auto;min-height:0;width:100%;display:flex;overflow:hidden;background:#1e1e1e;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:18px;tab-size:4;}",
+            ".mfe-fallback-stack{position:relative;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden;background:#1e1e1e;}",
+            ".mfe-fallback-highlight{position:absolute;inset:0;overflow:hidden;padding:8px 0;color:#d4d4d4;background:#1e1e1e;font:inherit;line-height:inherit;white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;pointer-events:none;}",
+            ".mfe-fallback-highlight-inner{min-width:0;width:100%;will-change:transform;}",
+            ".mfe-fallback{position:absolute;inset:0;width:100%;height:100%;resize:none;overflow-y:auto;overflow-x:hidden;padding:8px 12px 8px 68px;color:transparent;-webkit-text-fill-color:transparent;background:transparent;border:0;outline:none;font:inherit;line-height:inherit;white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;caret-color:#f8fafc;}",
+            ".mfe-fallback::selection{background:rgba(59,130,246,0.38);}",
+            ".mfe-code-view{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;background:#1e1e1e;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:18px;padding:8px 0;}",
+            ".mfe-code-line{display:grid;grid-template-columns:56px minmax(0,1fr);min-height:18px;}",
+            ".mfe-line-no{color:#858585;text-align:right;padding-right:12px;user-select:none;}",
+            ".mfe-line-code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;color:#d4d4d4;padding:0 12px;}",
+            ".mfe-token-keyword{color:#569cd6;}.mfe-token-string{color:#ce9178;}.mfe-token-number{color:#b5cea8;}.mfe-token-comment{color:#6a9955;}",
+            ".mfe-semantic-unused{border-bottom:1px dotted #f59e0b;}",
+            ".mfe-semantic-undefined-var{color:#fca5a5;text-decoration-line:underline;text-decoration-style:wavy;text-decoration-color:#ef4444;text-underline-offset:3px;}",
+            ".mfe-semantic-undefined-fn{color:#fda4af;text-decoration-line:underline;text-decoration-style:wavy;text-decoration-color:#fb7185;text-underline-offset:3px;}",
+            ".mfe-bracket-match{background:rgba(59,130,246,0.32);outline:1px solid rgba(96,165,250,0.75);border-radius:2px;}",
+            ".mfe-bracket-missing{background:rgba(239,68,68,0.25);outline:1px solid rgba(248,113,113,0.75);border-radius:2px;}",
+            ".mfe-semantic-tooltip{position:fixed;z-index:1000020;max-width:320px;padding:7px 9px;border-radius:6px;border:1px solid #475569;background:#020617;color:#e5e7eb;font-size:12px;line-height:1.35;box-shadow:0 12px 34px rgba(0,0,0,0.45);pointer-events:none;display:none;}",
+            ".mfe-footer{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:10px;padding:8px 14px;background:#111827;border-top:1px solid #263247;position:relative;z-index:1;}",
+            ".mfe-footer label{font-size:12px;font-weight:700;color:#cbd5e1;}",
+            ".mfe-reason{flex:0 1 320px;width:320px;max-width:36vw;border-radius:6px;border:1px solid #334155;background:#020617;color:#e5e7eb;padding:7px 9px;outline:none;}",
+            ".mfe-validation-toggle{border:1px solid #334155;background:#020617;color:#94a3b8;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:750;cursor:pointer;white-space:nowrap;}",
+            ".mfe-validation-toggle.mfe-ok{border-color:#166534;color:#86efac;background:#052e16;}",
+            ".mfe-validation-toggle.mfe-warning{border-color:#f59e0b;color:#facc15;background:#451a03;}",
+            ".mfe-validation-toggle.mfe-error{border-color:#ef4444;color:#fecaca;background:#450a0a;}",
+            ".mfe-status{font-size:12px;color:#94a3b8;min-width:150px;text-align:right;margin-left:auto;}",
+            ".mfe-validation-panel{display:none;flex:0 0 auto;max-height:108px;overflow:auto;background:#172033;border-top:1px solid #263247;padding:8px 14px;font-size:12px;color:#cbd5e1;}",
+            ".mfe-validation-panel.mfe-open{display:block;}",
+            ".mfe-validation-list{display:flex;flex-direction:column;gap:4px;}",
+            ".mfe-validation-item{line-height:1.35;}",
+            ".mfe-validation-item strong{font-weight:800;}",
+            ".mfe-validation-item.mfe-error{color:#fecaca;}",
+            ".mfe-validation-item.mfe-warning{color:#fde68a;}",
+            ".mfe-validation-loc{border:0;background:transparent;color:#93c5fd;text-decoration:underline;text-underline-offset:2px;cursor:pointer;font:inherit;font-weight:800;padding:0 2px;}",
+            ".mfe-validation-loc:hover{color:#bfdbfe;background:rgba(59,130,246,0.16);border-radius:3px;}",
+            ".mfe-validation-jump{background:rgba(250,204,21,0.45);outline:1px solid rgba(250,204,21,0.95);border-radius:2px;}",
+            "@media(max-width:850px){.mfe-body{grid-template-columns:220px 6px minmax(0,1fr);}.mfe-editor-grid{grid-template-columns:1fr;}.mfe-pane-original{display:none;}.mfe-reason{width:220px;max-width:32vw;}.mfe-status{min-width:110px;}}"
+        ].join("\n");
+        document.head.appendChild(style);
+    }
+
+    function mfeSetTextareaValue(textarea, value) {
+        textarea.value = value;
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function mfeBuildUpdateFormData(form, expression, reason) {
+        var parts = [];
+        var inputs = form.querySelectorAll("input, textarea, select");
+        var hasFormalExpression = false;
+        var hasReasonForChange = false;
+        for (var i = 0; i < inputs.length; i++) {
+            var inp = inputs[i];
+            var name = inp.getAttribute("name");
+            if (!name) continue;
+            var type = (inp.getAttribute("type") || "").toLowerCase();
+            var tag = inp.tagName.toLowerCase();
+            var value = "";
+            if (name === "formalExpression" || inp.id === "formalExpression") {
+                hasFormalExpression = true;
+                value = expression;
+            } else if (name === "reasonForChange" || inp.id === "reasonForChange") {
+                hasReasonForChange = true;
+                value = reason || "Updated method";
+            } else if (tag === "select") {
+                var selectedOptions = inp.querySelectorAll("option[selected]");
+                if (selectedOptions.length === 0 && inp.options && inp.selectedIndex >= 0) selectedOptions = [inp.options[inp.selectedIndex]];
+                if (selectedOptions.length === 0) {
+                    parts.push(encodeURIComponent(name) + "=");
+                    continue;
+                }
+                for (var si = 0; si < selectedOptions.length; si++) {
+                    value = selectedOptions[si] ? (selectedOptions[si].value || selectedOptions[si].getAttribute("value") || "") : "";
+                    parts.push(encodeURIComponent(name) + "=" + encodeURIComponent(value));
+                }
+                continue;
+            } else if (type === "checkbox" || type === "radio") {
+                if (inp.checked || inp.hasAttribute("checked")) value = inp.value || inp.getAttribute("value") || "on";
+                else continue;
+            } else {
+                value = inp.value || inp.getAttribute("value") || "";
+            }
+            parts.push(encodeURIComponent(name) + "=" + encodeURIComponent(value));
+        }
+        if (!hasFormalExpression) parts.push("formalExpression=" + encodeURIComponent(expression || ""));
+        if (!hasReasonForChange) parts.push("reasonForChange=" + encodeURIComponent(reason || "Updated method"));
+        var submitter = form.querySelector("button[type='submit'][name], input[type='submit'][name], button[name]");
+        if (submitter) {
+            var submitName = submitter.getAttribute("name");
+            var submitValue = submitter.value || submitter.getAttribute("value") || submitter.textContent || "";
+            parts.push(encodeURIComponent(submitName) + "=" + encodeURIComponent(mfeNormalizeText(submitValue)));
+        }
+        return parts.join("&");
+    }
+
+    function mfeExtractFormalExpression(html) {
+        var doc = parseHtml(html);
+        var textarea = doc.querySelector("textarea#formalExpression, textarea[name='formalExpression']");
+        if (!textarea) return null;
+        return textarea.value || textarea.textContent || "";
+    }
+
+    async function mfeWaitForSavedExpression(method, expectedExpression) {
+        var expected = String(expectedExpression || "").replace(/\r\n/g, "\n");
+        var lastActual = null;
+        for (var attempt = 0; attempt < 10; attempt++) {
+            if (attempt > 0) await sleep(600);
+            var verifyHtml = await fetchPage(method.updateUrl);
+            var savedExpression = mfeExtractFormalExpression(verifyHtml);
+            if (savedExpression === null) {
+                lastActual = null;
+                continue;
+            }
+            lastActual = String(savedExpression || "").replace(/\r\n/g, "\n");
+            if (lastActual === expected) return true;
+        }
+        if (lastActual === null) throw new Error("Save could not be verified because the edit form was not returned");
+        throw new Error("Save verification failed; Formal Expression did not match after reopening the method");
+    }
+
+    async function mfeUpdateMethod(method, reason) {
+        var html = await fetchPage(method.updateUrl);
+        var doc = parseHtml(html);
+        var form = doc.querySelector("form");
+        if (!form) throw new Error("No edit form found");
+        if (!form.querySelector("textarea#formalExpression, textarea[name='formalExpression']")) {
+            throw new Error("Formal Expression field not found");
+        }
+        var postUrl = method.updateUrl;
+        var body = mfeBuildUpdateFormData(form, method.editedExpression, reason);
+        var result = await submitForm(postUrl, body);
+        var resultDoc = parseHtml(result);
+        var alert = resultDoc.querySelector(".alert-danger,.alert-error,.text-danger,.error");
+        if (alert) throw new Error(mfeNormalizeText(alert.textContent || "Save failed"));
+        await mfeWaitForSavedExpression(method, method.editedExpression);
+        method.originalExpression = method.editedExpression;
+    }
+
+    function mfeShowEditor(methods) {
+        mfeInjectStyles();
+        var prior = document.getElementById(MFE_OVERLAY_ID);
+        if (prior) prior.remove();
+
+        var drafts = mfeGetDrafts();
+        var selected = null;
+        var editor = null;
+        var fallbackTextarea = null;
+        var fallbackGutter = null;
+        var fallbackHighlight = null;
+        var semanticTooltip = null;
+        var fallbackUndoTimer = null;
+        var validationTimer = null;
+        var validationJumpTimer = null;
+        var validationJumpMark = null;
+        var validationAceMarker = null;
+        var validationPanelOpen = false;
+        var selectedValidation = { errors: [], warnings: [] };
+        var compareVisible = true;
+
+        var overlay = document.createElement("div");
+        overlay.id = MFE_OVERLAY_ID;
+
+        var header = document.createElement("div");
+        header.className = "mfe-header";
+        var titleBox = document.createElement("div");
+        var title = document.createElement("div");
+        title.className = "mfe-title";
+        title.textContent = "Method Editor";
+        var subtitle = document.createElement("div");
+        subtitle.className = "mfe-subtitle";
+        subtitle.textContent = methods.length + " methods collected";
+        titleBox.appendChild(title);
+        titleBox.appendChild(subtitle);
+        var headerActions = document.createElement("div");
+        var closeBtn = document.createElement("button");
+        closeBtn.className = "mfe-btn";
+        closeBtn.textContent = "Close";
+        headerActions.appendChild(closeBtn);
+        header.appendChild(titleBox);
+        header.appendChild(headerActions);
+        overlay.appendChild(header);
+
+        var body = document.createElement("div");
+        body.className = "mfe-body";
+        var listPane = document.createElement("div");
+        listPane.className = "mfe-list";
+        var search = document.createElement("input");
+        search.className = "mfe-search";
+        search.type = "text";
+        search.placeholder = "Search methods...";
+        var methodList = document.createElement("div");
+        methodList.className = "mfe-method-list";
+        listPane.appendChild(search);
+        listPane.appendChild(methodList);
+        var resizer = document.createElement("div");
+        resizer.className = "mfe-resizer";
+
+        var editorWrap = document.createElement("div");
+        editorWrap.className = "mfe-editor-wrap";
+        var toolbar = document.createElement("div");
+        toolbar.className = "mfe-toolbar";
+        var toggleCompareBtn = document.createElement("button");
+        toggleCompareBtn.className = "mfe-btn";
+        toggleCompareBtn.textContent = "Hide Collected";
+        var revertBtn = document.createElement("button");
+        revertBtn.className = "mfe-btn";
+        revertBtn.textContent = "Revert Selected";
+        var selectedName = document.createElement("div");
+        selectedName.style.cssText = "margin-left:auto;color:#94a3b8;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        toolbar.appendChild(toggleCompareBtn);
+        toolbar.appendChild(revertBtn);
+        toolbar.appendChild(selectedName);
+        editorWrap.appendChild(toolbar);
+
+        var editorGrid = document.createElement("div");
+        editorGrid.className = "mfe-editor-grid";
+        var editPane = document.createElement("div");
+        editPane.className = "mfe-pane";
+        var editTitle = document.createElement("div");
+        editTitle.className = "mfe-pane-title";
+        editTitle.textContent = "Edited Formal Expression";
+        var editorHost = document.createElement("div");
+        editorHost.className = "mfe-ace";
+        editPane.appendChild(editTitle);
+        editPane.appendChild(editorHost);
+
+        var originalPane = document.createElement("div");
+        originalPane.className = "mfe-pane mfe-pane-original";
+        var originalTitle = document.createElement("div");
+        originalTitle.className = "mfe-pane-title";
+        originalTitle.textContent = "Collected Formal Expression";
+        var originalCode = document.createElement("div");
+        originalCode.className = "mfe-code-view";
+        originalPane.appendChild(originalTitle);
+        originalPane.appendChild(originalCode);
+        editorGrid.appendChild(editPane);
+        editorGrid.appendChild(originalPane);
+        editorWrap.appendChild(editorGrid);
+        body.appendChild(listPane);
+        body.appendChild(resizer);
+        body.appendChild(editorWrap);
+        overlay.appendChild(body);
+
+        var validationPanel = document.createElement("div");
+        validationPanel.className = "mfe-validation-panel";
+        var validationList = document.createElement("div");
+        validationList.className = "mfe-validation-list";
+        validationPanel.appendChild(validationList);
+        semanticTooltip = document.createElement("div");
+        semanticTooltip.className = "mfe-semantic-tooltip";
+
+        var footer = document.createElement("div");
+        footer.className = "mfe-footer";
+        var reasonLabel = document.createElement("label");
+        reasonLabel.textContent = "Reason for Change:";
+        var reasonInput = document.createElement("input");
+        reasonInput.className = "mfe-reason";
+        reasonInput.type = "text";
+        reasonInput.placeholder = "Updated method";
+        var validationToggle = document.createElement("button");
+        validationToggle.type = "button";
+        validationToggle.className = "mfe-validation-toggle mfe-ok";
+        validationToggle.textContent = "No issues";
+        var status = document.createElement("div");
+        status.className = "mfe-status";
+        var confirmBtn = document.createElement("button");
+        confirmBtn.className = "mfe-btn mfe-btn-primary";
+        confirmBtn.textContent = "Confirm";
+        footer.appendChild(reasonLabel);
+        footer.appendChild(reasonInput);
+        footer.appendChild(validationToggle);
+        footer.appendChild(status);
+        footer.appendChild(confirmBtn);
+        overlay.appendChild(validationPanel);
+        overlay.appendChild(footer);
+        overlay.appendChild(semanticTooltip);
+        document.body.appendChild(overlay);
+
+        function getCode() {
+            if (editor) return editor.getValue();
+            return fallbackTextarea ? fallbackTextarea.value : "";
+        }
+
+        function setCode(value) {
+            if (editor) editor.setValue(value || "", -1);
+            else if (fallbackTextarea) {
+                fallbackTextarea.value = value || "";
+                fallbackTextarea.scrollTop = 0;
+                if (fallbackHighlight) fallbackHighlight.style.transform = "translateY(0)";
+                refreshFallbackGutter();
+                refreshFallbackHighlight();
+            }
+        }
+
+        function mfeGetEditableText(root) {
+            var text = root ? (root.innerText || root.textContent || "") : "";
+            return text.replace(/\u00a0/g, " ").replace(/\r\n/g, "\n");
+        }
+
+        function mfeEditableCodeHtml(code) {
+            var lines = String(code || "").split(/\r?\n/);
+            var html = [];
+            for (var i = 0; i < lines.length; i++) {
+                html.push(mfeHighlightLine(lines[i]));
+            }
+            return html.join("\n");
+        }
+
+        function mfeLineCol(text, index) {
+            var before = String(text || "").slice(0, Math.max(0, index));
+            var lines = before.split("\n");
+            return { line: lines.length, col: lines[lines.length - 1].length + 1 };
+        }
+
+        function mfeIndexFromLineCol(text, line, col) {
+            var value = String(text || "").replace(/\r\n/g, "\n");
+            var targetLine = Math.max(1, parseInt(line, 10) || 1);
+            var targetCol = Math.max(1, parseInt(col, 10) || 1);
+            var lines = value.split("\n");
+            var index = 0;
+            for (var i = 0; i < targetLine - 1 && i < lines.length; i++) index += lines[i].length + 1;
+            var lineText = lines[Math.min(targetLine - 1, lines.length - 1)] || "";
+            return Math.min(value.length, index + Math.min(targetCol - 1, lineText.length));
+        }
+
+        function mfeIssue(severity, message, line, col) {
+            return { severity: severity, message: message, line: line || 1, col: col || 1 };
+        }
+
+        function mfeCodeOnlyLine(line) {
+            var text = String(line || "");
+            var out = "";
+            var quote = "";
+            var escaped = false;
+            for (var i = 0; i < text.length; i++) {
+                var ch = text.charAt(i);
+                var next = text.charAt(i + 1);
+                if (quote) {
+                    if (escaped) escaped = false;
+                    else if (ch === "\\") escaped = true;
+                    else if (ch === quote) quote = "";
+                    out += " ";
+                    continue;
+                }
+                if (ch === "/" && next === "/") break;
+                if (ch === '"' || ch === "'" || ch === "`") {
+                    quote = ch;
+                    out += " ";
+                    continue;
+                }
+                out += ch;
+            }
+            return out;
+        }
+
+        function mfeValidateExpression(expression) {
+            var text = String(expression || "").replace(/\r\n/g, "\n");
+            var result = { errors: [], warnings: [] };
+            if (!text.trim()) {
+                return result;
+            }
+            var stack = [];
+            var pairs = { "(": ")", "[": "]", "{": "}" };
+            var closers = { ")": "(", "]": "[", "}": "{" };
+            var quote = "";
+            var quoteStart = null;
+            var escaped = false;
+            var lineComment = false;
+            for (var i = 0; i < text.length; i++) {
+                var ch = text.charAt(i);
+                var next = text.charAt(i + 1);
+                if (lineComment) {
+                    if (ch === "\n") lineComment = false;
+                    continue;
+                }
+                if (quote) {
+                    if (escaped) {
+                        escaped = false;
+                    } else if (ch === "\\") {
+                        escaped = true;
+                    } else if (ch === quote) {
+                        quote = "";
+                        quoteStart = null;
+                    }
+                    continue;
+                }
+                if (ch === "/" && next === "/") {
+                    lineComment = true;
+                    i++;
+                    continue;
+                }
+                if (ch === '"' || ch === "'" || ch === "`") {
+                    quote = ch;
+                    quoteStart = mfeLineCol(text, i);
+                    continue;
+                }
+                if (pairs[ch]) {
+                    var openPos = mfeLineCol(text, i);
+                    stack.push({ ch: ch, line: openPos.line, col: openPos.col });
+                    continue;
+                }
+                if (closers[ch]) {
+                    var closePos = mfeLineCol(text, i);
+                    if (stack.length === 0) {
+                        result.errors.push(mfeIssue("error", "Unexpected closing bracket '" + ch + "'.", closePos.line, closePos.col));
+                    } else {
+                        var top = stack.pop();
+                        if (top.ch !== closers[ch]) {
+                            result.errors.push(mfeIssue("error", "Mismatched bracket '" + top.ch + "' closed by '" + ch + "'.", closePos.line, closePos.col));
+                        }
+                    }
+                }
+            }
+            if (quote && quoteStart) {
+                result.errors.push(mfeIssue("error", "Unclosed " + (quote === "`" ? "backtick" : quote === '"' ? "double quote" : "single quote") + ".", quoteStart.line, quoteStart.col));
+            }
+            for (var si = stack.length - 1; si >= 0; si--) {
+                result.errors.push(mfeIssue("error", "Missing closing bracket '" + pairs[stack[si].ch] + "' for '" + stack[si].ch + "'.", stack[si].line, stack[si].col));
+            }
+            if (/<\/?[a-z][\s\S]*?>|&nbsp;|class\s*=|style\s*=|<div|<span/i.test(text)) {
+                result.warnings.push(mfeIssue("warning", "Expression may contain pasted HTML or encoded webpage content.", 1, 1));
+            }
+            var suspiciousCode = mfeMaskNonCode(text);
+            var suspiciousMatch = suspiciousCode.match(/[\u00a0\u200b-\u200d\ufeff\u2018-\u201f\u2013\u2014]/);
+            if (suspiciousMatch) {
+                var sPos = mfeLineCol(text, suspiciousMatch.index);
+                result.warnings.push(mfeIssue("warning", "Expression contains smart quotes, smart dashes, non-breaking spaces, or invisible copy/paste characters outside quoted text.", sPos.line, sPos.col));
+            }
+            var meaningful = text.replace(/\/\/.*$/gm, "").trim();
+            if (!meaningful) result.warnings.push(mfeIssue("warning", "Expression only contains comments.", 1, 1));
+            var lines = text.split("\n");
+            var numberedCount = 0;
+            var lastMeaningfulLineIndex = -1;
+            for (var li = 0; li < lines.length; li++) {
+                if (lines[li].replace(/\/\/.*$/, "").trim()) lastMeaningfulLineIndex = li;
+            }
+            for (var li = 0; li < lines.length; li++) {
+                var lineText = lines[li];
+                var codeLine = mfeCodeOnlyLine(lineText);
+                var trimmedCodeLine = codeLine.trim();
+                if (/^\s*\d+\s+\S/.test(lineText)) numberedCount++;
+                if (/\b(and|or)\s+\1\b/i.test(lineText) || /&&\s*&&|\|\|\s*\|\|/.test(lineText)) {
+                    result.warnings.push(mfeIssue("warning", "Duplicate boolean operator on line " + (li + 1) + ".", li + 1, 1));
+                }
+                var semicolonTail = trimmedCodeLine.match(/;\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\s+[A-Za-z_$][A-Za-z0-9_$]*)*)\s*$/);
+                if (semicolonTail) {
+                    result.warnings.push(mfeIssue("warning", "Line " + (li + 1) + " has bare text after a semicolon; confirm the trailing text is intentional.", li + 1, Math.max(1, lineText.lastIndexOf(semicolonTail[1]) + 1)));
+                }
+                if (/^[A-Za-z_$][A-Za-z0-9_$]*(?:\s+[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(trimmedCodeLine)) {
+                    result.warnings.push(mfeIssue("warning", "Line " + (li + 1) + " looks like bare text or an incomplete statement.", li + 1, Math.max(1, lineText.indexOf(trimmedCodeLine.charAt(0)) + 1)));
+                }
+                if (li === lastMeaningfulLineIndex && /(?:&&|\|\||[+\-*\/%&|=!<>?:,])\s*$/.test(trimmedCodeLine)) {
+                    result.warnings.push(mfeIssue("warning", "Final expression line ends with an operator; confirm this is intentional.", li + 1, Math.max(1, lineText.length)));
+                }
+            }
+            if (numberedCount >= 3) {
+                result.warnings.push(mfeIssue("warning", "Several lines look like pasted line numbers.", 1, 1));
+            }
+            return result;
+        }
+
+        function mfeValidationCounts(validation) {
+            return {
+                errors: validation && validation.errors ? validation.errors.length : 0,
+                warnings: validation && validation.warnings ? validation.warnings.length : 0
+            };
+        }
+
+        function mfeClearValidationJump() {
+            if (validationJumpTimer) clearTimeout(validationJumpTimer);
+            validationJumpTimer = null;
+            validationJumpMark = null;
+            if (editor && validationAceMarker !== null) {
+                try {
+                    editor.session.removeMarker(validationAceMarker);
+                } catch (e) {}
+            }
+            validationAceMarker = null;
+            refreshFallbackHighlight();
+        }
+
+        function mfeJumpToValidationLocation(line, col) {
+            if (validationJumpTimer) clearTimeout(validationJumpTimer);
+            validationJumpTimer = null;
+            var value = getCode().replace(/\r\n/g, "\n");
+            var index = mfeIndexFromLineCol(value, line, col);
+            var end = Math.min(value.length, index + 1);
+            if (end <= index && value.length > 0) {
+                index = Math.max(0, index - 1);
+                end = index + 1;
+            }
+            if (editor) {
+                try {
+                    var Range = window.ace.require("ace/range").Range;
+                    var row = Math.max(0, (parseInt(line, 10) || 1) - 1);
+                    var column = Math.max(0, (parseInt(col, 10) || 1) - 1);
+                    var aceEndColumn = column + Math.max(1, end - index);
+                    if (validationAceMarker !== null) editor.session.removeMarker(validationAceMarker);
+                    var range = new Range(row, column, row, aceEndColumn);
+                    editor.selection.setRange(range, false);
+                    validationAceMarker = editor.session.addMarker(range, "mfe-validation-jump", "text", true);
+                    editor.focus();
+                    editor.renderer.scrollCursorIntoView();
+                } catch (e) {}
+            } else if (fallbackTextarea) {
+                fallbackTextarea.focus();
+                fallbackTextarea.setSelectionRange(index, end);
+                validationJumpMark = { start: index, end: end };
+                refreshFallbackHighlight();
+                var lineHeight = parseFloat(window.getComputedStyle(fallbackTextarea).lineHeight) || 18;
+                var row = Math.max(0, (parseInt(line, 10) || 1) - 1);
+                var targetTop = Math.max(0, row * lineHeight - fallbackTextarea.clientHeight / 3);
+                fallbackTextarea.scrollTop = targetTop;
+                if (fallbackHighlight) fallbackHighlight.style.transform = "translateY(" + (-fallbackTextarea.scrollTop) + "px)";
+            }
+            validationJumpTimer = setTimeout(mfeClearValidationJump, 1800);
+        }
+
+        function mfeRenderValidation(validation) {
+            selectedValidation = validation || { errors: [], warnings: [] };
+            var counts = mfeValidationCounts(selectedValidation);
+            validationToggle.className = "mfe-validation-toggle " + (counts.errors ? "mfe-error" : counts.warnings ? "mfe-warning" : "mfe-ok");
+            validationToggle.textContent = counts.errors ? (counts.errors + " error" + (counts.errors === 1 ? "" : "s")) : counts.warnings ? (counts.warnings + " warning" + (counts.warnings === 1 ? "" : "s")) : "No issues";
+            validationList.innerHTML = "";
+            var items = selectedValidation.errors.concat(selectedValidation.warnings);
+            if (items.length === 0) {
+                var ok = document.createElement("div");
+                ok.className = "mfe-validation-item";
+                ok.textContent = "No validation issues found for the selected method.";
+                validationList.appendChild(ok);
+            } else {
+                for (var vi = 0; vi < items.length; vi++) {
+                    var item = document.createElement("div");
+                    var issue = items[vi];
+                    item.className = "mfe-validation-item " + (issue.severity === "error" ? "mfe-error" : "mfe-warning");
+                    var severity = document.createElement("strong");
+                    severity.textContent = issue.severity === "error" ? "Error" : "Warning";
+                    var loc = document.createElement("button");
+                    loc.type = "button";
+                    loc.className = "mfe-validation-loc";
+                    loc.textContent = "L" + issue.line + ":C" + issue.col;
+                    loc.title = "Jump to this location in the edited expression";
+                    (function(line, col) {
+                        loc.onclick = function(e) {
+                            e.preventDefault();
+                            mfeJumpToValidationLocation(line, col);
+                        };
+                    })(issue.line, issue.col);
+                    var msg = document.createElement("span");
+                    msg.textContent = " - " + issue.message;
+                    item.appendChild(severity);
+                    item.appendChild(document.createTextNode(" "));
+                    item.appendChild(loc);
+                    item.appendChild(msg);
+                    validationList.appendChild(item);
+                }
+            }
+            validationPanel.className = validationPanelOpen || counts.errors ? "mfe-validation-panel mfe-open" : "mfe-validation-panel";
+        }
+
+        function mfeRunSelectedValidation() {
+            if (!selected) {
+                mfeRenderValidation({ errors: [], warnings: [] });
+                return selectedValidation;
+            }
+            selected.validation = mfeValidateExpression(getCode());
+            mfeRenderValidation(selected.validation);
+            return selected.validation;
+        }
+
+        function mfeScheduleValidation() {
+            if (validationTimer) clearTimeout(validationTimer);
+            validationTimer = setTimeout(function() {
+                validationTimer = null;
+                mfeRunSelectedValidation();
+            }, 350);
+        }
+
+        function mfeChangedValidation(changed) {
+            var blocked = [];
+            var warnings = [];
+            for (var ci = 0; ci < changed.length; ci++) {
+                var v = mfeValidateExpression(changed[ci].editedExpression);
+                changed[ci].validation = v;
+                if (v.errors.length) blocked.push({ method: changed[ci], validation: v });
+                if (v.warnings.length) warnings.push({ method: changed[ci], validation: v });
+            }
+            return { blocked: blocked, warnings: warnings };
+        }
+
+        function mfeLooksLikeRegexStart(text, index) {
+            var prev = mfePrevNonSpace(text, index);
+            return !prev || "([{:;,=!?&|+-*%<>".indexOf(prev) !== -1;
+        }
+
+        function mfeSkipRegexLiteral(text, index) {
+            var inClass = false;
+            var escaped = false;
+            for (var i = index + 1; i < text.length; i++) {
+                var ch = text.charAt(i);
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (ch === "\\") {
+                    escaped = true;
+                    continue;
+                }
+                if (ch === "[") inClass = true;
+                else if (ch === "]") inClass = false;
+                else if (ch === "/" && !inClass) {
+                    i++;
+                    while (i < text.length && /[A-Za-z]/.test(text.charAt(i))) i++;
+                    return i;
+                } else if (ch === "\n") {
+                    return index + 1;
+                }
+            }
+            return index + 1;
+        }
+
+        function mfeMaskNonCode(code) {
+            var text = String(code || "");
+            var out = text.split("");
+            var quote = "";
+            var escaped = false;
+            var lineComment = false;
+            var blockComment = false;
+            for (var i = 0; i < text.length; i++) {
+                var ch = text.charAt(i);
+                var next = text.charAt(i + 1);
+                if (lineComment) {
+                    if (ch === "\n") lineComment = false;
+                    else out[i] = " ";
+                    continue;
+                }
+                if (blockComment) {
+                    out[i] = ch === "\n" ? "\n" : " ";
+                    if (ch === "*" && next === "/") {
+                        out[i + 1] = " ";
+                        i++;
+                        blockComment = false;
+                    }
+                    continue;
+                }
+                if (quote) {
+                    out[i] = ch === "\n" ? "\n" : " ";
+                    if (escaped) escaped = false;
+                    else if (ch === "\\") escaped = true;
+                    else if (ch === quote) quote = "";
+                    continue;
+                }
+                if (ch === "/" && next === "/") {
+                    out[i] = " ";
+                    out[i + 1] = " ";
+                    i++;
+                    lineComment = true;
+                    continue;
+                }
+                if (ch === "/" && next === "*") {
+                    out[i] = " ";
+                    out[i + 1] = " ";
+                    i++;
+                    blockComment = true;
+                    continue;
+                }
+                if (ch === "/" && mfeLooksLikeRegexStart(text, i)) {
+                    var regexEnd = mfeSkipRegexLiteral(text, i);
+                    if (regexEnd > i + 1) {
+                        for (var ri = i; ri < regexEnd; ri++) out[ri] = text.charAt(ri) === "\n" ? "\n" : " ";
+                        i = regexEnd - 1;
+                        continue;
+                    }
+                }
+                if (ch === '"' || ch === "'" || ch === "`") {
+                    out[i] = " ";
+                    quote = ch;
+                }
+            }
+            return out.join("");
+        }
+
+        function mfeEditorTokens(code) {
+            var text = String(code || "");
+            var masked = mfeMaskNonCode(text);
+            var tokens = [];
+            for (var i = 0; i < masked.length; i++) {
+                var ch = masked.charAt(i);
+                if (/[A-Za-z_$]/.test(ch)) {
+                    var start = i;
+                    i++;
+                    while (i < masked.length && /[A-Za-z0-9_$]/.test(masked.charAt(i))) i++;
+                    tokens.push({ type: "id", value: masked.slice(start, i), start: start, end: i });
+                    i--;
+                    continue;
+                }
+                if ("()[]{}".indexOf(ch) !== -1) {
+                    tokens.push({ type: "bracket", value: ch, start: i, end: i + 1 });
+                }
+            }
+            return tokens;
+        }
+
+        function mfeIsKeywordOrKnownIdentifier(name) {
+            var known = {
+                "var": true, "let": true, "const": true, "function": true, "return": true, "if": true, "else": true,
+                "for": true, "while": true, "try": true, "catch": true, "throw": true, "new": true, "true": true,
+                "false": true, "null": true, "undefined": true, "break": true, "continue": true, "switch": true,
+                "case": true, "default": true, "typeof": true, "await": true, "async": true, "Math": true,
+                "Date": true, "String": true, "Number": true, "Boolean": true, "Array": true, "Object": true,
+                "JSON": true, "parseInt": true, "parseFloat": true, "isNaN": true, "isFinite": true,
+                "item": true, "items": true, "itemGroup": true, "itemGroups": true, "group": true, "groups": true,
+                "value": true, "values": true, "answer": true, "answers": true, "response": true, "responses": true,
+                "subject": true, "study": true, "form": true, "forms": true, "event": true, "events": true,
+                "segment": true, "segments": true, "visit": true, "visits": true, "i": true, "j": true, "k": true,
+                "logger": true, "itemJson": true, "formJson": true, "findFormData": true, "isSameDay": true,
+                "timepointBuilder": true, "endDateNullOrAfterStart": true, "findFirstItemValueByName": true,
+                "findFirstItemDateByName": true, "findFirstItemByName": true, "findFirstFormData": true,
+                "collectCompleted": true, "getItemDataContextByItemDataId": true, "customErrorMessage": true,
+                "findFormDataAcrossStudyEvents": true, "getRelatedItemDataContext": true, "getItemDataContext": true
+            };
+            return !!known[name];
+        }
+
+        function mfePrevNonSpace(text, index) {
+            for (var i = index - 1; i >= 0; i--) {
+                if (!/\s/.test(text.charAt(i))) return text.charAt(i);
+            }
+            return "";
+        }
+
+        function mfeNextNonSpace(text, index) {
+            for (var i = index; i < text.length; i++) {
+                if (!/\s/.test(text.charAt(i))) return text.charAt(i);
+            }
+            return "";
+        }
+
+        function mfeNextNonSpaceIndex(text, index) {
+            for (var i = index; i < text.length; i++) {
+                if (!/\s/.test(text.charAt(i))) return i;
+            }
+            return -1;
+        }
+
+        function mfeSplitTopLevelDeclarations(segment, baseIndex) {
+            var parts = [];
+            var depth = 0;
+            var start = 0;
+            for (var i = 0; i < segment.length; i++) {
+                var ch = segment.charAt(i);
+                if (ch === "(" || ch === "[" || ch === "{") depth++;
+                else if ((ch === ")" || ch === "]" || ch === "}") && depth > 0) depth--;
+                else if (ch === "," && depth === 0) {
+                    parts.push({ text: segment.slice(start, i), start: baseIndex + start });
+                    start = i + 1;
+                }
+            }
+            parts.push({ text: segment.slice(start), start: baseIndex + start });
+            return parts;
+        }
+
+        function mfeAddMark(marks, index, className, title, end) {
+            if (index < 0) return;
+            marks[index] = { className: className, title: title, end: end || index + 1 };
+        }
+
+        function mfeFindBracketMatch(code, caret) {
+            var text = String(code || "");
+            var openers = { "(": ")", "[": "]", "{": "}" };
+            var closers = { ")": "(", "]": "[", "}": "{" };
+            var pos = -1;
+            var ch = "";
+            if (caret < text.length && (openers[text.charAt(caret)] || closers[text.charAt(caret)])) {
+                pos = caret;
+                ch = text.charAt(caret);
+            } else if (caret > 0 && (openers[text.charAt(caret - 1)] || closers[text.charAt(caret - 1)])) {
+                pos = caret - 1;
+                ch = text.charAt(pos);
+            }
+            if (pos < 0) return null;
+            var tokens = mfeEditorTokens(text);
+            var idx = -1;
+            for (var i = 0; i < tokens.length; i++) {
+                if (tokens[i].type === "bracket" && tokens[i].start === pos) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) return { open: pos, close: -1 };
+            var depth = 0;
+            var want;
+            if (openers[ch]) {
+                want = openers[ch];
+                for (var f = idx; f < tokens.length; f++) {
+                    if (tokens[f].value === ch) depth++;
+                    else if (tokens[f].value === want) {
+                        depth--;
+                        if (depth === 0) return { open: pos, close: tokens[f].start };
+                    }
+                }
+            } else {
+                want = closers[ch];
+                for (var b = idx; b >= 0; b--) {
+                    if (tokens[b].value === ch) depth++;
+                    else if (tokens[b].value === want) {
+                        depth--;
+                        if (depth === 0) return { open: tokens[b].start, close: pos };
+                    }
+                }
+            }
+            return { open: pos, close: -1 };
+        }
+
+        function mfeAnalyzeEditorMarks(code, caret) {
+            var text = String(code || "");
+            var masked = mfeMaskNonCode(text);
+            var tokens = mfeEditorTokens(text);
+            var marks = {};
+            var initialized = {};
+            var declarationStarts = {};
+            var declarationKinds = {};
+            var functionNames = {};
+            var useCounts = {};
+            function registerDeclaration(name, start, kind) {
+                if (!name || mfeIsKeywordOrKnownIdentifier(name) && kind !== "function") return;
+                initialized[name] = true;
+                if (!Object.prototype.hasOwnProperty.call(declarationStarts, name)) {
+                    declarationStarts[name] = start;
+                    declarationKinds[name] = kind;
+                }
+                if (kind === "function") functionNames[name] = true;
+            }
+            var declRe = /\b(var|let|const)\s+([^;\n]+)/g;
+            var declMatch;
+            while ((declMatch = declRe.exec(masked))) {
+                var segmentStart = declMatch.index + declMatch[0].indexOf(declMatch[2]);
+                var declarations = mfeSplitTopLevelDeclarations(declMatch[2], segmentStart);
+                for (var di = 0; di < declarations.length; di++) {
+                    var declName = declarations[di].text.match(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)/);
+                    if (declName) {
+                        registerDeclaration(declName[1], declarations[di].start + declarations[di].text.indexOf(declName[1]), "var");
+                    }
+                }
+            }
+            var fnRe = /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^)]*)\)/g;
+            var fnMatch;
+            while ((fnMatch = fnRe.exec(masked))) {
+                registerDeclaration(fnMatch[1], fnMatch.index + fnMatch[0].indexOf(fnMatch[1]), "function");
+                var params = String(fnMatch[2] || "").split(",");
+                var paramsStart = fnMatch.index + fnMatch[0].indexOf(fnMatch[2]);
+                for (var pi = 0, offset = 0; pi < params.length; pi++) {
+                    var paramName = params[pi].match(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)/);
+                    if (paramName) registerDeclaration(paramName[1], paramsStart + offset + params[pi].indexOf(paramName[1]), "param");
+                    offset += params[pi].length + 1;
+                }
+            }
+            var catchRe = /\bcatch\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)/g;
+            var catchMatch;
+            while ((catchMatch = catchRe.exec(masked))) {
+                registerDeclaration(catchMatch[1], catchMatch.index + catchMatch[0].lastIndexOf(catchMatch[1]), "param");
+            }
+            for (var i = 0; i < tokens.length; i++) {
+                var t = tokens[i];
+                if (t.type !== "id") continue;
+                var next = mfeNextNonSpace(masked, t.end);
+                var nextIndex = mfeNextNonSpaceIndex(masked, t.end);
+                var prev = mfePrevNonSpace(masked, t.start);
+                var isAssignment = nextIndex >= 0 && masked.charAt(nextIndex) === "=" && masked.charAt(nextIndex + 1) !== "=" && prev !== "." && t.value !== "return";
+                if (isAssignment && !mfeIsKeywordOrKnownIdentifier(t.value)) {
+                    registerDeclaration(t.value, t.start, "assignment");
+                }
+                if (next === "(" && (initialized[t.value] || functionNames[t.value])) functionNames[t.value] = true;
+            }
+            for (var u = 0; u < tokens.length; u++) {
+                var tok = tokens[u];
+                if (tok.type !== "id") continue;
+                var prevChar = mfePrevNonSpace(masked, tok.start);
+                var nextChar = mfeNextNonSpace(masked, tok.end);
+                var isDeclarationToken = declarationStarts[tok.value] === tok.start;
+                if (prevChar === "." || nextChar === ":" || mfeIsKeywordOrKnownIdentifier(tok.value) || isDeclarationToken) continue;
+                if (initialized[tok.value] || functionNames[tok.value]) {
+                    useCounts[tok.value] = (useCounts[tok.value] || 0) + 1;
+                } else if (nextChar === "(") {
+                    mfeAddMark(marks, tok.start, "mfe-semantic-undefined-fn", "Function was not created in this expression", tok.end);
+                } else {
+                    mfeAddMark(marks, tok.start, "mfe-semantic-undefined-var", "Variable was not initialized in this expression", tok.end);
+                }
+            }
+            for (var name in declarationStarts) {
+                if (Object.prototype.hasOwnProperty.call(declarationStarts, name) && declarationKinds[name] === "var" && !useCounts[name]) {
+                    mfeAddMark(marks, declarationStarts[name], "mfe-semantic-unused", "Initialized variable is never used", declarationStarts[name] + name.length);
+                }
+            }
+            var pair = mfeFindBracketMatch(text, typeof caret === "number" ? caret : -1);
+            if (pair) {
+                mfeAddMark(marks, pair.open, pair.close >= 0 ? "mfe-bracket-match" : "mfe-bracket-missing", pair.close >= 0 ? "Matching bracket" : "No matching bracket found");
+                if (pair.close >= 0) mfeAddMark(marks, pair.close, "mfe-bracket-match", "Matching bracket");
+            }
+            return marks;
+        }
+
+        function mfeIndexFromPoint(x, y) {
+            if (!fallbackTextarea) return -1;
+            if (document.caretPositionFromPoint) {
+                var pos = document.caretPositionFromPoint(x, y);
+                if (pos && fallbackTextarea.contains(pos.offsetNode)) return pos.offset;
+            }
+            if (document.caretRangeFromPoint) {
+                var range = document.caretRangeFromPoint(x, y);
+                if (range && fallbackTextarea.contains(range.startContainer)) return range.startOffset;
+            }
+            var rect = fallbackTextarea.getBoundingClientRect();
+            var style = window.getComputedStyle(fallbackTextarea);
+            var lineHeight = parseFloat(style.lineHeight) || 18;
+            var charWidth = 7.8;
+            var probe = document.createElement("span");
+            probe.style.cssText = "position:absolute;visibility:hidden;font:" + style.font + ";white-space:pre;";
+            probe.textContent = "MMMMMMMMMM";
+            document.body.appendChild(probe);
+            charWidth = Math.max(1, probe.getBoundingClientRect().width / 10);
+            probe.remove();
+            var col = Math.max(0, Math.floor((x - rect.left - 68 + fallbackTextarea.scrollLeft) / charWidth));
+            var row = Math.max(0, Math.floor((y - rect.top - 8 + fallbackTextarea.scrollTop) / lineHeight));
+            var lines = String(fallbackTextarea.value || "").split("\n");
+            var index = 0;
+            for (var i = 0; i < Math.min(row, lines.length); i++) index += lines[i].length + 1;
+            return Math.min(String(fallbackTextarea.value || "").length, index + Math.min(col, lines[Math.min(row, lines.length - 1)] ? lines[Math.min(row, lines.length - 1)].length : 0));
+        }
+
+        function mfeShowSemanticTooltip(e) {
+            if (!semanticTooltip || !fallbackTextarea) return;
+            var found = null;
+            if (fallbackHighlight) {
+                var marked = fallbackHighlight.querySelectorAll("[data-mfe-mark-title]");
+                for (var mi = 0; mi < marked.length; mi++) {
+                    var rects = marked[mi].getClientRects();
+                    for (var ri = 0; ri < rects.length; ri++) {
+                        if (e.clientX >= rects[ri].left && e.clientX <= rects[ri].right && e.clientY >= rects[ri].top && e.clientY <= rects[ri].bottom) {
+                            var cls = marked[mi].getAttribute("class") || "";
+                            if (/semantic/.test(cls)) {
+                                found = { title: marked[mi].getAttribute("data-mfe-mark-title") || "" };
+                                break;
+                            }
+                        }
+                    }
+                    if (found) break;
+                }
+            }
+            var idx = mfeIndexFromPoint(e.clientX, e.clientY);
+            var marks = mfeAnalyzeEditorMarks(fallbackTextarea.value || "", fallbackTextarea.selectionStart || 0);
+            if (!found) {
+                for (var key in marks) {
+                    if (!Object.prototype.hasOwnProperty.call(marks, key)) continue;
+                    var start = parseInt(key, 10);
+                    var end = marks[key].end || start + 1;
+                    if (idx >= start && idx <= end && /semantic/.test(marks[key].className || "")) {
+                        found = marks[key];
+                        break;
+                    }
+                }
+            }
+            if (!found || !found.title) {
+                semanticTooltip.style.display = "none";
+                return;
+            }
+            semanticTooltip.textContent = found.title;
+            semanticTooltip.style.left = Math.min(window.innerWidth - 340, e.clientX + 14) + "px";
+            semanticTooltip.style.top = Math.min(window.innerHeight - 60, e.clientY + 16) + "px";
+            semanticTooltip.style.display = "block";
+        }
+
+        function mfeEnsureFallbackHistory(method) {
+            if (!method) return null;
+            if (!method._mfeHistory) method._mfeHistory = { undo: [], redo: [], grouping: false };
+            return method._mfeHistory;
+        }
+
+        function mfeEndFallbackUndoGroup() {
+            if (fallbackUndoTimer) clearTimeout(fallbackUndoTimer);
+            fallbackUndoTimer = null;
+            if (selected && selected._mfeHistory) selected._mfeHistory.grouping = false;
+        }
+
+        function mfePushFallbackUndoSnapshot(forceNewGroup) {
+            if (!selected || !fallbackTextarea) return;
+            var history = mfeEnsureFallbackHistory(selected);
+            if (!history) return;
+            if (forceNewGroup) history.grouping = false;
+            if (!history.grouping) {
+                var currentValue = fallbackTextarea.value || "";
+                if (history.undo.length === 0 || history.undo[history.undo.length - 1] !== currentValue) {
+                    history.undo.push(currentValue);
+                    if (history.undo.length > 80) history.undo.shift();
+                }
+                history.redo = [];
+                history.grouping = true;
+            }
+            if (fallbackUndoTimer) clearTimeout(fallbackUndoTimer);
+            fallbackUndoTimer = setTimeout(mfeEndFallbackUndoGroup, 900);
+        }
+
+        function mfeApplyFallbackHistoryValue(value) {
+            if (!fallbackTextarea || !selected) return;
+            fallbackTextarea.value = value || "";
+            selected.editedExpression = fallbackTextarea.value;
+            refreshFallbackGutter();
+            refreshFallbackHighlight();
+            persistSelectedDraft();
+        }
+
+        function mfeFallbackUndo() {
+            if (!selected || !fallbackTextarea) return false;
+            mfeEndFallbackUndoGroup();
+            var history = mfeEnsureFallbackHistory(selected);
+            if (!history || history.undo.length === 0) return false;
+            history.redo.push(fallbackTextarea.value || "");
+            var previous = history.undo.pop();
+            mfeApplyFallbackHistoryValue(previous);
+            fallbackTextarea.selectionStart = fallbackTextarea.selectionEnd = previous.length;
+            return true;
+        }
+
+        function mfeFallbackRedo() {
+            if (!selected || !fallbackTextarea) return false;
+            var history = mfeEnsureFallbackHistory(selected);
+            if (!history || history.redo.length === 0) return false;
+            history.undo.push(fallbackTextarea.value || "");
+            var next = history.redo.pop();
+            mfeApplyFallbackHistoryValue(next);
+            fallbackTextarea.selectionStart = fallbackTextarea.selectionEnd = next.length;
+            return true;
+        }
+
+        function mfeCaretOffset(root) {
+            var sel = window.getSelection ? window.getSelection() : null;
+            if (!sel || sel.rangeCount === 0) return null;
+            var range = sel.getRangeAt(0);
+            if (!root.contains(range.startContainer)) return null;
+            var pre = range.cloneRange();
+            pre.selectNodeContents(root);
+            pre.setEnd(range.startContainer, range.startOffset);
+            return pre.toString().length;
+        }
+
+        function mfeSetCaretOffset(root, offset) {
+            if (offset === null || offset === undefined) return;
+            var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+            var node = null;
+            var remaining = offset;
+            while ((node = walker.nextNode())) {
+                var len = node.nodeValue.length;
+                if (remaining <= len) {
+                    var range = document.createRange();
+                    var sel = window.getSelection();
+                    range.setStart(node, remaining);
+                    range.collapse(true);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    return;
+                }
+                remaining -= len;
+            }
+            root.focus();
+        }
+
+        function mfeSetEditableText(root, value) {
+            root.innerHTML = mfeEditableCodeHtml(value || "");
+        }
+
+        function refreshFallbackGutter() {
+            if (!fallbackTextarea || !fallbackGutter) return;
+            var lineCount = Math.max(1, String(fallbackTextarea.value || "").split(/\n/).length);
+            var nums = [];
+            for (var i = 1; i <= lineCount; i++) nums.push(String(i));
+            fallbackGutter.textContent = nums.join("\n");
+        }
+
+        function refreshFallbackHighlight() {
+            refreshFallbackGutter();
+            if (fallbackHighlight && fallbackTextarea) {
+                var marks = mfeAnalyzeEditorMarks(fallbackTextarea.value || "", fallbackTextarea.selectionStart || 0);
+                if (validationJumpMark) {
+                    mfeAddMark(marks, validationJumpMark.start, "mfe-validation-jump", "Validation location", validationJumpMark.end);
+                }
+                fallbackHighlight.innerHTML = mfeCodeHtml(fallbackTextarea.value || "", marks);
+                fallbackHighlight.style.transform = "translateY(" + (-fallbackTextarea.scrollTop) + "px)";
+            }
+        }
+
+        function persistSelectedDraft() {
+            if (!selected) return;
+            selected.editedExpression = getCode();
+            if (selected.editedExpression !== selected.originalExpression) {
+                drafts[selected.id] = {
+                    id: selected.id,
+                    name: selected.name,
+                    originalExpression: selected.originalExpression,
+                    editedExpression: selected.editedExpression,
+                    updatedAt: Date.now()
+                };
+            } else {
+                delete drafts[selected.id];
+            }
+            mfeSaveDrafts(drafts);
+            renderMethods();
+            updateStatus();
+        }
+
+        function updateStatus(msg) {
+            var dirty = methods.filter(function(m) { return m.editedExpression !== m.originalExpression; }).length;
+            status.textContent = msg || (dirty + " edited / " + methods.length + " methods");
+        }
+
+        function selectMethod(method) {
+            mfeEndFallbackUndoGroup();
+            if (selected) persistSelectedDraft();
+            selected = method;
+            mfeEnsureFallbackHistory(selected);
+            selectedName.textContent = selected.name + " (" + selected.id + ")";
+            setCode(selected.editedExpression || "");
+            originalCode.innerHTML = mfeCodeHtml(selected.originalExpression || "");
+            renderMethods();
+            mfeRunSelectedValidation();
+            updateStatus();
+        }
+
+        function renderMethods() {
+            var q = (search.value || "").toLowerCase().trim();
+            methodList.innerHTML = "";
+            for (var i = 0; i < methods.length; i++) {
+                var method = methods[i];
+                var hay = (method.name + " " + method.id).toLowerCase();
+                if (q && hay.indexOf(q) === -1) continue;
+                var item = document.createElement("div");
+                item.className = "mfe-method";
+                if (selected && selected.id === method.id) item.className += " mfe-selected";
+                if (method.editedExpression !== method.originalExpression) item.className += " mfe-dirty";
+                if (method.validation && method.validation.errors && method.validation.errors.length) item.className += " mfe-validation-error";
+                else if (method.validation && method.validation.warnings && method.validation.warnings.length) item.className += " mfe-validation-warning";
+                if (method.saveStatus === "saved") item.className += " mfe-saved";
+                item.setAttribute("data-method-id", method.id);
+                var nm = document.createElement("div");
+                nm.className = "mfe-method-name";
+                nm.textContent = method.name;
+                var meta = document.createElement("div");
+                meta.className = "mfe-method-meta";
+                var vCounts = method.validation ? mfeValidationCounts(method.validation) : { errors: 0, warnings: 0 };
+                meta.textContent = "ID " + method.id + (method.loadError ? " - load error" : (vCounts.errors ? " - validation error" : vCounts.warnings ? " - warning" : (method.editedExpression !== method.originalExpression ? " - edited" : "")));
+                item.appendChild(nm);
+                item.appendChild(meta);
+                (function(m) { item.onclick = function() { selectMethod(m); }; })(method);
+                methodList.appendChild(item);
+            }
+        }
+
+        function initEditor() {
+            if (window.ace && typeof window.ace.edit === "function") {
+                editor = window.ace.edit(editorHost);
+                editor.setTheme("ace/theme/twilight");
+                editor.session.setMode("ace/mode/javascript");
+                editor.session.setUseWrapMode(true);
+                editor.session.setTabSize(4);
+                editor.session.setUseSoftTabs(true);
+                editor.setOptions({ fontSize: "13px", showPrintMargin: false, highlightActiveLine: true });
+                editor.session.on("change", function() {
+                    if (!selected) return;
+                    selected.editedExpression = editor.getValue();
+                    if (selected.editedExpression !== selected.originalExpression) {
+                        drafts[selected.id] = {
+                            id: selected.id,
+                            name: selected.name,
+                            originalExpression: selected.originalExpression,
+                            editedExpression: selected.editedExpression,
+                            updatedAt: Date.now()
+                        };
+                    } else {
+                        delete drafts[selected.id];
+                    }
+                    mfeSaveDrafts(drafts);
+                    renderMethods();
+                    mfeScheduleValidation();
+                    updateStatus();
+                });
+            } else {
+                var fallbackShell = document.createElement("div");
+                fallbackShell.className = "mfe-fallback-shell";
+                fallbackGutter = null;
+                fallbackTextarea = document.createElement("textarea");
+                fallbackTextarea.className = "mfe-fallback";
+                fallbackTextarea.setAttribute("aria-label", "Edited Formal Expression");
+                fallbackTextarea.spellcheck = false;
+                fallbackHighlight = document.createElement("div");
+                fallbackHighlight.className = "mfe-fallback-highlight-inner";
+                var fallbackHighlightViewport = document.createElement("div");
+                fallbackHighlightViewport.className = "mfe-fallback-highlight";
+                fallbackHighlightViewport.appendChild(fallbackHighlight);
+                var fallbackStack = document.createElement("div");
+                fallbackStack.className = "mfe-fallback-stack";
+                fallbackTextarea.addEventListener("beforeinput", function(e) {
+                    if (!selected || e.inputType === "historyUndo" || e.inputType === "historyRedo" || e.isComposing) return;
+                    var forceNewGroup = /insertFromPaste|insertFromDrop|insertLineBreak|deleteByCut|format/i.test(e.inputType || "");
+                    mfePushFallbackUndoSnapshot(forceNewGroup);
+                });
+                fallbackTextarea.addEventListener("keydown", function(e) {
+                    var key = String(e.key || "").toLowerCase();
+                    if ((e.ctrlKey || e.metaKey) && !e.altKey && key === "z") {
+                        e.preventDefault();
+                        if (e.shiftKey) mfeFallbackRedo();
+                        else mfeFallbackUndo();
+                        return;
+                    }
+                    if ((e.ctrlKey || e.metaKey) && !e.altKey && key === "y") {
+                        e.preventDefault();
+                        mfeFallbackRedo();
+                        return;
+                    }
+                    if (e.key === "Tab") {
+                        e.preventDefault();
+                        mfePushFallbackUndoSnapshot(true);
+                        var start = fallbackTextarea.selectionStart || 0;
+                        var end = fallbackTextarea.selectionEnd || 0;
+                        var value = fallbackTextarea.value || "";
+                        fallbackTextarea.value = value.slice(0, start) + "    " + value.slice(end);
+                        fallbackTextarea.selectionStart = fallbackTextarea.selectionEnd = start + 4;
+                        fallbackTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+                    }
+                });
+                fallbackTextarea.addEventListener("scroll", function() {
+                    if (fallbackHighlight) fallbackHighlight.style.transform = "translateY(" + (-fallbackTextarea.scrollTop) + "px)";
+                    if (semanticTooltip) semanticTooltip.style.display = "none";
+                });
+                fallbackTextarea.addEventListener("click", refreshFallbackHighlight);
+                fallbackTextarea.addEventListener("keyup", refreshFallbackHighlight);
+                fallbackTextarea.addEventListener("select", refreshFallbackHighlight);
+                fallbackTextarea.addEventListener("mousemove", mfeShowSemanticTooltip);
+                fallbackTextarea.addEventListener("mouseleave", function() { if (semanticTooltip) semanticTooltip.style.display = "none"; });
+                fallbackTextarea.addEventListener("input", function() {
+                    if (!selected) return;
+                    selected.editedExpression = fallbackTextarea.value;
+                    refreshFallbackHighlight();
+                    persistSelectedDraft();
+                    mfeScheduleValidation();
+                });
+                fallbackStack.appendChild(fallbackHighlightViewport);
+                fallbackStack.appendChild(fallbackTextarea);
+                fallbackShell.appendChild(fallbackStack);
+                editorHost.appendChild(fallbackShell);
+                refreshFallbackGutter();
+                refreshFallbackHighlight();
+            }
+        }
+
+        search.oninput = renderMethods;
+        validationToggle.onclick = function() {
+            validationPanelOpen = !validationPanelOpen;
+            mfeRunSelectedValidation();
+        };
+        toggleCompareBtn.onclick = function() {
+            compareVisible = !compareVisible;
+            editorGrid.className = compareVisible ? "mfe-editor-grid" : "mfe-editor-grid mfe-compare-hidden";
+            originalPane.style.display = compareVisible ? "flex" : "none";
+            toggleCompareBtn.textContent = compareVisible ? "Hide Collected" : "Show Collected";
+            if (editor) setTimeout(function() { editor.resize(); }, 50);
+        };
+        revertBtn.onclick = function() {
+            if (!selected) return;
+            if (selected.editedExpression === selected.originalExpression) {
+                updateStatus("No edits to revert for " + selected.name);
+                return;
+            }
+            mfeShowRevertConfirm(selected, function() {
+                setCode(selected.originalExpression || "");
+                selected.editedExpression = selected.originalExpression || "";
+                delete drafts[selected.id];
+                mfeSaveDrafts(drafts);
+                renderMethods();
+                updateStatus("Reverted " + selected.name);
+            });
+        };
+        closeBtn.onclick = function() {
+            persistSelectedDraft();
+            overlay.remove();
+        };
+        confirmBtn.onclick = function() {
+            persistSelectedDraft();
+            var changed = methods.filter(function(m) { return m.editedExpression !== m.originalExpression && !m.loadError; });
+            if (changed.length === 0) {
+                updateStatus("No edited methods to save");
+                return;
+            }
+            var validation = mfeChangedValidation(changed);
+            if (validation.blocked.length > 0) {
+                var firstBlocked = validation.blocked[0];
+                selectMethod(firstBlocked.method);
+                validationPanelOpen = true;
+                mfeRenderValidation(firstBlocked.validation);
+                updateStatus("Fix validation errors before saving");
+                return;
+            }
+            mfeShowSaveConfirm(changed, reasonInput.value || "Updated method", function() {
+                overlay.remove();
+                mfeProcessSaves(changed, reasonInput.value || "Updated method");
+            });
+        };
+
+        var resizing = false;
+        resizer.addEventListener("mousedown", function(e) {
+            resizing = true;
+            document.body.style.cursor = "col-resize";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", function(e) {
+            if (!resizing) return;
+            var width = Math.min(Math.max(e.clientX, 220), Math.max(window.innerWidth - 420, 260));
+            body.style.gridTemplateColumns = width + "px 6px minmax(0,1fr)";
+            if (editor) editor.resize();
+        });
+        document.addEventListener("mouseup", function() {
+            if (resizing) document.body.style.cursor = "";
+            resizing = false;
+        });
+
+        initEditor();
+        renderMethods();
+        if (methods.length > 0) selectMethod(methods[0]);
+        updateStatus();
+    }
+
+    function mfeShowSaveConfirm(changed, reason, onConfirm) {
+        var existing = document.getElementById("mfeSaveConfirmOverlay");
+        if (existing) {
+            existing.style.display = "flex";
+            var existingButton = existing.querySelector("button[data-mfe-save-confirm='true']");
+            if (existingButton) existingButton.focus();
+            return;
+        }
+        var backdrop = document.createElement("div");
+        backdrop.id = "mfeSaveConfirmOverlay";
+        backdrop.style.cssText = "position:fixed;inset:0;z-index:1000010;background:rgba(2,6,23,0.72);display:flex;align-items:center;justify-content:center;padding:24px;";
+        var root = document.createElement("div");
+        root.style.cssText = "width:min(560px,calc(100vw - 32px));max-height:85vh;background:#111827;border:1px solid #334155;border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,0.55);padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;color:#e5e7eb;";
+        var title = document.createElement("div");
+        title.textContent = "Method Editor - Confirm Save";
+        title.style.cssText = "font-size:15px;font-weight:800;color:#f8fafc;";
+        root.appendChild(title);
+        var msg = document.createElement("div");
+        msg.textContent = "This will update the Formal Expression for " + changed.length + " method" + (changed.length === 1 ? "" : "s") + ". Reason for Change: " + (reason || "Updated method");
+        root.appendChild(msg);
+        var warningLines = [];
+        for (var wi = 0; wi < changed.length; wi++) {
+            var validation = changed[wi].validation || { errors: [], warnings: [] };
+            if (validation.warnings && validation.warnings.length) {
+                warningLines.push(changed[wi].name + " (ID " + changed[wi].id + "): " + validation.warnings.length + " warning" + (validation.warnings.length === 1 ? "" : "s"));
+            }
+        }
+        if (warningLines.length > 0) {
+            var warningBox = document.createElement("div");
+            warningBox.style.cssText = "max-height:120px;overflow:auto;background:#451a03;border:1px solid #f59e0b;border-radius:6px;padding:8px;color:#fde68a;font-size:12px;";
+            warningBox.textContent = "Validation warnings will not block saving:\n" + warningLines.join("\n");
+            root.appendChild(warningBox);
+        }
+        var list = document.createElement("div");
+        list.style.cssText = "max-height:180px;overflow:auto;background:#020617;border:1px solid #334155;border-radius:6px;padding:8px;color:#ddd;";
+        for (var i = 0; i < changed.length; i++) {
+            var line = document.createElement("div");
+            line.textContent = changed[i].name + " (ID " + changed[i].id + ")";
+            list.appendChild(line);
+        }
+        root.appendChild(list);
+        var actions = document.createElement("div");
+        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;";
+        var confirm = document.createElement("button");
+        confirm.textContent = "Save Methods";
+        confirm.setAttribute("data-mfe-save-confirm", "true");
+        confirm.style.cssText = "padding:8px 14px;border-radius:6px;border:1px solid #3b82f6;background:#2563eb;color:#fff;cursor:pointer;font-weight:700;";
+        actions.appendChild(cancel);
+        actions.appendChild(confirm);
+        root.appendChild(actions);
+        backdrop.appendChild(root);
+        document.body.appendChild(backdrop);
+        function closeConfirm() { backdrop.remove(); }
+        cancel.onclick = closeConfirm;
+        confirm.onclick = function() {
+            confirm.disabled = true;
+            closeConfirm();
+            onConfirm();
+        };
+        backdrop.addEventListener("keydown", function(e) {
+            if (e.key === "Escape") closeConfirm();
+        });
+        confirm.focus();
+    }
+
+    function mfeShowRevertConfirm(method, onConfirm) {
+        var existing = document.getElementById("mfeRevertConfirmOverlay");
+        if (existing) {
+            existing.style.display = "flex";
+            var existingButton = existing.querySelector("button[data-mfe-revert-confirm='true']");
+            if (existingButton) existingButton.focus();
+            return;
+        }
+        var backdrop = document.createElement("div");
+        backdrop.id = "mfeRevertConfirmOverlay";
+        backdrop.style.cssText = "position:fixed;inset:0;z-index:1000010;background:rgba(2,6,23,0.72);display:flex;align-items:center;justify-content:center;padding:24px;";
+        var root = document.createElement("div");
+        root.style.cssText = "width:min(520px,calc(100vw - 32px));background:#111827;border:1px solid #334155;border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,0.55);padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px;color:#e5e7eb;";
+        var title = document.createElement("div");
+        title.textContent = "Revert Formal Expression";
+        title.style.cssText = "font-size:15px;font-weight:800;color:#f8fafc;";
+        root.appendChild(title);
+        var msg = document.createElement("div");
+        msg.textContent = "Revert edits for " + method.name + " (ID " + method.id + ")? This will remove your edited formal expression and restore the collected expression.";
+        root.appendChild(msg);
+        var actions = document.createElement("div");
+        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "padding:8px 14px;border-radius:6px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;";
+        var confirm = document.createElement("button");
+        confirm.textContent = "Revert";
+        confirm.setAttribute("data-mfe-revert-confirm", "true");
+        confirm.style.cssText = "padding:8px 14px;border-radius:6px;border:1px solid #ef4444;background:#7f1d1d;color:#fff;cursor:pointer;font-weight:700;";
+        actions.appendChild(cancel);
+        actions.appendChild(confirm);
+        root.appendChild(actions);
+        backdrop.appendChild(root);
+        document.body.appendChild(backdrop);
+        function closeConfirm() { backdrop.remove(); }
+        cancel.onclick = closeConfirm;
+        confirm.onclick = function() {
+            confirm.disabled = true;
+            closeConfirm();
+            onConfirm();
+        };
+        backdrop.addEventListener("keydown", function(e) {
+            if (e.key === "Escape") closeConfirm();
+        });
+        confirm.focus();
+    }
+
+    async function mfeProcessSaves(changed, reason) {
+        var progressRoot = document.createElement("div");
+        progressRoot.style.cssText = "padding:16px;display:flex;flex-direction:column;gap:10px;";
+        var status = document.createElement("div");
+        status.textContent = "Starting...";
+        status.style.fontWeight = "700";
+        var bar = document.createElement("div");
+        bar.style.cssText = "height:7px;border-radius:4px;background:#333;overflow:hidden;";
+        var fill = document.createElement("div");
+        fill.style.cssText = "height:100%;width:0%;background:linear-gradient(90deg,#2563eb,#22c55e);transition:width .2s;";
+        bar.appendChild(fill);
+        var logBox = document.createElement("div");
+        logBox.style.cssText = "max-height:220px;overflow:auto;background:#111;border:1px solid #333;border-radius:6px;padding:8px;color:#ddd;font-size:12px;white-space:pre-wrap;";
+        progressRoot.appendChild(status);
+        progressRoot.appendChild(bar);
+        progressRoot.appendChild(logBox);
+        var popup = createPopup({ title: "Method Editor - Saving", content: progressRoot, width: "560px", height: "auto", maxHeight: "85%" });
+        var drafts = mfeGetDrafts();
+        var saved = 0;
+        var failed = 0;
+        for (var i = 0; i < changed.length; i++) {
+            var method = changed[i];
+            status.textContent = "Saving " + (i + 1) + " of " + changed.length + ": " + method.name;
+            try {
+                await mfeUpdateMethod(method, reason || "Updated method");
+                saved++;
+                method.saveStatus = "saved";
+                delete drafts[method.id];
+                mfeSaveDrafts(drafts);
+                logBox.textContent += "SUCCESS - " + method.name + "\n";
+            } catch (err) {
+                failed++;
+                method.saveStatus = "failed";
+                logBox.textContent += "FAILED - " + method.name + ": " + String(err && err.message ? err.message : err) + "\n";
+            }
+            fill.style.width = Math.round(((i + 1) / changed.length) * 100) + "%";
+            logBox.scrollTop = logBox.scrollHeight;
+            await sleep(250);
+        }
+        status.textContent = "Done. Saved " + saved + ", failed " + failed + ".";
+        mfeLog("save complete saved=" + saved + " failed=" + failed);
+    }
+
+    async function runFormalExpressionEditor() {
+        mfeLog("button clicked");
+        if (!mfeIsMethodListPage()) {
+            showWrongPagePopup("Method Editor", METHOD_LIBRARY_URL, location.pathname, METHOD_LIBRARY_URL);
+            return;
+        }
+        var methods = mfeCollectMethodsFromTable();
+        if (methods.length === 0) {
+            showWarningPopup("Method Editor", "No methods were found in the method list table. Wait for the table to load, then try again.");
+            return;
+        }
+        MFE_CANCELLED = false;
+        var root = document.createElement("div");
+        root.style.cssText = "padding:16px;display:flex;flex-direction:column;gap:10px;";
+        var status = document.createElement("div");
+        status.textContent = "Collecting formal expressions...";
+        var bar = document.createElement("div");
+        bar.style.cssText = "height:7px;border-radius:4px;background:#333;overflow:hidden;";
+        var fill = document.createElement("div");
+        fill.style.cssText = "height:100%;width:0%;background:linear-gradient(90deg,#2563eb,#38bdf8);";
+        bar.appendChild(fill);
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "align-self:flex-end;padding:8px 14px;border-radius:6px;border:1px solid #ef4444;background:#7f1d1d;color:#fff;cursor:pointer;";
+        root.appendChild(status);
+        root.appendChild(bar);
+        root.appendChild(cancel);
+        var popup = createPopup({ title: "Method Editor", content: root, width: "460px", height: "auto" });
+        cancel.onclick = function() { MFE_CANCELLED = true; popup.close(); };
+        var collected = await mfeMapLimit(methods, 4, mfeCollectExpression, function(done, total, method) {
+            status.textContent = "Collected " + done + " of " + total + ": " + method.name;
+            fill.style.width = Math.round((done / total) * 100) + "%";
+        });
+        if (popup && popup.close) popup.close();
+        if (MFE_CANCELLED) {
+            mfeLog("collection cancelled");
+            return;
+        }
+        collected = collected.filter(function(m) { return !!m; });
+        mfeSaveCollected(collected);
+        mfeApplySavedDrafts(collected);
+        mfeShowEditor(collected);
+    }
+
+    //==========================
+    // LAB PANELS BUILDER FEATURE
+    //==========================
+
+    var LPB_TEST_URL = "https://cenexeltest.clinspark.com/secure/lab/configure/list";
+    var LPB_PROD_URL = "https://cenexel.clinspark.com/secure/lab/configure/list";
+    var LPB_CANCELLED = false;
+    var STORAGE_LPB_PANEL_WIDTHS = "activityPlanState.labPanelsBuilder.panelWidths";
+    var STORAGE_LPB_PENDING = "activityPlanState.labPanelsBuilder.pending";
+    var STORAGE_LPB_CANCEL = "activityPlanState.labPanelsBuilder.cancel";
+    var RUNMODE_LPB = "labPanelsBuilder";
+
+    function lpbLog(msg) { log("LabPanelsBuilder: " + String(msg)); }
+    function lpbCleanText(v) { return String(v == null ? "" : v).replace(/\s+/g, " ").trim(); }
+    function lpbNorm(v) { return lpbCleanText(v).toLowerCase(); }
+    function lpbKey(v) { return lpbNorm(v).replace(/[^a-z0-9]/g, ""); }
+    function lpbAbsUrl(href) { try { return new URL(href || "", location.origin).href; } catch (e) { return href || ""; } }
+    function lpbSamePath(path) {
+        var p = String(path || location.pathname || "").replace(/\/+$/, "");
+        return p === "/secure/lab/configure/list";
+    }
+    function lpbIsTargetPage() {
+        return (location.hostname === "cenexeltest.clinspark.com" || location.hostname === "cenexel.clinspark.com") && lpbSamePath(location.pathname);
+    }
+    function lpbButton(text, bg) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = text;
+        b.style.cssText = "border:1px solid #555;border-radius:4px;padding:6px 10px;background:" + (bg || "#333") + ";color:#fff;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;";
+        return b;
+    }
+    function lpbIconButton(text, title, color) {
+        var b = lpbButton(text, color || "#333");
+        b.title = title || text;
+        b.style.width = "28px";
+        b.style.height = "28px";
+        b.style.padding = "0";
+        b.style.display = "inline-flex";
+        b.style.alignItems = "center";
+        b.style.justifyContent = "center";
+        return b;
+    }
+    function lpbShowWrongPage() {
+        var target = location.hostname === "cenexel.clinspark.com" ? LPB_PROD_URL : LPB_TEST_URL;
+        showWrongPagePopup("Lab Panels Builder", target, location.pathname + location.search + location.hash, target);
+    }
+
+    function lpbParseRange(rangeRaw) {
+        var raw = lpbCleanText(rangeRaw);
+        var parsed = { referenceRange: "", low: "", high: "", display: raw };
+        if (!raw) return parsed;
+        var re = /^\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*[-\u2013\u2014]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*$/;
+        var m = raw.match(re);
+        if (m) {
+            parsed.low = m[1];
+            parsed.high = m[2];
+            parsed.display = parsed.low + " - " + parsed.high;
+        } else {
+            parsed.referenceRange = raw;
+            parsed.display = raw;
+        }
+        return parsed;
+    }
+    function lpbRangeDisplay(config) {
+        if (!config) return "";
+        if (lpbCleanText(config.low) || lpbCleanText(config.high)) return lpbCleanText(config.low) + " - " + lpbCleanText(config.high);
+        return lpbCleanText(config.referenceRange);
+    }
+    function lpbHasRangeConfig(row) {
+        var c = row && row.config ? row.config : {};
+        return !!(lpbCleanText(c.referenceRange) || lpbCleanText(c.low) || lpbCleanText(c.high));
+    }
+    function lpbShouldConfigureNewTest(row) {
+        if (!row || row.markedDelete) return false;
+        var c = row.config || {};
+        return lpbHasRangeConfig(row) || c.reviewable === false;
+    }
+    function lpbConfigFromTest(test, pendingNew) {
+        var parsed = lpbParseRange(test.rangeRaw);
+        return {
+            referenceRange: parsed.referenceRange,
+            low: parsed.low,
+            high: parsed.high,
+            reviewable: !/^no$/i.test(lpbCleanText(test.reviewable)),
+            reason: "Update reference range",
+            touched: {
+                referenceRange: !!pendingNew,
+                low: !!pendingNew,
+                high: !!pendingNew,
+                reviewable: !!pendingNew,
+                reason: false
+            }
+        };
+    }
+    function lpbCloneConfig(config, forceTouched) {
+        var c = config || {};
+        return {
+            referenceRange: lpbCleanText(c.referenceRange),
+            low: lpbCleanText(c.low),
+            high: lpbCleanText(c.high),
+            reviewable: c.reviewable !== false,
+            reason: lpbCleanText(c.reason) || "Update reference range",
+            touched: {
+                referenceRange: !!forceTouched || !!(c.touched && c.touched.referenceRange),
+                low: !!forceTouched || !!(c.touched && c.touched.low),
+                high: !!forceTouched || !!(c.touched && c.touched.high),
+                reviewable: !!forceTouched || !!(c.touched && c.touched.reviewable),
+                reason: !!(c.touched && c.touched.reason)
+            }
+        };
+    }
+    function lpbMakeRowFromTest(test, targetPanelName, kind) {
+        var cfg = lpbCloneConfig(test.config || lpbConfigFromTest(test, true), true);
+        return {
+            uid: "lpb_" + Date.now() + "_" + Math.random().toString(16).slice(2),
+            kind: kind || "pending",
+            sourcePanelName: test.sourcePanelName || test.targetPanelName || "",
+            targetPanelName: targetPanelName || test.targetPanelName || test.sourcePanelName || "",
+            panelId: test.panelId || "",
+            panelEditHref: test.panelEditHref || "",
+            lockedPanel: !!test.lockedPanel,
+            name: test.name || "",
+            orderId: test.orderId || "",
+            rangeRaw: test.rangeRaw || "",
+            units: test.units || "",
+            sex: test.sex || "",
+            reviewable: test.reviewable || "",
+            testId: test.testId || "",
+            testEditHref: test.testEditHref || "",
+            config: cfg,
+            originalConfig: lpbCloneConfig(cfg, false),
+            selected: false,
+            markedDelete: false
+        };
+    }
+    function lpbTestIdentity(test) {
+        var oid = lpbKey(test && test.orderId);
+        if (oid) return "oid:" + oid;
+        return "name:" + lpbKey(test && test.name);
+    }
+    function lpbIsConfigChanged(row) {
+        if (!row || row.markedDelete) return false;
+        if (row.kind === "pending" || row.kind === "new") return lpbShouldConfigureNewTest(row);
+        var cfg = row.config || {};
+        var orig = row.originalConfig || {};
+        var touched = cfg.touched || {};
+        return (touched.referenceRange && lpbCleanText(cfg.referenceRange) !== lpbCleanText(orig.referenceRange)) ||
+            (touched.low && lpbCleanText(cfg.low) !== lpbCleanText(orig.low)) ||
+            (touched.high && lpbCleanText(cfg.high) !== lpbCleanText(orig.high)) ||
+            (touched.reviewable && !!cfg.reviewable !== !!orig.reviewable);
+    }
+
+    function lpbHeaderIndex(table) {
+        var map = {};
+        var ths = table ? table.querySelectorAll("thead th") : [];
+        for (var i = 0; i < ths.length; i++) {
+            var t = lpbNorm(ths[i].textContent);
+            if (t.indexOf("order") !== -1 || t.indexOf("name") !== -1 || t.indexOf("test") !== -1) map.order = i;
+            else if (t.indexOf("range") !== -1) map.range = i;
+            else if (t.indexOf("unit") !== -1) map.units = i;
+            else if (t.indexOf("sex") !== -1) map.sex = i;
+            else if (t.indexOf("review") !== -1) map.reviewable = i;
+        }
+        return map;
+    }
+    function lpbExtractPortletTitle(portlet) {
+        var cap = portlet.querySelector(".portlet-title .caption");
+        if (!cap) return "";
+        var clone = cap.cloneNode(true);
+        var icons = clone.querySelectorAll("i, .fa");
+        for (var i = 0; i < icons.length; i++) icons[i].remove();
+        return lpbCleanText(clone.textContent);
+    }
+    function lpbScanPanels() {
+        var addLink = document.querySelector("a[href*='/secure/lab/configure/save']");
+        var panels = [];
+        var portlets = document.querySelectorAll(".portlet.box.blue");
+        for (var p = 0; p < portlets.length; p++) {
+            var portlet = portlets[p];
+            var name = lpbExtractPortletTitle(portlet);
+            if (!name) name = "Lab Panel " + String(p + 1);
+            var body = portlet.querySelector(".portlet-body") || portlet;
+            var locked = !!body.querySelector(".fa-lock") || /(^|\s)locked(\s|$)/i.test(lpbCleanText(body.textContent)) ||
+                !!portlet.querySelector("[title*='locked' i], [data-original-title*='locked' i]");
+            var edit = portlet.querySelector("a[href*='/secure/lab/configure/update/']");
+            var panelId = "";
+            if (edit) {
+                var pm = String(edit.getAttribute("href") || "").match(/\/update\/(\d+)/);
+                panelId = pm ? pm[1] : "";
+            }
+            var table = portlet.querySelector("table");
+            var idx = lpbHeaderIndex(table);
+            var rows = table ? table.querySelectorAll("tbody tr") : [];
+            var tests = [];
+            for (var r = 0; r < rows.length; r++) {
+                var tr = rows[r];
+                var cells = tr.cells || [];
+                if (!cells.length) continue;
+                var orderCell = cells[idx.order != null ? idx.order : 0] || cells[0];
+                var nameSpan = orderCell.querySelector("span[data-original-title='Name'], span[title='Name']");
+                var orderSpan = orderCell.querySelector("span[data-original-title='Order ID'], span[title='Order ID']");
+                var testName = lpbCleanText(nameSpan ? nameSpan.textContent : orderCell.textContent);
+                var orderId = lpbCleanText(orderSpan ? orderSpan.textContent : "");
+                if (orderSpan && testName) testName = lpbCleanText(testName.replace(orderId, ""));
+                var testEdit = tr.querySelector("a[href*='/secure/lab/configure/updatetest/']");
+                var testId = "";
+                if (testEdit) {
+                    var tm = String(testEdit.getAttribute("href") || "").match(/\/updatetest\/(\d+)/);
+                    testId = tm ? tm[1] : "";
+                }
+                var test = {
+                    uid: "existing_" + p + "_" + r + "_" + Math.random().toString(16).slice(2),
+                    kind: "existing",
+                    sourcePanelName: name,
+                    targetPanelName: name,
+                    panelId: panelId,
+                    panelEditHref: edit ? lpbAbsUrl(edit.getAttribute("href")) : "",
+                    lockedPanel: locked,
+                    name: testName,
+                    orderId: orderId,
+                    rangeRaw: cells[idx.range] ? lpbCleanText(cells[idx.range].textContent) : "",
+                    units: cells[idx.units] ? lpbCleanText(cells[idx.units].textContent) : "",
+                    sex: cells[idx.sex] ? lpbCleanText(cells[idx.sex].textContent) : "",
+                    reviewable: cells[idx.reviewable] ? lpbCleanText(cells[idx.reviewable].textContent) : "",
+                    testId: testId,
+                    testEditHref: testEdit ? lpbAbsUrl(testEdit.getAttribute("href")) : "",
+                    rowRef: tr,
+                    selected: false,
+                    markedDelete: false
+                };
+                test.config = lpbConfigFromTest(test, false);
+                test.originalConfig = lpbCloneConfig(test.config, false);
+                if (test.name || test.orderId) tests.push(test);
+            }
+            panels.push({ name: name, normName: lpbNorm(name), panelId: panelId, editHref: edit ? lpbAbsUrl(edit.getAttribute("href")) : "", locked: locked, tests: tests, collapsed: false, additions: [] });
+        }
+        return { panels: panels, addHref: addLink ? lpbAbsUrl(addLink.getAttribute("href")) : "" };
+    }
+    function lpbSerializableRow(row) {
+        row = row || {};
+        return {
+            uid: row.uid || "",
+            kind: row.kind || "",
+            sourcePanelName: row.sourcePanelName || "",
+            targetPanelName: row.targetPanelName || "",
+            panelId: row.panelId || "",
+            panelEditHref: row.panelEditHref || "",
+            lockedPanel: !!row.lockedPanel,
+            name: row.name || "",
+            orderId: row.orderId || "",
+            rangeRaw: row.rangeRaw || "",
+            units: row.units || "",
+            sex: row.sex || "",
+            reviewable: row.reviewable || "",
+            testId: row.testId || "",
+            testEditHref: row.testEditHref || "",
+            selected: !!row.selected,
+            markedDelete: !!row.markedDelete,
+            config: lpbCloneConfig(row.config || {}, true),
+            originalConfig: lpbCloneConfig(row.originalConfig || {}, true)
+        };
+    }
+    function lpbBuildPending(state, changes) {
+        var pending = {
+            version: 1,
+            createdAt: Date.now(),
+            addHref: state.addHref || "",
+            phase: "start",
+            newPanelIndex: 0,
+            newTestPanelIndex: 0,
+            newTestIndex: 0,
+            updateIndex: 0,
+            editPanelIndex: 0,
+            newPanels: [],
+            updates: [],
+            existingEdits: [],
+            completed: { newPanels: {}, newTests: {}, updates: {}, existingEdits: {} }
+        };
+        (changes.newPanels || []).forEach(function(panel) {
+            pending.newPanels.push({
+                name: panel.name || "",
+                tests: (panel.tests || []).map(lpbSerializableRow)
+            });
+        });
+        (changes.updates || []).forEach(function(upd) {
+            pending.updates.push({
+                panelName: upd.panel && upd.panel.name ? upd.panel.name : "",
+                row: lpbSerializableRow(upd.row)
+            });
+        });
+        (state.panels || []).forEach(function(panel) {
+            var additions = (panel.additions || []).map(lpbSerializableRow);
+            var deletions = (panel.tests || []).filter(function(t) { return t.markedDelete; }).map(lpbSerializableRow);
+            if (additions.length || deletions.length) {
+                pending.existingEdits.push({
+                    panelName: panel.name || "",
+                    editHref: panel.editHref || "",
+                    locked: !!panel.locked,
+                    additions: additions,
+                    deletions: deletions
+                });
+            }
+        });
+        return pending;
+    }
+    function lpbEnsureCompleted(pending) {
+        if (!pending.completed) pending.completed = {};
+        if (!pending.completed.newPanels) pending.completed.newPanels = {};
+        if (!pending.completed.newTests) pending.completed.newTests = {};
+        if (!pending.completed.updates) pending.completed.updates = {};
+        if (!pending.completed.existingEdits) pending.completed.existingEdits = {};
+        return pending.completed;
+    }
+    function lpbOpDone(pending, group, key) {
+        var done = lpbEnsureCompleted(pending);
+        return !!(done[group] && done[group][key]);
+    }
+    function lpbMarkOpDone(pending, group, key, value) {
+        var done = lpbEnsureCompleted(pending);
+        if (!done[group]) done[group] = {};
+        if (value === false) delete done[group][key];
+        else done[group][key] = true;
+    }
+    function lpbSavePending(pending) {
+        try {
+            localStorage.setItem(STORAGE_LPB_PENDING, JSON.stringify(pending || {}));
+            localStorage.setItem(STORAGE_RUN_MODE, RUNMODE_LPB);
+        } catch (e) {
+            lpbLog("unable to save pending state: " + String(e));
+        }
+    }
+    function lpbLoadPending() {
+        try {
+            var raw = localStorage.getItem(STORAGE_LPB_PENDING);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+            lpbLog("unable to load pending state: " + String(e));
+            return null;
+        }
+    }
+    function lpbClearPending() {
+        try {
+            localStorage.removeItem(STORAGE_LPB_PENDING);
+            if (localStorage.getItem(STORAGE_RUN_MODE) === RUNMODE_LPB) localStorage.removeItem(STORAGE_RUN_MODE);
+        } catch (e) {}
+    }
+    function lpbRequestCancel() {
+        LPB_CANCELLED = true;
+        try { localStorage.setItem(STORAGE_LPB_CANCEL, "1"); } catch (e) {}
+    }
+    function lpbClearCancel() {
+        LPB_CANCELLED = false;
+        try { localStorage.removeItem(STORAGE_LPB_CANCEL); } catch (e) {}
+    }
+    function lpbIsCancelRequested() {
+        if (LPB_CANCELLED) return true;
+        try { return localStorage.getItem(STORAGE_LPB_CANCEL) === "1"; } catch (e) { return false; }
+    }
+    function lpbPanelByName(panels, name) {
+        var target = lpbNorm(name);
+        return (panels || []).filter(function(p) { return lpbNorm(p.name) === target; })[0] || null;
+    }
+    function lpbParseLabTestOption(text, id) {
+        var raw = lpbCleanText(text);
+        var orderId = "";
+        var name = raw;
+        var matches = raw.match(/\(([^)]+)\)/g) || [];
+        if (matches.length) {
+            var inner = matches[matches.length - 1].slice(1, -1);
+            orderId = lpbCleanText(String(inner).split(/[;,\s]/)[0] || inner);
+            name = lpbCleanText(raw.slice(0, raw.lastIndexOf(matches[matches.length - 1])));
+        }
+        return {
+            uid: "catalog_" + (id || "") + "_" + lpbKey(raw),
+            kind: "catalog",
+            sourcePanelName: "List of Lab Tests",
+            targetPanelName: "",
+            panelId: "",
+            panelEditHref: "",
+            lockedPanel: false,
+            name: name || raw,
+            orderId: orderId,
+            rangeRaw: "",
+            units: "",
+            sex: "",
+            reviewable: "Yes",
+            testId: String(id || ""),
+            testEditHref: "",
+            selected: false,
+            markedDelete: false
+        };
+    }
+    function lpbDedupCatalogRows(rows) {
+        var seen = {};
+        var out = [];
+        (rows || []).forEach(function(row) {
+            if (!row || (!row.name && !row.orderId)) return;
+            row.config = lpbConfigFromTest(row, false);
+            row.originalConfig = lpbCloneConfig(row.config, false);
+            var key = lpbTestIdentity(row);
+            if (seen[key]) return;
+            seen[key] = true;
+            out.push(row);
+        });
+        out.sort(function(a, b) { return lpbNorm(a.name).localeCompare(lpbNorm(b.name)) || lpbNorm(a.orderId).localeCompare(lpbNorm(b.orderId)); });
+        return out;
+    }
+    async function lpbCloseActiveModal() {
+        var root = lpbActiveModalRoot();
+        var close = root && root.querySelector("button.close, [data-dismiss='modal'], .modal-footer .btn-default");
+        if (close) {
+            close.click();
+            await lpbWaitModalClose(5000);
+            return;
+        }
+        try {
+            if (window.jQuery) window.jQuery(".modal.in, .modal.show, #ajaxModal").modal("hide");
+        } catch (e) {}
+        await lpbWaitModalClose(3000);
+    }
+    async function lpbCollectLabTestCatalog(addHref) {
+        if (!addHref) return [];
+        var rows = [];
+        try {
+            lpbLog("collecting lab test catalog from Add modal");
+            await lpbOpenModalByHref(addHref);
+            await lpbWaitLabPanelModalReady(15000);
+            var sel = lpbFindLabTestsSelect([]);
+            if (sel) {
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (!lpbCleanText(sel.options[i].value)) continue;
+                    rows.push(lpbParseLabTestOption(sel.options[i].textContent, sel.options[i].value));
+                }
+            }
+            var mapping = lpbGetLabTestsMapping();
+            if (mapping) {
+                Object.keys(mapping).forEach(function(category) {
+                    (mapping[category] || []).forEach(function(opt) {
+                        rows.push(lpbParseLabTestOption(opt.value, opt.id));
+                    });
+                });
+            }
+        } catch (e) {
+            lpbLog("catalog scan failed: " + String(e && e.message ? e.message : e));
+        } finally {
+            await lpbCloseActiveModal();
+        }
+        rows = lpbDedupCatalogRows(rows);
+        lpbLog("collected lab test catalog count=" + rows.length);
+        return rows;
+    }
+
+    async function runLabPanelsBuilder() {
+        lpbLog("button clicked");
+        if (!lpbIsTargetPage()) {
+            lpbShowWrongPage();
+            return;
+        }
+        var scan = lpbScanPanels();
+        if (!scan.panels.length) {
+            createPopup({ title: "Lab Panels Builder", content: '<div style="padding:18px;color:#ffb74d;">No lab panel portlets were found on this page.</div>', width: "430px", height: "auto" });
+            return;
+        }
+        scan.labTestCatalog = await lpbCollectLabTestCatalog(scan.addHref);
+        lpbShowBuilder(scan);
+    }
+
+    function lpbShowBuilder(scan) {
+        var state = { panels: scan.panels, newPanels: [], clipboard: [], activeRow: null, status: "", addHref: scan.addHref, labTestCatalog: scan.labTestCatalog || [], draftPanelName: "", createWarning: "", catalogSearch: "", existingSearch: "", builderSearch: "" };
+        var overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:999997;display:flex;flex-direction:column;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#fff;";
+        var header = document.createElement("div");
+        header.style.cssText = "height:52px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:#222;border-bottom:1px solid #444;flex-shrink:0;";
+        var title = document.createElement("div");
+        title.innerHTML = '<div style="font-weight:800;font-size:16px;">Lab Panels Builder</div><div style="font-size:11px;color:#aaa;">Build panels, copy tests, and configure reference ranges safely by panel.</div>';
+        var close = lpbButton("Close", "#333");
+        close.onclick = function() { overlay.remove(); };
+        header.appendChild(title);
+        header.appendChild(close);
+        var body = document.createElement("div");
+        body.style.cssText = "flex:1;min-height:0;display:grid;gap:0;padding:10px;background:#111;";
+        var catalog = document.createElement("div");
+        var left = document.createElement("div");
+        var middle = document.createElement("div");
+        var right = document.createElement("div");
+        [catalog, left, middle, right].forEach(function(panel) {
+            panel.style.cssText = "display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid #444;border-radius:6px;background:#1a1a1a;overflow:hidden;";
+        });
+        var handleCatalog = lpbMakeResizeHandle();
+        var handleLeft = lpbMakeResizeHandle();
+        var handleRight = lpbMakeResizeHandle();
+        var footer = document.createElement("div");
+        footer.style.cssText = "height:48px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 16px;background:#222;border-top:1px solid #444;flex-shrink:0;";
+        var status = document.createElement("div");
+        status.style.cssText = "font-size:12px;color:#ccc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        var confirm = lpbButton("Confirm", "#28a745");
+        footer.appendChild(status);
+        footer.appendChild(confirm);
+        body.appendChild(catalog);
+        body.appendChild(handleCatalog);
+        body.appendChild(left);
+        body.appendChild(handleLeft);
+        body.appendChild(middle);
+        body.appendChild(handleRight);
+        body.appendChild(right);
+        overlay.appendChild(header);
+        overlay.appendChild(body);
+        overlay.appendChild(footer);
+        document.body.appendChild(overlay);
+
+        var panelWidths = lpbLoadPanelWidths();
+        lpbApplyPanelWidths();
+        lpbBindPanelResize(handleCatalog, "catalog", "left");
+        lpbBindPanelResize(handleLeft, "left", "middle");
+        lpbBindPanelResize(handleRight, "middle", "right");
+
+        function lpbLoadPanelWidths() {
+            try {
+                var raw = localStorage.getItem(STORAGE_LPB_PANEL_WIDTHS);
+                var parsed = raw ? JSON.parse(raw) : null;
+                if (parsed && isFinite(parsed.catalog) && isFinite(parsed.left) && isFinite(parsed.middle) && isFinite(parsed.right) && parsed.catalog >= 10 && parsed.left >= 12 && parsed.middle >= 14 && parsed.right >= 8) {
+                    return { catalog: parsed.catalog, left: parsed.left, middle: parsed.middle, right: parsed.right };
+                }
+                if (parsed && isFinite(parsed.left) && isFinite(parsed.middle) && isFinite(parsed.right)) {
+                    return { catalog: 20, left: parsed.left, middle: parsed.middle, right: Math.max(10, parsed.right) };
+                }
+            } catch (e) {}
+            return { catalog: 20, left: 30, middle: 35, right: 15 };
+        }
+        function lpbSavePanelWidths() {
+            try { localStorage.setItem(STORAGE_LPB_PANEL_WIDTHS, JSON.stringify(panelWidths)); } catch (e) {}
+        }
+        function lpbApplyPanelWidths() {
+            body.style.gridTemplateColumns = "minmax(180px," + panelWidths.catalog + "fr) 7px minmax(220px," + panelWidths.left + "fr) 7px minmax(250px," + panelWidths.middle + "fr) 7px minmax(110px," + panelWidths.right + "fr)";
+        }
+        function lpbMakeResizeHandle() {
+            var handle = document.createElement("div");
+            handle.title = "Drag to resize panels";
+            handle.style.cssText = "width:7px;cursor:col-resize;background:#222;border:1px solid #333;border-radius:4px;margin:0 5px;transition:background 0.15s;";
+            handle.onmouseenter = function() { handle.style.background = "#555"; };
+            handle.onmouseleave = function() { handle.style.background = "#222"; };
+            return handle;
+        }
+        function lpbBindPanelResize(handle, leftKey, rightKey) {
+            handle.addEventListener("mousedown", function(e) {
+                e.preventDefault();
+                var startX = e.clientX;
+                var startLeft = panelWidths[leftKey];
+                var startRight = panelWidths[rightKey];
+                var rect = body.getBoundingClientRect();
+                var totalPx = Math.max(1, rect.width - 14);
+                document.body.style.cursor = "col-resize";
+                document.body.style.userSelect = "none";
+                function onMove(ev) {
+                    var deltaPct = ((ev.clientX - startX) / totalPx) * 100;
+                    var minLeft = leftKey === "right" ? 8 : leftKey === "middle" ? 14 : leftKey === "catalog" ? 10 : 12;
+                    var minRight = rightKey === "right" ? 8 : rightKey === "middle" ? 14 : rightKey === "catalog" ? 10 : 12;
+                    var nextLeft = Math.max(minLeft, startLeft + deltaPct);
+                    var nextRight = Math.max(minRight, startRight - deltaPct);
+                    var pairTotal = startLeft + startRight;
+                    if (nextLeft + nextRight !== pairTotal) {
+                        if (nextLeft === minLeft) nextRight = pairTotal - nextLeft;
+                        if (nextRight === minRight) nextLeft = pairTotal - nextRight;
+                    }
+                    panelWidths[leftKey] = nextLeft;
+                    panelWidths[rightKey] = nextRight;
+                    lpbApplyPanelWidths();
+                    lpbSavePanelWidths();
+                }
+                function onUp() {
+                    document.body.style.cursor = "";
+                    document.body.style.userSelect = "";
+                    document.removeEventListener("mousemove", onMove);
+                    document.removeEventListener("mouseup", onUp);
+                    lpbSavePanelWidths();
+                }
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+            });
+        }
+
+        function getScrollState() {
+            return {
+                catalog: catalog.querySelector("[data-lpb-scroll='catalog']") ? catalog.querySelector("[data-lpb-scroll='catalog']").scrollTop : 0,
+                left: left.querySelector("[data-lpb-scroll='existing']") ? left.querySelector("[data-lpb-scroll='existing']").scrollTop : 0,
+                middle: middle.querySelector("[data-lpb-scroll='builder']") ? middle.querySelector("[data-lpb-scroll='builder']").scrollTop : 0,
+                right: right.querySelector("[data-lpb-scroll='config']") ? right.querySelector("[data-lpb-scroll='config']").scrollTop : 0
+            };
+        }
+        function restoreScrollState(pos) {
+            var c = catalog.querySelector("[data-lpb-scroll='catalog']");
+            var l = left.querySelector("[data-lpb-scroll='existing']");
+            var m = middle.querySelector("[data-lpb-scroll='builder']");
+            var r = right.querySelector("[data-lpb-scroll='config']");
+            if (c) c.scrollTop = pos.catalog || 0;
+            if (l) l.scrollTop = pos.left || 0;
+            if (m) m.scrollTop = pos.middle || 0;
+            if (r) r.scrollTop = pos.right || 0;
+        }
+        function setStatus(msg, warn) {
+            state.status = msg || "";
+            status.textContent = state.status;
+            status.style.color = warn ? "#ffc107" : "#ccc";
+        }
+        function rowLabel(row) {
+            return (row.name || "(Unnamed)") + " | " + (row.orderId || "No Order ID");
+        }
+        function sideText(row) {
+            return [lpbRangeDisplay(row.config) || row.rangeRaw || "", row.units || "", row.sex || "", (row.config && row.config.reviewable === false ? "Not Reviewable" : "Reviewable")].filter(function(x) { return lpbCleanText(x); }).join(" | ");
+        }
+        function configPills(row) {
+            var range = lpbRangeDisplay(row.config) || row.rangeRaw || "";
+            return [
+                { text: range || "-", width: "82px" },
+                { text: row.units || "-", width: "54px" },
+                { text: row.sex || "-", width: "44px" },
+                { text: (row.config && row.config.reviewable === false ? "No" : "Yes"), width: "42px" }
+            ];
+        }
+        function rowMatchesSearch(row, query) {
+            var q = lpbNorm(query);
+            if (!q) return true;
+            return lpbNorm([row.name, row.orderId, row.targetPanelName, row.sourcePanelName, row.units, row.sex, lpbRangeDisplay(row.config), row.rangeRaw].join(" ")).indexOf(q) !== -1;
+        }
+        function panelMatchesSearch(panel, rows, query) {
+            var q = lpbNorm(query);
+            if (!q) return true;
+            if (lpbNorm(panel.name).indexOf(q) !== -1) return true;
+            return rows.some(function(row) { return rowMatchesSearch(row, query); });
+        }
+        function revertRow(row) {
+            row.config = lpbCloneConfig(row.originalConfig || lpbConfigFromTest(row, row.kind !== "existing"), row.kind !== "existing");
+            row.markedDelete = false;
+            renderAll();
+        }
+        function copyRows(rows) {
+            state.clipboard = rows.map(function(r) { return lpbMakeRowFromTest(r, "", "clipboard"); });
+            setStatus("Copied " + state.clipboard.length + " lab test(s).");
+        }
+        function pasteInto(target, isExisting) {
+            if (!state.clipboard.length) { setStatus("Clipboard is empty.", true); return; }
+            if (isExisting && target.locked) { setStatus("Cannot paste into locked panel.", true); return; }
+            var targetRows = isExisting ? target.additions.concat(target.tests.filter(function(t) { return !t.markedDelete; })) : target.tests;
+            var keys = {};
+            targetRows.forEach(function(r) { keys[lpbTestIdentity(r)] = true; });
+            var skipped = 0;
+            state.clipboard.forEach(function(c) {
+                var key = lpbTestIdentity(c);
+                if (keys[key]) { skipped++; return; }
+                keys[key] = true;
+                var nr = lpbMakeRowFromTest(c, target.name, isExisting ? "pending" : "new");
+                if (isExisting) {
+                    nr.panelId = target.panelId;
+                    nr.panelEditHref = target.editHref;
+                    target.additions.push(nr);
+                } else {
+                    target.tests.push(nr);
+                    target.tests.sort(function(a, b) { return lpbNorm(a.name).localeCompare(lpbNorm(b.name)) || lpbNorm(a.orderId).localeCompare(lpbNorm(b.orderId)); });
+                }
+            });
+            setStatus("Pasted " + (state.clipboard.length - skipped) + " test(s)" + (skipped ? "; skipped " + skipped + " duplicate(s)." : "."));
+            renderAll();
+        }
+        function markActive(row) {
+            state.activeRow = row;
+            renderAll();
+        }
+        function selectedOrAll(rows) {
+            var sel = rows.filter(function(r) { return r.selected && !r.markedDelete; });
+            return sel.length ? sel : rows.filter(function(r) { return !r.markedDelete; });
+        }
+        function renderPanelHeader(parent, name, meta, buttons) {
+            var h = document.createElement("div");
+            h.style.cssText = "display:flex;align-items:center;gap:6px;padding:8px;background:#292929;border-bottom:1px solid #444;";
+            var label = document.createElement("div");
+            label.textContent = name + " " + meta;
+            label.title = label.textContent;
+            label.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:800;";
+            h.appendChild(label);
+            buttons.forEach(function(b) { h.appendChild(b); });
+            parent.appendChild(h);
+        }
+        function renderRow(parent, row, opts) {
+            opts = opts || {};
+            var wrap = document.createElement("div");
+            var changed = lpbIsConfigChanged(row);
+            wrap.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 7px;border-bottom:1px solid #333;cursor:pointer;font-size:11px;" +
+                (row === state.activeRow ? "background:rgba(91,67,199,0.22);box-shadow:inset 3px 0 0 #5b43c7;" : row.markedDelete ? "background:#241414;box-shadow:inset 3px 0 0 #8f3a3a;opacity:.82;" : changed ? "box-shadow:inset 3px 0 0 #8a6f2a;background:#221f16;" : row.kind !== "existing" ? "box-shadow:inset 3px 0 0 #3e5148;background:#111f17;" : "");
+            var cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = !!row.selected;
+            cb.onclick = function(e) { e.stopPropagation(); row.selected = cb.checked; };
+            var txt = document.createElement("div");
+            txt.style.cssText = "flex:1;min-width:0;";
+            var main = document.createElement("div");
+            main.textContent = rowLabel(row);
+            main.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;";
+            txt.appendChild(main);
+            var pills = document.createElement("div");
+            pills.style.cssText = "display:grid;grid-template-columns:82px 54px 44px 42px 30px;align-items:center;gap:4px;width:270px;max-width:48%;overflow:visible;flex-shrink:0;";
+            configPills(row).forEach(function(item) {
+                var pill = document.createElement("span");
+                pill.textContent = item.text;
+                pill.title = item.text;
+                pill.style.cssText = "display:inline-block;width:" + item.width + ";box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 2px;border:0;background:transparent;color:#bbb;font-size:10px;";
+                pills.appendChild(pill);
+            });
+            if (changed || row.markedDelete) {
+                var rev = lpbIconButton("↺", "Revert this lab test to its original/copied values", "#333");
+                rev.onclick = function(e) { e.stopPropagation(); revertRow(row); };
+                pills.appendChild(rev);
+            }
+            var copy = lpbIconButton("\uD83D\uDCCB", "Copy lab test", "#333");
+            copy.onclick = function(e) { e.stopPropagation(); copyRows([row]); };
+            wrap.appendChild(cb);
+            wrap.appendChild(txt);
+            wrap.appendChild(pills);
+            wrap.appendChild(copy);
+            if (opts.canDelete) {
+                var del = lpbIconButton("×", row.kind === "existing" ? "Mark/unmark for deletion" : "Remove pending test", "#6b1f1f");
+                del.onclick = function(e) {
+                    e.stopPropagation();
+                    if (row.kind === "existing") row.markedDelete = !row.markedDelete;
+                    else opts.remove(row);
+                    if (state.activeRow === row) state.activeRow = null;
+                    renderAll();
+                };
+                wrap.appendChild(del);
+            }
+            wrap.onclick = function() { markActive(row); };
+            wrap.ondblclick = function(e) {
+                e.preventDefault();
+                row.selected = !row.selected;
+                markActive(row);
+            };
+            parent.appendChild(wrap);
+        }
+        function renderCatalog() {
+            catalog.innerHTML = "";
+            var top = document.createElement("div");
+            top.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;font-weight:800;border-bottom:1px solid #333;background:#222;";
+            var titleRow = document.createElement("div");
+            titleRow.style.cssText = "display:flex;align-items:center;gap:6px;";
+            var titleText = document.createElement("div");
+            titleText.textContent = "List of Lab Tests";
+            titleText.style.cssText = "flex:1;";
+            var count = document.createElement("span");
+            var checkedCount = state.labTestCatalog.filter(function(row) { return !!row.selected; }).length;
+            count.textContent = state.labTestCatalog.length + " tests • " + checkedCount + " checked";
+            count.style.cssText = "color:#bbb;font-size:11px;font-weight:700;white-space:nowrap;";
+            titleRow.appendChild(titleText);
+            titleRow.appendChild(count);
+            var actionRow = document.createElement("div");
+            actionRow.style.cssText = "display:flex;align-items:center;gap:6px;min-width:0;";
+            var search = document.createElement("input");
+            search.type = "text";
+            search.setAttribute("data-lpb-control", "catalogSearch");
+            search.placeholder = "Search lab tests";
+            search.value = state.catalogSearch || "";
+            search.style.cssText = "flex:1;min-width:0;box-sizing:border-box;background:#1a1a1a;color:#fff;border:1px solid #444;border-radius:4px;padding:7px 9px;font-size:12px;font-weight:400;";
+            search.oninput = function() { state.catalogSearch = search.value; renderAll(); };
+            var copyChecked = lpbButton("Copy", checkedCount ? "#3e5148" : "#333");
+            copyChecked.title = checkedCount ? "Copy checked lab tests" : "Check one or more lab tests first";
+            copyChecked.disabled = checkedCount === 0;
+            copyChecked.style.opacity = checkedCount ? "1" : ".55";
+            copyChecked.style.cursor = checkedCount ? "pointer" : "not-allowed";
+            copyChecked.onclick = function() {
+                var rows = state.labTestCatalog.filter(function(row) { return !!row.selected; });
+                if (!rows.length) { setStatus("Check one or more lab tests to copy.", true); return; }
+                copyRows(rows);
+            };
+            var clearChecked = lpbButton("Clear", checkedCount ? "#333" : "#2a2a2a");
+            clearChecked.title = "Clear checked lab tests";
+            clearChecked.disabled = checkedCount === 0;
+            clearChecked.style.opacity = checkedCount ? "1" : ".55";
+            clearChecked.style.cursor = checkedCount ? "pointer" : "not-allowed";
+            clearChecked.onclick = function() {
+                state.labTestCatalog.forEach(function(row) { row.selected = false; });
+                renderAll();
+            };
+            top.appendChild(titleRow);
+            actionRow.appendChild(search);
+            actionRow.appendChild(copyChecked);
+            actionRow.appendChild(clearChecked);
+            top.appendChild(actionRow);
+            catalog.appendChild(top);
+            var scroller = document.createElement("div");
+            scroller.style.cssText = "flex:1;overflow:auto;min-height:0;";
+            scroller.setAttribute("data-lpb-scroll", "catalog");
+            var q = lpbNorm(state.catalogSearch);
+            state.labTestCatalog.forEach(function(row) {
+                if (q && !rowMatchesSearch(row, q)) return;
+                var wrap = document.createElement("div");
+                wrap.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 7px;border-bottom:1px solid #333;font-size:11px;";
+                var cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.checked = !!row.selected;
+                cb.title = "Select lab test for bulk copy";
+                cb.onclick = function(e) {
+                    e.stopPropagation();
+                    row.selected = cb.checked;
+                    renderAll();
+                };
+                var txt = document.createElement("div");
+                txt.textContent = rowLabel(row);
+                txt.title = rowLabel(row);
+                txt.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;";
+                var copy = lpbIconButton("\uD83D\uDCCB", "Copy lab test", "#333");
+                copy.onclick = function(e) {
+                    e.stopPropagation();
+                    copyRows([row]);
+                };
+                wrap.onclick = function() {
+                    row.selected = !row.selected;
+                    renderAll();
+                };
+                wrap.ondblclick = function(e) {
+                    e.preventDefault();
+                    copyRows([row]);
+                };
+                wrap.appendChild(cb);
+                wrap.appendChild(txt);
+                wrap.appendChild(copy);
+                scroller.appendChild(wrap);
+            });
+            if (!state.labTestCatalog.length) {
+                var empty = document.createElement("div");
+                empty.textContent = "No lab test options were found in the Add Lab Panel modal.";
+                empty.style.cssText = "padding:12px;color:#ffb74d;font-size:12px;";
+                scroller.appendChild(empty);
+            }
+            catalog.appendChild(scroller);
+        }
+        function renderExisting() {
+            left.innerHTML = "";
+            var top = document.createElement("div");
+            top.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;font-weight:800;border-bottom:1px solid #333;background:#222;";
+            var titleRow = document.createElement("div");
+            titleRow.style.cssText = "display:flex;align-items:center;gap:6px;";
+            var titleText = document.createElement("div");
+            titleText.textContent = "Existing Lab Panels";
+            titleText.style.cssText = "flex:1;";
+            var anyCollapsed = state.panels.some(function(p) { return p.collapsed; });
+            var collapseAll = lpbButton(anyCollapsed ? "Expand All" : "Collapse All", "#333");
+            collapseAll.onclick = function() {
+                var collapse = !state.panels.some(function(p) { return p.collapsed; });
+                state.panels.forEach(function(p) { p.collapsed = collapse; });
+                renderAll();
+            };
+            titleRow.appendChild(titleText);
+            titleRow.appendChild(collapseAll);
+            var search = document.createElement("input");
+            search.type = "text";
+            search.setAttribute("data-lpb-control", "existingSearch");
+            search.placeholder = "Search existing panels or lab tests";
+            search.value = state.existingSearch || "";
+            search.style.cssText = "width:100%;box-sizing:border-box;background:#1a1a1a;color:#fff;border:1px solid #444;border-radius:4px;padding:7px 9px;font-size:12px;font-weight:400;";
+            search.oninput = function() { state.existingSearch = search.value; renderAll(); };
+            top.appendChild(titleRow);
+            top.appendChild(search);
+            left.appendChild(top);
+            var scroller = document.createElement("div");
+            scroller.style.cssText = "flex:1;overflow:auto;min-height:0;";
+            scroller.setAttribute("data-lpb-scroll", "existing");
+            state.panels.forEach(function(panel) {
+                var section = document.createElement("div");
+                var allRows = panel.tests.concat(panel.additions);
+                if (!panelMatchesSearch(panel, allRows, state.existingSearch)) return;
+                var btnSel = lpbButton(allRows.some(function(r) { return r.selected; }) ? "Deselect All" : "Select All", "#333");
+                btnSel.onclick = function() { var select = !allRows.some(function(r) { return r.selected; }); allRows.forEach(function(r) { r.selected = select; }); renderAll(); };
+                var btnCopy = lpbButton("\uD83D\uDCCB Copy All", "#333");
+                btnCopy.onclick = function() { copyRows(selectedOrAll(allRows)); };
+                var btnCollapse = lpbButton(panel.collapsed ? "Expand" : "Collapse", "#333");
+                btnCollapse.onclick = function() { panel.collapsed = !panel.collapsed; renderAll(); };
+                var buttons = [btnSel, btnCopy];
+                if (!panel.locked) {
+                    var btnPaste = lpbButton("\uD83D\uDCCB Paste", "#3e5148");
+                    btnPaste.onclick = function() { pasteInto(panel, true); };
+                    var btnDeleteAll = lpbButton("Delete All", "#6b1f1f");
+                    btnDeleteAll.onclick = function() { if (window.confirm("Mark all original tests in " + panel.name + " for deletion?")) { panel.tests.forEach(function(t) { t.markedDelete = true; }); renderAll(); } };
+                    buttons.push(btnPaste, btnDeleteAll);
+                }
+                buttons.push(btnCollapse);
+                renderPanelHeader(section, panel.name, "(" + allRows.length + " lab tests)" + (panel.locked ? " 🔒" : ""), buttons);
+                if (!panel.collapsed) {
+                    panel.tests.forEach(function(row) { if (rowMatchesSearch(row, state.existingSearch) || lpbNorm(panel.name).indexOf(lpbNorm(state.existingSearch)) !== -1) renderRow(section, row, { canDelete: !panel.locked, remove: function(){} }); });
+                    panel.additions.forEach(function(row) { if (rowMatchesSearch(row, state.existingSearch) || lpbNorm(panel.name).indexOf(lpbNorm(state.existingSearch)) !== -1) renderRow(section, row, { canDelete: true, remove: function(r) { panel.additions = panel.additions.filter(function(x) { return x !== r; }); } }); });
+                }
+                scroller.appendChild(section);
+            });
+            left.appendChild(scroller);
+        }
+        function renderBuilder() {
+            middle.innerHTML = "";
+            var top = document.createElement("div");
+            top.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;border-bottom:1px solid #333;background:#222;";
+            var t = document.createElement("div");
+            t.textContent = "Builder";
+            t.style.cssText = "font-weight:800;";
+            var createRow = document.createElement("div");
+            createRow.style.cssText = "display:flex;align-items:center;gap:6px;";
+            var createInput = document.createElement("input");
+            createInput.type = "text";
+            createInput.setAttribute("data-lpb-control", "draftPanelName");
+            createInput.placeholder = "New lab panel name";
+            createInput.value = state.draftPanelName || "";
+            createInput.style.cssText = "flex:1;min-width:0;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:7px 9px;font-size:12px;";
+            createInput.oninput = function() { state.draftPanelName = createInput.value; };
+            createInput.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); create.click(); } };
+            var create = lpbButton("Create", "#5b43c7");
+            create.onclick = function() {
+                var name = lpbCleanText(state.draftPanelName);
+                state.createWarning = "";
+                if (!name) { state.createWarning = "Enter a lab panel name."; renderAll(); return; }
+                var names = {};
+                state.panels.forEach(function(p) { names[lpbNorm(p.name)] = true; });
+                state.newPanels.forEach(function(p) { names[lpbNorm(p.name)] = true; });
+                if (names[lpbNorm(name)]) { state.createWarning = "Panel name already exists: " + name; renderAll(); return; }
+                state.newPanels.push({ name: name, tests: [], collapsed: false });
+                state.draftPanelName = "";
+                state.createWarning = "";
+                renderAll();
+            };
+            top.appendChild(t);
+            createRow.appendChild(createInput);
+            createRow.appendChild(create);
+            top.appendChild(createRow);
+            if (state.createWarning) {
+                var createWarn = document.createElement("div");
+                createWarn.textContent = state.createWarning;
+                createWarn.style.cssText = "color:#ffc107;font-size:11px;font-weight:700;line-height:1.25;";
+                top.appendChild(createWarn);
+            }
+            var builderSearch = document.createElement("input");
+            builderSearch.type = "text";
+            builderSearch.setAttribute("data-lpb-control", "builderSearch");
+            builderSearch.placeholder = "Search builder panels or lab tests";
+            builderSearch.value = state.builderSearch || "";
+            builderSearch.style.cssText = "width:100%;box-sizing:border-box;background:#1a1a1a;color:#fff;border:1px solid #444;border-radius:4px;padding:7px 9px;font-size:12px;font-weight:400;";
+            builderSearch.oninput = function() { state.builderSearch = builderSearch.value; renderAll(); };
+            top.appendChild(builderSearch);
+            middle.appendChild(top);
+            var scroller = document.createElement("div");
+            scroller.style.cssText = "flex:1;overflow:auto;min-height:0;";
+            scroller.setAttribute("data-lpb-scroll", "builder");
+            state.newPanels.forEach(function(panel) {
+                var section = document.createElement("div");
+                if (!panelMatchesSearch(panel, panel.tests, state.builderSearch)) return;
+                var nameInput = document.createElement("input");
+                nameInput.value = panel.name;
+                nameInput.style.cssText = "flex:1;min-width:120px;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:5px 7px;font-size:12px;";
+                nameInput.oninput = function() { panel.name = lpbCleanText(nameInput.value); panel.tests.forEach(function(r) { r.targetPanelName = panel.name; }); updateFooterState(); };
+                var btnSel = lpbButton(panel.tests.some(function(r) { return r.selected; }) ? "Deselect All" : "Select All", "#333");
+                btnSel.onclick = function() { var select = !panel.tests.some(function(r) { return r.selected; }); panel.tests.forEach(function(r) { r.selected = select; }); renderAll(); };
+                var btnCopy = lpbButton("\uD83D\uDCCB Copy All", "#333");
+                btnCopy.onclick = function() { copyRows(selectedOrAll(panel.tests)); };
+                var btnPaste = lpbButton("\uD83D\uDCCB Paste", "#3e5148");
+                btnPaste.onclick = function() { pasteInto(panel, false); };
+                var btnDeleteAll = lpbButton("Delete All", "#6b1f1f");
+                btnDeleteAll.onclick = function() { if (window.confirm("Delete all pending tests from " + panel.name + "?")) { panel.tests = []; if (state.activeRow && state.activeRow.targetPanelName === panel.name) state.activeRow = null; renderAll(); } };
+                var btnCollapse = lpbButton(panel.collapsed ? "Expand" : "Collapse", "#333");
+                btnCollapse.onclick = function() { panel.collapsed = !panel.collapsed; renderAll(); };
+                var h = document.createElement("div");
+                h.style.cssText = "display:flex;align-items:center;gap:6px;padding:8px;background:#292929;border-bottom:1px solid #444;";
+                h.appendChild(nameInput);
+                var count = document.createElement("span");
+                count.textContent = panel.tests.length + " lab tests";
+                count.style.cssText = "color:#bbb;font-size:11px;font-weight:700;white-space:nowrap;";
+                h.appendChild(count);
+                [btnSel, btnCopy, btnPaste, btnDeleteAll, btnCollapse].forEach(function(b) { h.appendChild(b); });
+                section.appendChild(h);
+                if (!panel.collapsed) panel.tests.forEach(function(row) { if (rowMatchesSearch(row, state.builderSearch) || lpbNorm(panel.name).indexOf(lpbNorm(state.builderSearch)) !== -1) renderRow(section, row, { canDelete: true, remove: function(r) { panel.tests = panel.tests.filter(function(x) { return x !== r; }); } }); });
+                scroller.appendChild(section);
+            });
+            middle.appendChild(scroller);
+        }
+        function renderConfig() {
+            right.innerHTML = "";
+            var top = document.createElement("div");
+            top.textContent = "Lab Test Configuration";
+            top.style.cssText = "padding:10px;font-weight:800;border-bottom:1px solid #333;background:#222;";
+            right.appendChild(top);
+            var row = state.activeRow;
+            var form = document.createElement("div");
+            form.style.cssText = "padding:12px;display:flex;flex-direction:column;gap:10px;overflow:auto;";
+            form.setAttribute("data-lpb-scroll", "config");
+            if (!row) {
+                form.innerHTML = '<div style="color:#aaa;font-size:13px;">Select a lab test row to edit its reference range and reviewable setting.</div>';
+                right.appendChild(form);
+                return;
+            }
+            var hdr = document.createElement("div");
+            hdr.innerHTML = '<div style="font-weight:800;">' + row.name + '</div><div style="color:#aaa;font-size:12px;">' + row.targetPanelName + ' | ' + (row.orderId || 'No Order ID') + '</div>';
+            form.appendChild(hdr);
+            var lockedConfig = !!row.lockedPanel && row.kind === "existing";
+            if (lockedConfig) {
+                var lockedNote = document.createElement("div");
+                lockedNote.textContent = "🔒 Locked panel: configuration values are view-only.";
+                lockedNote.style.cssText = "padding:7px 9px;border:1px solid #444;border-radius:4px;background:#222;color:#ccc;font-size:12px;font-weight:700;";
+                form.appendChild(lockedNote);
+            }
+            function field(label, key, numeric) {
+                var wrap = document.createElement("label");
+                wrap.style.cssText = "display:flex;flex-direction:column;gap:4px;font-size:12px;color:#ccc;font-weight:700;";
+                if (lockedConfig) {
+                    var valueBox = document.createElement("div");
+                    valueBox.textContent = row.config[key] || "";
+                    valueBox.title = row.config[key] || "";
+                    valueBox.setAttribute("aria-readonly", "true");
+                    valueBox.style.cssText = "min-height:34px;box-sizing:border-box;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:8px;font-size:13px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;";
+                    wrap.appendChild(document.createTextNode(label));
+                    wrap.appendChild(valueBox);
+                    form.appendChild(wrap);
+                    return;
+                }
+                var input = document.createElement("input");
+                input.type = "text";
+                input.value = row.config[key] || "";
+                input.style.cssText = "background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:8px;font-size:13px;";
+                input.oninput = function() { row.config[key] = input.value; row.config.touched[key] = true; updateFooterState(); };
+                input.onblur = function() { renderAll(); };
+                wrap.appendChild(document.createTextNode(label));
+                wrap.appendChild(input);
+                form.appendChild(wrap);
+            }
+            var original = document.createElement("div");
+            original.style.cssText = "font-size:11px;color:#aaa;";
+            original.textContent = "Original range: " + (row.rangeRaw || lpbRangeDisplay(row.originalConfig) || "(blank)");
+            form.appendChild(original);
+            field("Reference Range", "referenceRange");
+            field("Reference Range Low", "low", true);
+            field("Reference Range High", "high", true);
+            var review = document.createElement("label");
+            review.style.cssText = "display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;";
+            var cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = row.config.reviewable !== false;
+            if (lockedConfig) {
+                var reviewValue = document.createElement("span");
+                reviewValue.textContent = cb.checked ? "Yes" : "No";
+                reviewValue.style.cssText = "display:inline-block;min-width:42px;padding:3px 7px;border:1px solid #444;border-radius:4px;background:#222;color:#fff;font-size:12px;";
+                review.appendChild(reviewValue);
+            } else {
+                cb.onchange = function() { row.config.reviewable = cb.checked; row.config.touched.reviewable = true; renderAll(); };
+                review.appendChild(cb);
+            }
+            review.appendChild(document.createTextNode("Reviewable?"));
+            form.appendChild(review);
+            var reason = document.createElement("label");
+            reason.style.cssText = "display:flex;flex-direction:column;gap:4px;font-size:12px;color:#ccc;font-weight:700;";
+            if (lockedConfig) {
+                var reasonBox = document.createElement("div");
+                reasonBox.textContent = row.config.reason || "Update reference range";
+                reasonBox.title = row.config.reason || "Update reference range";
+                reasonBox.setAttribute("aria-readonly", "true");
+                reasonBox.style.cssText = "min-height:70px;box-sizing:border-box;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:8px;font-size:13px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;";
+                reason.appendChild(document.createTextNode("Reason for Change"));
+                reason.appendChild(reasonBox);
+                form.appendChild(reason);
+            } else {
+                var ta = document.createElement("textarea");
+                ta.value = row.config.reason || "Update reference range";
+                ta.rows = 4;
+                ta.style.cssText = "background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:8px;font-size:13px;resize:vertical;";
+                ta.oninput = function() { row.config.reason = ta.value; row.config.touched.reason = true; updateFooterState(); };
+                ta.onblur = function() { renderAll(); };
+                reason.appendChild(document.createTextNode("Reason for Change"));
+                reason.appendChild(ta);
+                form.appendChild(reason);
+            }
+            if (!lockedConfig && (lpbIsConfigChanged(row) || row.markedDelete)) {
+                var revertBtn = lpbButton("Revert", "#333");
+                revertBtn.onclick = function() { revertRow(row); };
+                form.appendChild(revertBtn);
+            }
+            var err = lpbValidateRow(row);
+            if (err) {
+                var e = document.createElement("div");
+                e.textContent = err;
+                e.style.cssText = "color:#fca5a5;font-size:12px;font-weight:700;";
+                form.appendChild(e);
+            }
+            right.appendChild(form);
+        }
+        function lpbValidateRow(row) {
+            var c = row.config || {};
+            var low = lpbCleanText(c.low);
+            var high = lpbCleanText(c.high);
+            if ((low && !high) || (!low && high)) return "Low and High must both be filled or both blank.";
+            if (low && isNaN(Number(low))) return "Reference Range Low must be numeric.";
+            if (high && isNaN(Number(high))) return "Reference Range High must be numeric.";
+            if (lpbIsConfigChanged(row) && !lpbCleanText(c.reason)) return "Reason for Change is required.";
+            return "";
+        }
+        function lpbCollectChanges() {
+            var changes = { newPanels: [], existingAdds: [], deletes: [], updates: [], affected: {} };
+            state.newPanels.forEach(function(p) {
+                if (lpbCleanText(p.name) || p.tests.length) {
+                    changes.newPanels.push(p);
+                    if (p.name) changes.affected[p.name] = true;
+                }
+            });
+            state.panels.forEach(function(p) {
+                p.additions.forEach(function(a) { changes.existingAdds.push({ panel: p, row: a }); changes.affected[p.name] = true; });
+                p.tests.forEach(function(t) {
+                    if (t.markedDelete) { changes.deletes.push({ panel: p, row: t }); changes.affected[p.name] = true; }
+                    else if (lpbIsConfigChanged(t)) { changes.updates.push({ panel: p, row: t }); changes.affected[p.name] = true; }
+                });
+            });
+            return changes;
+        }
+        function lpbValidateAll(changes) {
+            var errs = [];
+            var names = {};
+            state.panels.forEach(function(p) { if (names[p.normName]) errs.push("Duplicate existing panel name: " + p.name); names[p.normName] = true; });
+            state.newPanels.forEach(function(p) {
+                var n = lpbNorm(p.name);
+                if (!n) errs.push("New panel name is required.");
+                else if (names[n]) errs.push("Duplicate panel name: " + p.name);
+                names[n] = true;
+                if (!p.tests.length) errs.push("New panel '" + (p.name || "(blank)") + "' must contain at least one lab test.");
+            });
+            state.panels.forEach(function(p) {
+                if (p.locked && (p.additions.length || p.tests.some(function(t) { return t.markedDelete || lpbIsConfigChanged(t); }))) errs.push("Locked panel cannot be modified: " + p.name);
+                var seen = {};
+                p.tests.concat(p.additions).forEach(function(t) {
+                    var k = lpbTestIdentity(t);
+                    if (!t.markedDelete && seen[k]) errs.push("Duplicate lab test in panel '" + p.name + "': " + (t.orderId || t.name));
+                    if (!t.markedDelete) seen[k] = true;
+                    var re = lpbValidateRow(t);
+                    if (re) errs.push((t.orderId || t.name) + ": " + re);
+                    if ((lpbIsConfigChanged(t) || t.markedDelete) && !p.locked && t.kind === "existing" && !t.testEditHref && lpbIsConfigChanged(t)) errs.push("Missing test edit link for " + p.name + " / " + (t.orderId || t.name));
+                });
+                if ((p.additions.length || p.tests.some(function(t) { return t.markedDelete; })) && !p.editHref) errs.push("Missing panel edit link for " + p.name);
+            });
+            if (!changes.newPanels.length && !changes.existingAdds.length && !changes.deletes.length && !changes.updates.length) errs.push("No changes to apply.");
+            if (!state.addHref && changes.newPanels.length) errs.push("Missing page Add link for new lab panels.");
+            return errs;
+        }
+        function updateFooterState() {
+            var changes = lpbCollectChanges();
+            var errs = lpbValidateAll(changes);
+            confirm.disabled = errs.length > 0;
+            confirm.style.opacity = errs.length ? ".55" : "1";
+            confirm.style.cursor = errs.length ? "not-allowed" : "pointer";
+            if (errs.length) setStatus(errs[0], true);
+            else setStatus("Ready. " + changes.newPanels.length + " new panel(s), " + changes.updates.length + " update(s), " + changes.existingAdds.length + " existing-panel add(s), " + changes.deletes.length + " removal(s).");
+        }
+        function renderAll() {
+            var scrollState = getScrollState();
+            var active = document.activeElement;
+            var activeControl = active && active.getAttribute ? active.getAttribute("data-lpb-control") : "";
+            var activeSelectionStart = active && typeof active.selectionStart === "number" ? active.selectionStart : null;
+            var activeSelectionEnd = active && typeof active.selectionEnd === "number" ? active.selectionEnd : null;
+            renderCatalog();
+            renderExisting();
+            renderBuilder();
+            renderConfig();
+            updateFooterState();
+            restoreScrollState(scrollState);
+            if (activeControl) {
+                var nextActive = overlay.querySelector("[data-lpb-control='" + activeControl + "']");
+                if (nextActive) {
+                    nextActive.focus();
+                    if (activeSelectionStart !== null && typeof nextActive.setSelectionRange === "function") {
+                        try { nextActive.setSelectionRange(activeSelectionStart, activeSelectionEnd); } catch (e) {}
+                    }
+                }
+            }
+        }
+        confirm.onclick = function() {
+            var changes = lpbCollectChanges();
+            var errs = lpbValidateAll(changes);
+            if (errs.length) { setStatus(errs[0], true); return; }
+            lpbShowFinalConfirm(changes, function() {
+                overlay.remove();
+                lpbExecuteChanges(state, changes);
+            });
+        };
+        renderAll();
+    }
+
+    function lpbShowFinalConfirm(changes, onGo) {
+        var names = Object.keys(changes.affected).sort();
+        var box = document.createElement("div");
+        box.style.cssText = "padding:16px;color:#fff;display:flex;flex-direction:column;gap:10px;";
+        box.innerHTML = '<div>Confirm Lab Panels Builder changes?</div>' +
+            '<div style="font-size:13px;color:#cbd5e1;line-height:1.7;">' +
+            'New lab panels: <b>' + changes.newPanels.length + '</b><br>' +
+            'Lab tests to add to new panels: <b>' + changes.newPanels.reduce(function(n, p) { return n + p.tests.length; }, 0) + '</b><br>' +
+            'Existing lab tests to update: <b>' + changes.updates.length + '</b><br>' +
+            'Lab tests to add to existing panels: <b>' + changes.existingAdds.length + '</b><br>' +
+            'Lab tests to remove from existing panels: <b>' + changes.deletes.length + '</b><br>' +
+            'Affected panels: <b>' + names.join(", ") + '</b></div>';
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancel = lpbButton("Cancel", "#4b5563");
+        var go = lpbButton("Confirm", "#15803d");
+        row.appendChild(cancel);
+        row.appendChild(go);
+        box.appendChild(row);
+        var pop = createPopup({ title: "Lab Panels Builder - Confirm", content: box, width: "560px", height: "auto" });
+        cancel.onclick = function() { pop.close(); };
+        go.onclick = function() { pop.close(); onGo(); };
+    }
+
+    async function lpbWaitModalOpen(ms) {
+        var start = Date.now(), max = ms || 12000;
+        while (Date.now() - start < max) {
+            var m = document.querySelector("#ajaxModal .modal-content, .modal.in .modal-content, .modal.show .modal-content");
+            if (m && lpbCleanText(m.textContent)) return m;
+            await sleep(150);
+        }
+        return null;
+    }
+    async function lpbWaitModalClose(ms) {
+        var start = Date.now(), max = ms || 12000;
+        while (Date.now() - start < max) {
+            var m = document.querySelector(".modal.in, .modal.show, #ajaxModal[style*='display: block']");
+            if (!m) return true;
+            await sleep(200);
+        }
+        return false;
+    }
+    async function lpbOpenModalByHref(href) {
+        var path = "";
+        try { path = new URL(href, location.origin).pathname; } catch (e) { path = href; }
+        var link = document.querySelector("a[href='" + path + "'], a[href='" + href + "'], a[href*='" + path + "']");
+        if (!link) throw new Error("Modal link not found: " + path);
+        link.click();
+        var modal = await lpbWaitModalOpen(15000);
+        if (!modal) throw new Error("Modal did not open: " + path);
+        return modal;
+    }
+    function lpbActiveModalRoot() {
+        return document.querySelector("#ajaxModal .modal-content, .modal.in .modal-content, .modal.show .modal-content") || document;
+    }
+    function lpbQueryInModal(sel) {
+        var root = lpbActiveModalRoot();
+        return (root && root.querySelector(sel)) || document.querySelector(sel);
+    }
+    function lpbSetInput(sel, value, touchBlank) {
+        var el = lpbQueryInModal(sel);
+        if (!el) return false;
+        if (value !== "" || touchBlank) {
+            el.value = value;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return true;
+    }
+    function lpbSetCheckbox(sel, checked, touch) {
+        var el = lpbQueryInModal(sel);
+        if (!el || !touch) return !!el;
+        el.checked = !!checked;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        try { if (window.jQuery && window.jQuery.fn.uniform) window.jQuery(el).uniform.update(el); } catch (e) {}
+        var span = el.closest(".checker") ? el.closest(".checker").querySelector("span") : null;
+        if (span) span.classList.toggle("checked", !!checked);
+        return true;
+    }
+    function lpbOrderIdMatchesOption(text, orderId) {
+        var oid = lpbKey(orderId);
+        if (!oid) return false;
+        var matches = String(text || "").match(/\(([^)]+)\)/g) || [];
+        for (var i = 0; i < matches.length; i++) {
+            var inner = matches[i].slice(1, -1);
+            if (lpbKey(inner) === oid) return true;
+        }
+        return lpbKey(text) === oid;
+    }
+    function lpbOptionMatchScore(text, row) {
+        var txt = lpbCleanText(text);
+        var txtKey = lpbKey(txt);
+        var oid = lpbKey(row && row.orderId);
+        var nameKey = lpbKey(row && row.name);
+        var score = 0;
+        if (oid) {
+            var matches = String(txt || "").match(/\(([^)]+)\)/g) || [];
+            for (var i = 0; i < matches.length; i++) {
+                var inner = matches[i].slice(1, -1);
+                var innerKey = lpbKey(inner);
+                var firstTokenKey = lpbKey(String(inner).split(/[;,\s]/)[0] || "");
+                if (innerKey === oid) score = Math.max(score, 100);
+                if (firstTokenKey === oid) score = Math.max(score, 92);
+                if (i === matches.length - 1 && innerKey === oid) score = Math.max(score, 110);
+            }
+            var escaped = String(row.orderId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            var boundary = new RegExp("(^|[^A-Za-z0-9])" + escaped + "([^A-Za-z0-9]|$)", "i");
+            if (boundary.test(txt)) score = Math.max(score, 45);
+        }
+        if (nameKey && txtKey.indexOf(nameKey) !== -1) score = Math.max(score, 25);
+        return score;
+    }
+    function lpbFindLabTestOptionValue(selectEl, row) {
+        var opts = selectEl ? selectEl.querySelectorAll("option") : [];
+        var best = { value: "", score: 0, text: "" };
+        var tied = false;
+        for (var i = 0; i < opts.length; i++) {
+            var val = lpbCleanText(opts[i].value);
+            if (!val) continue;
+            var txt = lpbCleanText(opts[i].textContent);
+            var score = lpbOptionMatchScore(txt, row);
+            if (score > best.score) {
+                best = { value: val, score: score, text: txt };
+                tied = false;
+            } else if (score > 0 && score === best.score) {
+                tied = true;
+            }
+        }
+        if (best.score >= 90) return best.value;
+        if (best.score > 0 && !tied) return best.value;
+        return "";
+    }
+    function lpbGetLabTestsMapping() {
+        if (window.labTestsMapping && typeof window.labTestsMapping === "object") return window.labTestsMapping;
+        var root = lpbActiveModalRoot();
+        var scripts = (root || document).querySelectorAll("script");
+        for (var i = 0; i < scripts.length; i++) {
+            var txt = scripts[i].textContent || "";
+            var start = txt.indexOf("labTestsMapping");
+            if (start === -1) continue;
+            var eq = txt.indexOf("=", start);
+            var brace = txt.indexOf("{", eq);
+            if (eq === -1 || brace === -1) continue;
+            var depth = 0, end = -1, inStr = "", escaped = false;
+            for (var p = brace; p < txt.length; p++) {
+                var ch = txt.charAt(p);
+                if (inStr) {
+                    if (escaped) escaped = false;
+                    else if (ch === "\\") escaped = true;
+                    else if (ch === inStr) inStr = "";
+                    continue;
+                }
+                if (ch === '"' || ch === "'") {
+                    inStr = ch;
+                    continue;
+                }
+                if (ch === "{") depth++;
+                else if (ch === "}") {
+                    depth--;
+                    if (depth === 0) {
+                        end = p + 1;
+                        break;
+                    }
+                }
+            }
+            if (end > brace) {
+                try { return JSON.parse(txt.slice(brace, end)); } catch (e) {}
+            }
+        }
+        return null;
+    }
+    function lpbFindMappedLabTest(row) {
+        var mapping = lpbGetLabTestsMapping();
+        if (!mapping) return null;
+        var best = { category: "", id: "", value: "", score: 0 };
+        Object.keys(mapping).forEach(function(category) {
+            var arr = mapping[category] || [];
+            for (var i = 0; i < arr.length; i++) {
+                var opt = arr[i] || {};
+                var score = lpbOptionMatchScore(opt.value, row);
+                if (score > best.score) {
+                    best = { category: category, id: String(opt.id || ""), value: String(opt.value || ""), score: score };
+                }
+            }
+        });
+        return best.score >= 90 && best.id ? best : null;
+    }
+    function lpbAppendMappedLabTestOptions(selectEl, rows) {
+        if (!selectEl) return false;
+        var changed = false;
+        for (var r = 0; r < rows.length; r++) {
+            if (lpbFindLabTestOptionValue(selectEl, rows[r])) continue;
+            var mapped = lpbFindMappedLabTest(rows[r]);
+            if (!mapped) continue;
+            var exists = false;
+            for (var i = 0; i < selectEl.options.length; i++) {
+                if (String(selectEl.options[i].value) === mapped.id) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                selectEl.appendChild(new Option(mapped.value, mapped.id));
+                changed = true;
+            }
+        }
+        if (changed) {
+            try {
+                if (window.jQuery && window.jQuery.fn.select2) window.jQuery(selectEl).trigger("change");
+                else selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+            } catch (e) {
+                selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+        return changed;
+    }
+    function lpbLabTestsMatchCount(selectEl, rows) {
+        var count = 0;
+        for (var i = 0; i < rows.length; i++) if (lpbFindLabTestOptionValue(selectEl, rows[i])) count++;
+        return count;
+    }
+    function lpbDescribeLabTestsSelect(selectEl) {
+        if (!selectEl) return "no select";
+        var examples = [];
+        for (var i = 0; i < Math.min(selectEl.options.length, 8); i++) examples.push(lpbCleanText(selectEl.options[i].textContent).slice(0, 80));
+        var category = lpbQueryInModal("#specimenCategory");
+        var catText = category ? " category=" + (category.value || "(blank)") : "";
+        return "options=" + selectEl.options.length + catText + (examples.length ? " sample=[" + examples.join(" | ") + "]" : "");
+    }
+    function lpbSelectLabelText(selectEl) {
+        if (!selectEl) return "";
+        var id = selectEl.id || "";
+        var formGroup = selectEl.closest(".form-group");
+        var label = "";
+        if (formGroup) {
+            var lab = formGroup.querySelector("label");
+            if (lab) label += " " + lpbCleanText(lab.textContent);
+        }
+        if (id) {
+            var direct = document.querySelector("label[for='" + id + "']");
+            if (direct) label += " " + lpbCleanText(direct.textContent);
+        }
+        return lpbNorm(label);
+    }
+    function lpbFindLabTestsSelect(rows) {
+        var root = lpbActiveModalRoot();
+        var candidates = [];
+        var selects = (root || document).querySelectorAll("select");
+        for (var i = 0; i < selects.length; i++) {
+            var sel = selects[i];
+            var idName = lpbNorm((sel.id || "") + " " + (sel.name || "") + " " + lpbSelectLabelText(sel));
+            var optionCount = sel.querySelectorAll("option[value]").length;
+            var score = 0;
+            if (sel.id === "labTests") score += 100;
+            if (sel.multiple) score += 20;
+            if (idName.indexOf("lab") !== -1) score += 25;
+            if (idName.indexOf("test") !== -1) score += 25;
+            if (idName.indexOf("lab tests") !== -1) score += 35;
+            if (optionCount > 1) score += 5;
+            for (var r = 0; r < Math.min(rows.length, 5); r++) {
+                if (lpbFindLabTestOptionValue(sel, rows[r])) score += 12;
+            }
+            if (score > 0) candidates.push({ select: sel, score: score, idName: idName, optionCount: optionCount });
+        }
+        candidates.sort(function(a, b) { return b.score - a.score; });
+        return candidates.length ? candidates[0].select : null;
+    }
+    async function lpbWaitLabTestsSelect(rows, ms) {
+        var start = Date.now(), max = ms || 15000;
+        var last = null;
+        while (Date.now() - start < max) {
+            var sel = lpbFindLabTestsSelect(rows);
+            if (sel && sel.options && sel.options.length > 0) {
+                lpbAppendMappedLabTestOptions(sel, rows);
+                if (!rows || !rows.length || lpbLabTestsMatchCount(sel, rows) === rows.length) return sel;
+                last = sel;
+            }
+            await sleep(200);
+        }
+        return last;
+    }
+    async function lpbWaitLabPanelModalReady(ms) {
+        var start = Date.now(), max = ms || 15000;
+        while (Date.now() - start < max) {
+            var root = lpbActiveModalRoot();
+            var name = lpbQueryInModal("#name");
+            var save = (root && root.querySelector("#actionButton, button[type='submit'], input[type='submit']")) || document.querySelector("#actionButton");
+            var labTests = lpbFindLabTestsSelect([]);
+            if (name && save && !save.disabled && labTests) return true;
+            await sleep(200);
+        }
+        return false;
+    }
+    async function lpbSetLabTestsSelect(rows, mode) {
+        var sel = await lpbWaitLabTestsSelect(rows, 15000);
+        if (!sel) {
+            var root = lpbActiveModalRoot();
+            var modalText = root && root !== document ? lpbCleanText(root.textContent).slice(0, 220) : "";
+            throw new Error("Lab Tests field was not found in the Lab Panel modal." + (modalText ? " Modal text: " + modalText : ""));
+        }
+        var values = [];
+        for (var i = 0; i < sel.options.length; i++) if (sel.options[i].selected && sel.options[i].value) values.push(sel.options[i].value);
+        var set = {};
+        values.forEach(function(v) { set[v] = true; });
+        for (var r = 0; r < rows.length; r++) {
+            var v = lpbFindLabTestOptionValue(sel, rows[r]);
+            if (!v) {
+                lpbAppendMappedLabTestOptions(sel, [rows[r]]);
+                v = lpbFindLabTestOptionValue(sel, rows[r]);
+            }
+            if (!v) throw new Error("Lab test option not found for " + (rows[r].orderId || rows[r].name) + " (" + lpbDescribeLabTestsSelect(sel) + ")");
+            if (mode === "remove") delete set[v];
+            else set[v] = true;
+        }
+        var out = Object.keys(set);
+        for (var oi = 0; oi < sel.options.length; oi++) sel.options[oi].selected = out.indexOf(sel.options[oi].value) !== -1;
+        try {
+            if (window.jQuery && window.jQuery.fn.select2) window.jQuery(sel).select2("val", out);
+            else sel.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch (e) {
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        await sleep(300);
+    }
+    async function lpbClickSaveAndWait() {
+        var root = lpbActiveModalRoot();
+        var save = (root && root.querySelector("#actionButton, button[type='submit'], input[type='submit']")) || document.querySelector("#actionButton");
+        if (!save) throw new Error("Save button #actionButton not found");
+        save.click();
+        var closed = await lpbWaitModalClose(15000);
+        if (!closed) {
+            var err = document.querySelector(".modal .alert-danger, .modal .has-error, #ajaxModal .alert-danger, #ajaxModal .has-error");
+            throw new Error(err ? lpbCleanText(err.textContent) : "Modal did not close after Save");
+        }
+        await sleep(1200);
+    }
+    async function lpbUpdateTestConfig(row, onlyTouched, beforeSave) {
+        await lpbOpenModalByHref(row.testEditHref);
+        var c = row.config || {};
+        var t = c.touched || {};
+        lpbSetInput("#referenceRange", c.referenceRange || "", !onlyTouched || t.referenceRange);
+        lpbSetInput("#referenceRangeLow", c.low || "", !onlyTouched || t.low);
+        lpbSetInput("#referenceRangeHigh", c.high || "", !onlyTouched || t.high);
+        lpbSetCheckbox("#reviewable", c.reviewable !== false, !onlyTouched || t.reviewable);
+        lpbSetInput("#reasonForChange", c.reason || "Update reference range", true);
+        if (typeof beforeSave === "function") beforeSave();
+        await lpbClickSaveAndWait();
+    }
+    async function lpbExecuteChanges(state, changes, resumePending) {
+        if (!resumePending) lpbClearCancel();
+        if (lpbIsCancelRequested()) {
+            lpbClearPending();
+            lpbClearCancel();
+            createPopup({ title: "Lab Panels Builder", content: '<div style="padding:18px;color:#ffb74d;">Lab Panels Builder was cancelled.</div>', width: "430px", height: "auto" });
+            return;
+        }
+        var pending = resumePending || lpbBuildPending(state, changes);
+        lpbSavePending(pending);
+        var progressItems = [];
+        function addProgressItem(id, label, type) {
+            progressItems.push({ id: id, label: label, type: type, status: "Pending", detail: "" });
+        }
+        for (var pni = 0; pni < changes.newPanels.length; pni++) {
+            var pnew = changes.newPanels[pni];
+            addProgressItem("newPanel:" + pni, "Create panel: " + pnew.name, "add");
+            for (var nti = 0; nti < pnew.tests.length; nti++) {
+                if (!lpbShouldConfigureNewTest(pnew.tests[nti])) continue;
+                addProgressItem("newTest:" + pni + ":" + nti, "Configure new test: " + pnew.name + " / " + (pnew.tests[nti].orderId || pnew.tests[nti].name), "update");
+            }
+        }
+        for (var upi = 0; upi < changes.updates.length; upi++) {
+            addProgressItem("update:" + upi, "Update test: " + changes.updates[upi].panel.name + " / " + (changes.updates[upi].row.orderId || changes.updates[upi].row.name), "update");
+        }
+        state.panels.forEach(function(panel, panelIdx) {
+            (panel.additions || []).forEach(function(row, addIdx) {
+                addProgressItem("existingAdd:" + panelIdx + ":" + addIdx, "Add test to existing panel: " + panel.name + " / " + (row.orderId || row.name), "add");
+            });
+            panel.tests.filter(function(t) { return t.markedDelete; }).forEach(function(row, delIdx) {
+                addProgressItem("delete:" + panelIdx + ":" + delIdx, "Remove test from existing panel: " + panel.name + " / " + (row.orderId || row.name), "delete");
+            });
+        });
+        var box = document.createElement("div");
+        box.style.cssText = "padding:16px;color:#fff;display:flex;flex-direction:column;gap:10px;max-height:72vh;";
+        var status = document.createElement("div");
+        var bar = document.createElement("div");
+        bar.style.cssText = "height:8px;background:#1f2937;border-radius:999px;overflow:hidden;";
+        var fill = document.createElement("div");
+        fill.style.cssText = "height:100%;width:0%;background:#22c55e;";
+        bar.appendChild(fill);
+        var list = document.createElement("div");
+        list.style.cssText = "display:flex;flex-direction:column;gap:5px;overflow:auto;max-height:52vh;border:1px solid #333;border-radius:6px;background:#151515;padding:8px;";
+        var progressRowMap = {};
+        progressItems.forEach(function(item) {
+            var row = document.createElement("div");
+            row.style.cssText = "display:grid;grid-template-columns:86px minmax(0,1fr);gap:8px;align-items:center;padding:6px 8px;border:1px solid #333;border-radius:4px;background:#222;font-size:12px;";
+            var badge = document.createElement("div");
+            badge.textContent = item.status;
+            badge.style.cssText = "font-weight:800;color:#aaa;";
+            var label = document.createElement("div");
+            label.textContent = item.label;
+            label.title = item.label;
+            label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ddd;";
+            row.appendChild(badge);
+            row.appendChild(label);
+            list.appendChild(row);
+            progressRowMap[item.id] = { row: row, badge: badge, label: label };
+        });
+        var cancel = lpbButton("Cancel", "#7f1d1d");
+        box.appendChild(status);
+        box.appendChild(bar);
+        box.appendChild(list);
+        box.appendChild(cancel);
+        var pop = createPopup({ title: "Lab Panels Builder - Progress", content: box, width: "760px", height: "auto", hideClose: true });
+        cancel.onclick = function() {
+            lpbRequestCancel();
+            status.textContent = "Cancelling after current step. This will stay cancelled after refresh.";
+            cancel.textContent = "Cancelling...";
+            cancel.disabled = true;
+            cancel.style.opacity = "0.65";
+        };
+        var steps = Math.max(progressItems.length, 1);
+        var done = 0;
+        var currentProgressId = "";
+        var currentSubmitOps = [];
+        function setProgressItem(id, itemStatus, detail) {
+            currentProgressId = itemStatus === "Running" ? id : currentProgressId;
+            if ((itemStatus === "Done" || itemStatus === "Failed") && currentProgressId === id) currentProgressId = "";
+            var ui = progressRowMap[id];
+            if (!ui) return;
+            ui.badge.textContent = itemStatus;
+            ui.badge.style.color = itemStatus === "Done" ? "#86efac" : itemStatus === "Failed" ? "#fca5a5" : itemStatus === "Running" ? "#fde68a" : "#aaa";
+            ui.row.style.borderColor = itemStatus === "Done" ? "#14532d" : itemStatus === "Failed" ? "#7f1d1d" : itemStatus === "Running" ? "#854d0e" : "#333";
+            ui.row.style.background = itemStatus === "Done" ? "#102413" : itemStatus === "Failed" ? "#2a1212" : itemStatus === "Running" ? "#28210f" : "#222";
+            if (detail) {
+                ui.label.textContent = ui.label.title + " - " + detail;
+            }
+            try { ui.row.scrollIntoView({ block: "nearest" }); } catch (e) {}
+        }
+        function tick(msg, progressId) {
+            if (lpbIsCancelRequested()) throw new Error("Cancelled by user");
+            status.textContent = msg;
+            fill.style.width = Math.min(100, Math.round((done / Math.max(steps, 1)) * 100)) + "%";
+            if (progressId) setProgressItem(progressId, "Running");
+            lpbLog(msg);
+        }
+        function markSubmitted(group, key) {
+            lpbMarkOpDone(pending, group, key, true);
+            currentSubmitOps.push({ group: group, key: key });
+            lpbSavePending(pending);
+        }
+        function clearSubmittedCheckpoint() {
+            currentSubmitOps = [];
+        }
+        function restoreSubmittedCheckpoint() {
+            for (var si = 0; si < currentSubmitOps.length; si++) {
+                lpbMarkOpDone(pending, currentSubmitOps[si].group, currentSubmitOps[si].key, false);
+            }
+            currentSubmitOps = [];
+            lpbSavePending(pending);
+        }
+        lpbEnsureCompleted(pending);
+        for (var dpi = 0; dpi < changes.newPanels.length; dpi++) {
+            if (lpbOpDone(pending, "newPanels", String(dpi))) {
+                done++;
+                setProgressItem("newPanel:" + dpi, "Done", "already submitted");
+            }
+            for (var dti = 0; dti < changes.newPanels[dpi].tests.length; dti++) {
+                if (!lpbShouldConfigureNewTest(changes.newPanels[dpi].tests[dti])) continue;
+                if (lpbOpDone(pending, "newTests", dpi + ":" + dti)) {
+                    done++;
+                    setProgressItem("newTest:" + dpi + ":" + dti, "Done", "already submitted");
+                }
+            }
+        }
+        for (var dui = 0; dui < changes.updates.length; dui++) {
+            if (lpbOpDone(pending, "updates", String(dui))) {
+                done++;
+                setProgressItem("update:" + dui, "Done", "already submitted");
+            }
+        }
+        state.panels.forEach(function(panel, panelIdx) {
+            if (!lpbOpDone(pending, "existingEdits", lpbKey(panel.name))) return;
+            (panel.additions || []).forEach(function(row, addIdx) {
+                done++;
+                setProgressItem("existingAdd:" + panelIdx + ":" + addIdx, "Done", "already submitted");
+            });
+            (panel.tests || []).filter(function(t) { return t.markedDelete; }).forEach(function(row, delIdx) {
+                done++;
+                setProgressItem("delete:" + panelIdx + ":" + delIdx, "Done", "already submitted");
+            });
+        });
+        try {
+            for (var np = 0; np < changes.newPanels.length; np++) {
+                var panel = changes.newPanels[np];
+                var newPanelProgressId = "newPanel:" + np;
+                if (lpbOpDone(pending, "newPanels", String(np))) continue;
+                tick("Adding lab panel " + panel.name, newPanelProgressId);
+                var existingCreated = lpbPanelByName(lpbScanPanels().panels, panel.name);
+                if (existingCreated) {
+                    lpbLog("new panel already exists after resume; skipping create for " + panel.name);
+                    lpbMarkOpDone(pending, "newPanels", String(np), true);
+                    lpbSavePending(pending);
+                } else {
+                    pending.phase = "verifyNewPanel";
+                    pending.newPanelIndex = np;
+                    lpbSavePending(pending);
+                    await lpbOpenModalByHref(state.addHref || pending.addHref);
+                    if (!await lpbWaitLabPanelModalReady(15000)) throw new Error("Lab Panel modal did not finish loading for " + panel.name);
+                    lpbSetInput("#name", panel.name, true);
+                    await lpbSetLabTestsSelect(panel.tests, "add");
+                    markSubmitted("newPanels", String(np));
+                    await lpbClickSaveAndWait();
+                    clearSubmittedCheckpoint();
+                }
+                done++;
+                setProgressItem(newPanelProgressId, "Done");
+            }
+            var fresh = lpbScanPanels();
+            for (var cp = 0; cp < changes.newPanels.length; cp++) {
+                var created = changes.newPanels[cp];
+                var freshPanel = fresh.panels.filter(function(p) { return lpbNorm(p.name) === lpbNorm(created.name); })[0];
+                if (!freshPanel) throw new Error("New panel not found after save: " + created.name);
+                for (var ct = 0; ct < created.tests.length; ct++) {
+                    var row = created.tests[ct];
+                    if (!lpbShouldConfigureNewTest(row)) continue;
+                    if (lpbOpDone(pending, "newTests", cp + ":" + ct)) continue;
+                    var matches = freshPanel.tests.filter(function(t) { return lpbTestIdentity(t) === lpbTestIdentity(row); });
+                    if (matches.length !== 1) throw new Error("Cannot safely match new test in " + created.name + ": " + (row.orderId || row.name));
+                    row.testEditHref = matches[0].testEditHref;
+                    var newTestProgressId = "newTest:" + cp + ":" + ct;
+                    tick("Configuring new test " + (row.orderId || row.name), newTestProgressId);
+                    pending.phase = "configureNewTest";
+                    pending.newTestPanelIndex = cp;
+                    pending.newTestIndex = ct;
+                    lpbSavePending(pending);
+                    await lpbUpdateTestConfig(row, false, function() {
+                        markSubmitted("newTests", cp + ":" + ct);
+                    });
+                    clearSubmittedCheckpoint();
+                    done++;
+                    setProgressItem(newTestProgressId, "Done");
+                }
+            }
+            fresh = lpbScanPanels();
+            for (var u = 0; u < changes.updates.length; u++) {
+                var upd = changes.updates[u];
+                if (lpbOpDone(pending, "updates", String(u))) continue;
+                var fp = fresh.panels.filter(function(p) { return lpbNorm(p.name) === lpbNorm(upd.panel.name); })[0];
+                if (!fp) throw new Error("Panel not found for update: " + upd.panel.name);
+                var mt = fp.tests.filter(function(t) { return lpbTestIdentity(t) === lpbTestIdentity(upd.row); });
+                if (mt.length !== 1) throw new Error("Cannot safely match test for update in " + fp.name + ": " + (upd.row.orderId || upd.row.name));
+                upd.row.testEditHref = mt[0].testEditHref;
+                var updateProgressId = "update:" + u;
+                tick("Updating " + fp.name + " / " + (upd.row.orderId || upd.row.name), updateProgressId);
+                pending.phase = "updateExisting";
+                pending.updateIndex = u;
+                lpbSavePending(pending);
+                await lpbUpdateTestConfig(upd.row, true, function() {
+                    markSubmitted("updates", String(u));
+                });
+                clearSubmittedCheckpoint();
+                done++;
+                setProgressItem(updateProgressId, "Done");
+            }
+            fresh = lpbScanPanels();
+            for (var pi = 0; pi < state.panels.length; pi++) {
+                var p0 = state.panels[pi];
+                var adds = p0.additions || [];
+                var dels = p0.tests.filter(function(t) { return t.markedDelete; });
+                var editKey = lpbKey(p0.name);
+                if (lpbOpDone(pending, "existingEdits", editKey)) continue;
+                if (!adds.length && !dels.length) continue;
+                if (p0.locked) throw new Error("Cannot edit locked panel: " + p0.name);
+                var fp2 = fresh.panels.filter(function(p) { return lpbNorm(p.name) === lpbNorm(p0.name); })[0] || p0;
+                adds.forEach(function(row, addIdx) { setProgressItem("existingAdd:" + pi + ":" + addIdx, "Running"); });
+                dels.forEach(function(row, delIdx) { setProgressItem("delete:" + pi + ":" + delIdx, "Running"); });
+                tick("Editing panel tests for " + p0.name);
+                pending.phase = "editExisting";
+                pending.editPanelIndex = pi;
+                lpbSavePending(pending);
+                await lpbOpenModalByHref(fp2.editHref || p0.editHref);
+                if (!await lpbWaitLabPanelModalReady(15000)) throw new Error("Lab Panel modal did not finish loading for " + p0.name);
+                if (adds.length) await lpbSetLabTestsSelect(adds, "add");
+                if (dels.length) await lpbSetLabTestsSelect(dels, "remove");
+                lpbSetInput("#reasonForChange", "Updated Lab Tests", false);
+                markSubmitted("existingEdits", editKey);
+                await lpbClickSaveAndWait();
+                clearSubmittedCheckpoint();
+                adds.forEach(function(row, addDoneIdx) { done++; setProgressItem("existingAdd:" + pi + ":" + addDoneIdx, "Done"); });
+                dels.forEach(function(row, delDoneIdx) { done++; setProgressItem("delete:" + pi + ":" + delDoneIdx, "Done"); });
+            }
+            fill.style.width = "100%";
+            status.textContent = "Completed.";
+            cancel.textContent = "Close";
+            cancel.onclick = function() { if (pop && pop.close) pop.close(); };
+            lpbClearPending();
+            lpbClearCancel();
+            createPopup({ title: "Lab Panels Builder", content: '<div style="padding:18px;color:#9f9;">Lab Panels Builder completed successfully.</div>', width: "430px", height: "auto" });
+        } catch (err) {
+            restoreSubmittedCheckpoint();
+            if (String(err && err.message ? err.message : err).indexOf("Cancelled by user") !== -1) {
+                lpbClearPending();
+                lpbClearCancel();
+            }
+            lpbLog("failed: " + String(err && err.message ? err.message : err));
+            status.textContent = "Failed: " + String(err && err.message ? err.message : err);
+            status.style.color = "#fca5a5";
+            if (currentProgressId) setProgressItem(currentProgressId, "Failed", String(err && err.message ? err.message : err));
+            cancel.textContent = "Close";
+            cancel.onclick = function() { if (pop && pop.close) pop.close(); };
+            createPopup({ title: "Lab Panels Builder - Error", content: '<div style="padding:18px;color:#fca5a5;">' + lpbCleanText(err && err.message ? err.message : err) + '</div>', width: "560px", height: "auto" });
+        }
+    }
+    function lpbResumePendingRun() {
+        var pending = lpbLoadPending();
+        if (!pending || !pending.version) return false;
+        if (!lpbIsTargetPage()) return false;
+        if (lpbIsCancelRequested()) {
+            lpbLog("pending run cancelled before resume");
+            lpbClearPending();
+            lpbClearCancel();
+            createPopup({ title: "Lab Panels Builder", content: '<div style="padding:18px;color:#ffb74d;">Lab Panels Builder was cancelled.</div>', width: "430px", height: "auto" });
+            return true;
+        }
+        lpbLog("resuming pending run phase=" + (pending.phase || "unknown"));
+        var scan = lpbScanPanels();
+        var state = { panels: scan.panels, addHref: scan.addHref || pending.addHref || "" };
+        var changes = { newPanels: [], updates: [] };
+        changes.newPanels = (pending.newPanels || []).map(function(panel) {
+            return { name: panel.name || "", tests: (panel.tests || []).map(lpbSerializableRow) };
+        });
+        (pending.updates || []).forEach(function(upd) {
+            var panel = lpbPanelByName(state.panels, upd.panelName);
+            if (!panel) panel = { name: upd.panelName || "", tests: [] };
+            changes.updates.push({ panel: panel, row: lpbSerializableRow(upd.row) });
+        });
+        (pending.existingEdits || []).forEach(function(edit) {
+            var panel = lpbPanelByName(state.panels, edit.panelName);
+            if (!panel) {
+                panel = { name: edit.panelName || "", editHref: edit.editHref || "", locked: !!edit.locked, tests: [], additions: [] };
+                state.panels.push(panel);
+            }
+            panel.editHref = panel.editHref || edit.editHref || "";
+            panel.locked = !!panel.locked || !!edit.locked;
+            panel.additions = (edit.additions || []).map(lpbSerializableRow);
+            (edit.deletions || []).forEach(function(row) {
+                var del = lpbSerializableRow(row);
+                del.markedDelete = true;
+                panel.tests.push(del);
+            });
+        });
+        setTimeout(function() {
+            lpbExecuteChanges(state, changes, pending);
+        }, 900);
+        return true;
+    }
+
     //=========================
     // SETTING FEATURE
     //=========================
@@ -13766,10 +18613,14 @@
         { id: "Import Cohort Subjects", label: "Import Cohort Subjects" },
         { id: "Pull Barcode", label: "Pull Barcode" },
         { id: "Pull Lab Barcode", label: "Pull Lab Barcode" },
+        { id: "Lab Panels Builder", label: "Lab Panels Builder" },
         { id: "Add Existing Subject", label: "Add Existing Subject" },
+        { id: "Add New Subject", label: "Add New Subject" },
         { id: "Search Methods", label: "Search Methods" },
+        { id: "Formal Expression Editor", label: "Method Editor" },
         { id: "PLAP Builder", label: "PLAP Builder" },
         { id: "Import from Library", label: "Import from Library" },
+        { id: "Form Preview", label: "Form Preview" },
         { id: "Run Form", label: "Run Form" },
         { id: "Collect All", label: "Collect All" },
         { id: "Import I/E", label: "Import I/E" },
@@ -13917,7 +18768,8 @@
                 features: [
                     { label: "Add Cohort Subjects", desc: "Adds subjects to a cohort in a selected study without manual navigation through each enrollment step." },
                     { label: "Import Cohort Subjects", desc: "Imports a prepared subject list into a cohort and automates each subject record entry." },
-                    { label: "Add Existing Subject", desc: "Adds an existing subject to a new study or cohort without creating a duplicate subject." }
+                    { label: "Add Existing Subject", desc: "Adds an existing subject to a new study or cohort without creating a duplicate subject." },
+                    { label: "Add New Subject", desc: "Maps activity plans to selected epoch cohorts, then adds and activates a new subject for each mapped cohort." }
                 ]
             },
             {
@@ -13939,8 +18791,11 @@
                 title: "CRF Design & Library",
                 features: [
                     { label: "Search Methods", desc: "Opens the method library that contains coded methods and edit checks." },
+                    { label: "Method Editor", desc: "Collects methods from the Method List page, opens a full-screen VS Code-style editor for formal expressions, saves drafts by method ID, compares edited and collected expressions, and batch-saves updated methods with one reason for change." },
                     { label: "PLAP Builder", desc: "Builds procedure log activity plan rows with a full-screen, drag-and-drop workspace, existing-form editing, clear Existing visibility filtering, time offsets, example-time recalculation, and Apply Time Calculation." },
+                    { label: "Lab Panels Builder", desc: "Scans lab configure panels, builds new lab panels, copies lab tests, edits reference ranges, and applies add/remove/update changes with panel-scoped safety checks." },
                     { label: "Import from Library", desc: "Imports forms from another study library. Supports cached scans, duplicate import copies for the same source form, per-copy form names, item group/item renames, item inclusion settings, lock-on-save, confirmation warnings, progress tracking, and cancel/resume cleanup." },
+                    { label: "Form Preview", desc: "Collects selectable forms from the form library or Activity Plan scheduled activity table and builds a consolidated preview of form groups and items." },
                     { label: "Activity Plan Removal", desc: "Selects scheduled activities for removal. Filtered Select All only affects visible rows, archived rows are shown with an archive indicator and cannot be selected, and unavailable deletes can fall back to archive." },
                     { label: "Archive/Update Forms", desc: "Batch archives or renames forms in the study library. Useful for replacing old versions with new versions." },
                     { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study or activity plan context to another while preserving structure and settings where possible." },
@@ -14790,6 +19645,14 @@
     var STORAGE_AES_ASSIGNMENT_ID = "activityPlanState.aes.assignmentId";
     var STORAGE_AES_PROGRESS = "activityPlanState.aes.progress";
     var ADD_EXISTING_SUBJECT_POPUP_REF = null;
+    var RUNMODE_ADD_NEW_SUBJECT = "addNewSubject";
+    var STORAGE_ANS_POPUP = "activityPlanState.ans.popup";
+    var STORAGE_ANS_QUEUE = "activityPlanState.ans.queue";
+    var STORAGE_ANS_INDEX = "activityPlanState.ans.index";
+    var STORAGE_ANS_CURRENT = "activityPlanState.ans.current";
+    var STORAGE_ANS_CURRENT_VOLUNTEER = "activityPlanState.ans.currentVolunteer";
+    var STORAGE_ANS_REUSE_SUBJECT = "activityPlanState.ans.reuseSubject";
+    var ADD_NEW_SUBJECT_POPUP_REF = null;
 
     function clearAddExistingSubjectData() {
         try {
@@ -16103,6 +20966,1050 @@
         } else {
             log("AES: Activate Volunteer link not found after waiting");
             showAESComplete();
+        }
+    }
+
+    function clearAddNewSubjectData() {
+        try {
+            localStorage.removeItem(STORAGE_ANS_POPUP);
+            localStorage.removeItem(STORAGE_ANS_QUEUE);
+            localStorage.removeItem(STORAGE_ANS_INDEX);
+            localStorage.removeItem(STORAGE_ANS_CURRENT);
+            localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER);
+            localStorage.removeItem(STORAGE_ANS_REUSE_SUBJECT);
+            localStorage.removeItem("activityPlanState.cohortAdd.editDoneMap");
+        } catch (e) {}
+        ADD_NEW_SUBJECT_POPUP_REF = null;
+        log("ANS: data cleared");
+    }
+
+    function ansShowProgress(message) {
+        var popupContent = document.createElement("div");
+        popupContent.style.cssText = "display:flex;flex-direction:column;gap:14px;padding:8px;text-align:center;";
+        var statusDiv = document.createElement("div");
+        statusDiv.id = "ansProgressStatus";
+        statusDiv.style.cssText = "font-size:16px;font-weight:600;color:#fff;";
+        statusDiv.textContent = message;
+        var detailDiv = document.createElement("div");
+        detailDiv.id = "ansProgressDetail";
+        detailDiv.style.cssText = "font-size:13px;color:#9df;line-height:1.4;";
+        detailDiv.textContent = "Running.";
+        popupContent.appendChild(statusDiv);
+        popupContent.appendChild(detailDiv);
+        if (ADD_NEW_SUBJECT_POPUP_REF && ADD_NEW_SUBJECT_POPUP_REF.element && document.body.contains(ADD_NEW_SUBJECT_POPUP_REF.element)) {
+            if (typeof ADD_NEW_SUBJECT_POPUP_REF.setTitle === "function") {
+                ADD_NEW_SUBJECT_POPUP_REF.setTitle("Add New Subject");
+            }
+            if (typeof ADD_NEW_SUBJECT_POPUP_REF.setContent === "function") {
+                ADD_NEW_SUBJECT_POPUP_REF.setContent(popupContent);
+            } else {
+                ADD_NEW_SUBJECT_POPUP_REF.element.innerHTML = "";
+                ADD_NEW_SUBJECT_POPUP_REF.element.appendChild(popupContent);
+            }
+        } else {
+            ADD_NEW_SUBJECT_POPUP_REF = createPopup({
+                title: "Add New Subject",
+                content: popupContent,
+                width: "420px",
+                height: "auto",
+                onClose: function() {
+                    log("ANS: cancelled by user");
+                    clearAddNewSubjectData();
+                    clearRunMode();
+                    clearCohortGuard();
+                }
+            });
+        }
+        try { localStorage.setItem(STORAGE_ANS_POPUP, "1"); } catch (e) {}
+    }
+
+    function ansUpdateProgress(message, detail) {
+        var statusEl = document.getElementById("ansProgressStatus");
+        var detailEl = document.getElementById("ansProgressDetail");
+        if (statusEl) statusEl.textContent = message;
+        if (detailEl) detailEl.textContent = detail || "Running.";
+    }
+
+    function ansGetQueue() {
+        try {
+            var raw = localStorage.getItem(STORAGE_ANS_QUEUE);
+            if (raw) {
+                var parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) return parsed;
+            }
+        } catch (e) {}
+        return [];
+    }
+
+    function ansSetQueue(queue) {
+        try { localStorage.setItem(STORAGE_ANS_QUEUE, JSON.stringify(queue || [])); } catch (e) {}
+    }
+
+    function ansGetIndex() {
+        try {
+            var raw = parseInt(localStorage.getItem(STORAGE_ANS_INDEX) || "0", 10);
+            return isNaN(raw) ? 0 : raw;
+        } catch (e) { return 0; }
+    }
+
+    function ansSetIndex(idx) {
+        try { localStorage.setItem(STORAGE_ANS_INDEX, String(idx)); } catch (e) {}
+    }
+
+    function ansGetCurrent() {
+        try {
+            var raw = localStorage.getItem(STORAGE_ANS_CURRENT);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return null;
+    }
+
+    function ansSetCurrent(item) {
+        try { localStorage.setItem(STORAGE_ANS_CURRENT, JSON.stringify(item || null)); } catch (e) {}
+    }
+
+    function ansNormalizeText(value) {
+        return String(value || "").replace(/\s+/g, " ").trim();
+    }
+
+    function ansIsScreeningEpochName(name) {
+        var lower = ansNormalizeText(name).toLowerCase();
+        return lower.indexOf("screen") !== -1 || lower.indexOf("scrn") !== -1 || lower.indexOf("screening") !== -1;
+    }
+
+    function ansGetReuseSubject() {
+        try {
+            var raw = localStorage.getItem(STORAGE_ANS_REUSE_SUBJECT);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return null;
+    }
+
+    function ansSetReuseSubject(subject) {
+        try { localStorage.setItem(STORAGE_ANS_REUSE_SUBJECT, JSON.stringify(subject || null)); } catch (e) {}
+        log("ANS: reusable subject saved volunteerId=" + String(subject && subject.volunteerId) + " subjectNumber=" + String(subject && subject.subjectNumber));
+    }
+
+    function ansApplyQueueSubjectPolicy(queue) {
+        queue = Array.isArray(queue) ? queue.slice() : [];
+        var hasScreening = false;
+        for (var i = 0; i < queue.length; i++) {
+            queue[i].isScreeningEpoch = ansIsScreeningEpochName(queue[i].epochName);
+            if (queue[i].isScreeningEpoch) hasScreening = true;
+            queue[i].createReusableSubject = false;
+            queue[i].useReusableSubject = false;
+        }
+        if (queue.length <= 1 || !hasScreening) {
+            return queue;
+        }
+        queue.sort(function(a, b) {
+            if (a.isScreeningEpoch && !b.isScreeningEpoch) return -1;
+            if (!a.isScreeningEpoch && b.isScreeningEpoch) return 1;
+            return 0;
+        });
+        var sourceAssigned = false;
+        for (var q = 0; q < queue.length; q++) {
+            if (!sourceAssigned && queue[q].isScreeningEpoch) {
+                queue[q].createReusableSubject = true;
+                sourceAssigned = true;
+            } else if (sourceAssigned) {
+                queue[q].useReusableSubject = true;
+            }
+        }
+        return queue;
+    }
+
+    function ansParseActivityPlans(doc) {
+        var plans = [];
+        if (!doc) return plans;
+        var rows = doc.querySelectorAll("table.table tbody tr");
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var link = row.querySelector("td.highlight a[href*='/secure/crfdesign/activityplans/show/']");
+            if (!link) continue;
+            var cells = row.querySelectorAll("td");
+            var name = ansNormalizeText(link.textContent);
+            var href = link.getAttribute("href") || "";
+            var idMatch = href.match(/\/show\/(\d+)/);
+            var id = idMatch ? idMatch[1] : "";
+            var disabled = !!row.querySelector("span") && ansNormalizeText(row.textContent).toLowerCase().indexOf("(disabled)") !== -1;
+            var cohortType = cells.length > 1 ? ansNormalizeText(cells[1].textContent) : "";
+            var timed = cells.length > 2 ? ansNormalizeText(cells[2].textContent) : "";
+            var state = cells.length > 6 ? ansNormalizeText(cells[6].textContent) : "";
+            var allowedState = state.toLowerCase() === "ready" || state.toLowerCase() === "locked";
+            if (id && name && allowedState && !disabled) {
+                plans.push({ id: id, name: name, href: href, cohortType: cohortType, timed: timed, state: state });
+            }
+        }
+        return plans;
+    }
+
+    function ansParseEpochs(doc) {
+        var epochs = [];
+        if (!doc) return epochs;
+        var rows = doc.querySelectorAll("#epochTableBody tr");
+        for (var i = 0; i < rows.length; i++) {
+            var a = rows[i].querySelector("a[href*='/secure/administration/studies/epoch/show/']");
+            if (!a) continue;
+            var href = a.getAttribute("href") || "";
+            var m = href.match(/\/show\/(\d+)/);
+            epochs.push({ id: m ? m[1] : "", name: ansNormalizeText(a.textContent), href: href, cohorts: [] });
+        }
+        return epochs;
+    }
+
+    function ansParseCohorts(doc) {
+        var cohorts = [];
+        if (!doc) return cohorts;
+        var anchors = doc.querySelectorAll("#cohortListBody a[href*='/secure/administration/studies/cohort/show/']");
+        for (var i = 0; i < anchors.length; i++) {
+            var a = anchors[i];
+            var href = a.getAttribute("href") || "";
+            var m = href.match(/\/show\/(\d+)/);
+            cohorts.push({ id: m ? m[1] : "", name: ansNormalizeText(a.textContent), href: href });
+        }
+        return cohorts;
+    }
+
+    async function ansCollectSetupData() {
+        ansShowProgress("Collecting activity plans and cohorts...");
+        var apDoc = await fetchPageContent(location.origin + "/secure/crfdesign/activityplans/list");
+        var plans = ansParseActivityPlans(apDoc);
+        if (plans.length === 0) throw new Error("No Ready or Locked activity plans were found.");
+
+        ansUpdateProgress("Collecting epochs...", "Found " + plans.length + " activity plan(s).");
+        var studyDoc = await fetchPageContent(location.origin + "/secure/administration/studies/show");
+        var epochs = ansParseEpochs(studyDoc);
+        if (epochs.length === 0) throw new Error("No epochs were found on the Study Configure page.");
+
+        for (var i = 0; i < epochs.length; i++) {
+            ansUpdateProgress("Collecting cohorts...", "Epoch " + (i + 1) + "/" + epochs.length + ": " + epochs[i].name);
+            var epochDoc = await fetchPageContent(location.origin + epochs[i].href);
+            epochs[i].cohorts = ansParseCohorts(epochDoc);
+        }
+        return { plans: plans, epochs: epochs };
+    }
+
+    function ansMakeButton(label, bg) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.style.cssText = "border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:600;background:" + bg + ";color:#fff;";
+        return btn;
+    }
+
+    function ansRenderSelectionPanel(plans, epochs) {
+        var selectedCohortByEpoch = {};
+        var planByCohort = {};
+        var planMap = {};
+        for (var p = 0; p < plans.length; p++) planMap[plans[p].id] = plans[p];
+
+        var root = document.createElement("div");
+        root.style.cssText = "display:grid;grid-template-columns:320px 1fr;gap:14px;min-height:520px;color:#fff;";
+
+        var left = document.createElement("div");
+        left.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;";
+        var leftTitle = document.createElement("div");
+        leftTitle.textContent = "Activity Plans";
+        leftTitle.style.cssText = "font-size:15px;font-weight:700;";
+        var search = document.createElement("input");
+        search.type = "text";
+        search.placeholder = "Search plans";
+        search.style.cssText = "width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #444;background:#151515;color:#fff;";
+        var planList = document.createElement("div");
+        planList.style.cssText = "display:flex;flex-direction:column;gap:6px;overflow:auto;min-height:0;max-height:465px;padding-right:4px;";
+        left.appendChild(leftTitle);
+        left.appendChild(search);
+        left.appendChild(planList);
+
+        var right = document.createElement("div");
+        right.style.cssText = "display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;";
+        var rightHeader = document.createElement("div");
+        rightHeader.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;";
+        var rightTitle = document.createElement("div");
+        rightTitle.textContent = "Epochs / Cohorts";
+        rightTitle.style.cssText = "font-size:15px;font-weight:700;";
+        var status = document.createElement("div");
+        status.style.cssText = "font-size:12px;color:#9df;text-align:right;";
+        rightHeader.appendChild(rightTitle);
+        rightHeader.appendChild(status);
+        var epochList = document.createElement("div");
+        epochList.style.cssText = "display:flex;flex-direction:column;gap:10px;overflow:auto;max-height:482px;padding-right:4px;";
+        right.appendChild(rightHeader);
+        right.appendChild(epochList);
+
+        function getSelectedQueue() {
+            var queue = [];
+            for (var e = 0; e < epochs.length; e++) {
+                var epoch = epochs[e];
+                var cohortId = selectedCohortByEpoch[epoch.id];
+                if (!cohortId) continue;
+                var planId = planByCohort[cohortId];
+                if (!planId) continue;
+                var cohort = null;
+                for (var c = 0; c < epoch.cohorts.length; c++) {
+                    if (epoch.cohorts[c].id === cohortId) {
+                        cohort = epoch.cohorts[c];
+                        break;
+                    }
+                }
+                var plan = planMap[planId];
+                if (cohort && plan) {
+                    queue.push({
+                        epochId: epoch.id,
+                        epochName: epoch.name,
+                        cohortId: cohort.id,
+                        cohortName: cohort.name,
+                        cohortHref: cohort.href,
+                        activityPlanId: plan.id,
+                        activityPlanName: plan.name
+                    });
+                }
+            }
+            return queue;
+        }
+
+        function refreshStatus() {
+            var q = getSelectedQueue();
+            status.textContent = q.length + " ready to run";
+        }
+
+        function renderPlans() {
+            planList.innerHTML = "";
+            var q = ansNormalizeText(search.value).toLowerCase();
+            for (var i = 0; i < plans.length; i++) {
+                var plan = plans[i];
+                var hay = (plan.name + " " + plan.cohortType + " " + plan.state).toLowerCase();
+                if (q && hay.indexOf(q) === -1) continue;
+                var item = document.createElement("div");
+                item.draggable = true;
+                item.dataset.planId = plan.id;
+                item.style.cssText = "padding:9px;border:1px solid #34495e;border-radius:6px;background:#17212b;cursor:grab;";
+                var name = document.createElement("div");
+                name.textContent = plan.name;
+                name.style.cssText = "font-size:13px;font-weight:650;line-height:1.3;";
+                var meta = document.createElement("div");
+                meta.textContent = (plan.cohortType || "No cohort type") + " | " + plan.state + (plan.timed ? " | Timed: " + plan.timed : "");
+                meta.style.cssText = "font-size:11px;color:#9fb3c8;margin-top:4px;";
+                item.appendChild(name);
+                item.appendChild(meta);
+                item.addEventListener("dragstart", (function(planId) {
+                    return function(e) {
+                        e.dataTransfer.setData("text/plain", planId);
+                        e.dataTransfer.effectAllowed = "copy";
+                    };
+                })(plan.id));
+                planList.appendChild(item);
+            }
+        }
+
+        function renderEpochs() {
+            epochList.innerHTML = "";
+            for (var e = 0; e < epochs.length; e++) {
+                var epoch = epochs[e];
+                var epBox = document.createElement("div");
+                epBox.style.cssText = "border:1px solid #34495e;border-radius:8px;background:#111922;padding:10px;display:flex;flex-direction:column;gap:8px;";
+                var epTitle = document.createElement("div");
+                epTitle.textContent = epoch.name;
+                epTitle.style.cssText = "font-size:14px;font-weight:700;";
+                epBox.appendChild(epTitle);
+                if (!epoch.cohorts || epoch.cohorts.length === 0) {
+                    var empty = document.createElement("div");
+                    empty.textContent = "No cohorts found";
+                    empty.style.cssText = "font-size:12px;color:#888;";
+                    epBox.appendChild(empty);
+                }
+                for (var c = 0; c < epoch.cohorts.length; c++) {
+                    (function(ep, cohort) {
+                        var row = document.createElement("div");
+                        row.dataset.cohortId = cohort.id;
+                        row.style.cssText = "display:grid;grid-template-columns:22px minmax(160px,1fr) minmax(190px,1.2fr);align-items:center;gap:8px;padding:8px;border:1px solid #2c3e50;border-radius:6px;background:#17212b;";
+                        var radio = document.createElement("input");
+                        radio.type = "radio";
+                        radio.name = "ans_epoch_" + ep.id;
+                        radio.checked = selectedCohortByEpoch[ep.id] === cohort.id;
+                        radio.style.cursor = "pointer";
+                        var label = document.createElement("div");
+                        label.textContent = cohort.name;
+                        label.style.cssText = "font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                        var drop = document.createElement("div");
+                        drop.textContent = planByCohort[cohort.id] ? planMap[planByCohort[cohort.id]].name : "Drop activity plan here";
+                        drop.style.cssText = "min-height:30px;display:flex;align-items:center;padding:6px 8px;border:1px dashed #58718a;border-radius:5px;background:#101820;color:" + (planByCohort[cohort.id] ? "#dff6ff" : "#88a") + ";font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                        function selectThis() {
+                            selectedCohortByEpoch[ep.id] = cohort.id;
+                            radio.checked = true;
+                            refreshStatus();
+                        }
+                        radio.addEventListener("change", selectThis);
+                        row.addEventListener("click", function(e2) {
+                            if (e2.target !== drop) selectThis();
+                        });
+                        drop.addEventListener("dragover", function(e2) {
+                            e2.preventDefault();
+                            drop.style.borderColor = "#38dae6";
+                        });
+                        drop.addEventListener("dragleave", function() {
+                            drop.style.borderColor = "#58718a";
+                        });
+                        drop.addEventListener("drop", function(e2) {
+                            e2.preventDefault();
+                            var planId = e2.dataTransfer.getData("text/plain");
+                            if (!planMap[planId]) return;
+                            planByCohort[cohort.id] = planId;
+                            selectedCohortByEpoch[ep.id] = cohort.id;
+                            renderEpochs();
+                            refreshStatus();
+                        });
+                        row.appendChild(radio);
+                        row.appendChild(label);
+                        row.appendChild(drop);
+                        epBox.appendChild(row);
+                    })(epoch, epoch.cohorts[c]);
+                }
+                epochList.appendChild(epBox);
+            }
+            refreshStatus();
+        }
+
+        search.addEventListener("input", renderPlans);
+        renderPlans();
+        renderEpochs();
+
+        var footer = document.createElement("div");
+        footer.style.cssText = "grid-column:1 / span 2;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #333;padding-top:10px;";
+        var cancelBtn = ansMakeButton("Cancel", "#6c757d");
+        var confirmBtn = ansMakeButton("Confirm", "#238636");
+        cancelBtn.addEventListener("click", function() {
+            if (ADD_NEW_SUBJECT_POPUP_REF) ADD_NEW_SUBJECT_POPUP_REF.close();
+        });
+        confirmBtn.addEventListener("click", function() {
+            var queue = ansApplyQueueSubjectPolicy(getSelectedQueue());
+            if (queue.length === 0) {
+                alert("Select at least one cohort and drop an activity plan onto it.");
+                return;
+            }
+            ansSetQueue(queue);
+            ansSetIndex(0);
+            ansSetCurrent(queue[0]);
+            try {
+                localStorage.setItem(STORAGE_ANS_POPUP, "1");
+                localStorage.removeItem("activityPlanState.cohortAdd.editDoneMap");
+            } catch (e) {}
+            setRunMode(RUNMODE_ADD_NEW_SUBJECT);
+            setCohortGuard("");
+            log("ANS: confirmed queue count=" + queue.length + " screeningReuse=" + String(queue.length > 1 && !!queue[0].createReusableSubject));
+            for (var qi = 0; qi < queue.length; qi++) {
+                log("ANS: queue " + (qi + 1) + "/" + queue.length + " epoch=" + queue[qi].epochName + " cohort=" + queue[qi].cohortName + " plan=" + queue[qi].activityPlanName + " createReusable=" + String(!!queue[qi].createReusableSubject) + " useReusable=" + String(!!queue[qi].useReusableSubject));
+            }
+            if (ADD_NEW_SUBJECT_POPUP_REF && ADD_NEW_SUBJECT_POPUP_REF.element) {
+                ADD_NEW_SUBJECT_POPUP_REF.element.remove();
+                ADD_NEW_SUBJECT_POPUP_REF = null;
+            }
+            ansNavigateToCurrent();
+        });
+        footer.appendChild(cancelBtn);
+        footer.appendChild(confirmBtn);
+
+        root.appendChild(left);
+        root.appendChild(right);
+        root.appendChild(footer);
+
+        ADD_NEW_SUBJECT_POPUP_REF = createPopup({
+            title: "Add New Subject",
+            content: root,
+            width: "980px",
+            height: "auto",
+            maxHeight: "88%",
+            onClose: function() {
+                log("ANS: selection cancelled");
+                clearAddNewSubjectData();
+                clearRunMode();
+                clearCohortGuard();
+            }
+        });
+    }
+
+    async function startAddNewSubject() {
+        log("ANS: starting Add New Subject");
+        clearAddNewSubjectData();
+        setRunMode(RUNMODE_ADD_NEW_SUBJECT);
+        try {
+            localStorage.setItem(STORAGE_ANS_POPUP, "1");
+            localStorage.removeItem("activityPlanState.cohortAdd.editDoneMap");
+        } catch (e) {}
+        try {
+            var data = await ansCollectSetupData();
+            ansRenderSelectionPanel(data.plans, data.epochs);
+        } catch (err) {
+            ansShowProgress("Add New Subject stopped");
+            ansUpdateProgress("Add New Subject stopped", String(err && err.message ? err.message : err));
+            log("ANS: collection error - " + String(err));
+        }
+    }
+
+    function ansNavigateToCurrent() {
+        var queue = ansGetQueue();
+        var idx = ansGetIndex();
+        if (idx >= queue.length) {
+            ansShowComplete();
+            return;
+        }
+        var item = queue[idx];
+        var nextUrl = location.origin + item.cohortHref + "?autoaddnewsubject=1";
+        ansSetCurrent(item);
+        log("ANS: navigating to queue item " + (idx + 1) + "/" + queue.length + " url=" + nextUrl + " useReusable=" + String(!!item.useReusableSubject));
+        try {
+            ansShowProgress("Opening selected cohort...");
+            ansUpdateProgress("Opening selected cohort...", (idx + 1) + "/" + queue.length + ": " + item.epochName + " > " + item.cohortName);
+        } catch (uiErr) {
+            log("ANS: progress UI update failed before navigation - " + String(uiErr));
+        }
+        setTimeout(function() {
+            log("ANS: assigning location for queue item " + (idx + 1) + "/" + queue.length);
+            try {
+                window.location.assign(nextUrl);
+            } catch (navErr) {
+                log("ANS: location.assign failed, falling back to href - " + String(navErr));
+                location.href = nextUrl;
+            }
+        }, 100);
+    }
+
+    function ansShowComplete() {
+        var queue = ansGetQueue();
+        var content = document.createElement("div");
+        content.style.cssText = "display:flex;flex-direction:column;gap:12px;padding:8px;text-align:center;";
+        var done = document.createElement("div");
+        done.textContent = "Subject additions complete.";
+        done.style.cssText = "font-size:18px;font-weight:700;color:#4caf50;";
+        var detail = document.createElement("div");
+        detail.textContent = "Processed " + queue.length + " selected cohort(s).";
+        detail.style.cssText = "font-size:13px;color:#aaa;";
+        content.appendChild(done);
+        content.appendChild(detail);
+        if (ADD_NEW_SUBJECT_POPUP_REF && ADD_NEW_SUBJECT_POPUP_REF.element && document.body.contains(ADD_NEW_SUBJECT_POPUP_REF.element)) {
+            if (typeof ADD_NEW_SUBJECT_POPUP_REF.setTitle === "function") {
+                ADD_NEW_SUBJECT_POPUP_REF.setTitle("Add New Subject - Complete");
+            }
+            if (typeof ADD_NEW_SUBJECT_POPUP_REF.setContent === "function") {
+                ADD_NEW_SUBJECT_POPUP_REF.setContent(content);
+            } else {
+                ADD_NEW_SUBJECT_POPUP_REF.element.innerHTML = "";
+                ADD_NEW_SUBJECT_POPUP_REF.element.appendChild(content);
+            }
+        } else {
+            ADD_NEW_SUBJECT_POPUP_REF = createPopup({
+                title: "Add New Subject - Complete",
+                content: content,
+                width: "420px",
+                height: "auto",
+                onClose: function() {
+                    clearAddNewSubjectData();
+                    clearRunMode();
+                    clearCohortGuard();
+                }
+            });
+        }
+        clearRunMode();
+        clearCohortGuard();
+    }
+
+    async function ansWaitForCohortEditControls(modal) {
+        var idsList = [
+            "subjectInitiation",
+            "sourceVolunteerDatabase",
+            "sourceAppointments",
+            "sourceAppointmentsCohort",
+            "sourceScreeningCohorts",
+            "sourceLeadInCohorts",
+            "sourceRandomizationCohorts",
+            "allowSubjectsActiveInCohorts",
+            "allowSubjectsActiveInStudies",
+            "requireVolunteerRecruitment",
+            "allowRecruitmentEligible",
+            "allowRecruitmentIdentified",
+            "allowRecruitmentIneligible",
+            "allowRecruitmentRemoved",
+            "allowEligibilityEligible",
+            "allowEligibilityPending",
+            "allowEligibilityIneligible",
+            "allowEligibilityUnspecified",
+            "allowStatusActive",
+            "allowStatusComplete",
+            "allowStatusTerminated",
+            "allowStatusWithdrawn",
+            "requireInformedConsent",
+            "requireOverVolunteeringCheck"
+        ];
+        var waited = 0;
+        while (waited < 8000) {
+            var groups = modal ? modal.querySelectorAll("#modalbody .form-group, .modal-body .form-group, form .form-group") : [];
+            if (groups && groups.length > 0) {
+                return true;
+            }
+            for (var i = 0; i < idsList.length; i++) {
+                if (document.getElementById(idsList[i])) return true;
+            }
+            await sleep(300);
+            waited += 300;
+        }
+        return false;
+    }
+
+    function ansApplyCohortConfigProfile(profileName) {
+        var reuseExistingSubject = profileName === "reuseExistingSubject";
+        log("ANS: applying cohort configuration profile=" + profileName);
+        setCheckboxStateById("subjectInitiation", !reuseExistingSubject);
+        setCheckboxStateById("sourceVolunteerDatabase", true);
+        setCheckboxStateById("sourceAppointments", true);
+        setCheckboxStateById("sourceAppointmentsCohort", true);
+        setCheckboxStateById("sourceScreeningCohorts", true);
+        setCheckboxStateById("sourceLeadInCohorts", true);
+        setCheckboxStateById("sourceRandomizationCohorts", true);
+        setCheckboxStateById("allowSubjectsActiveInCohorts", true);
+        setCheckboxStateById("allowSubjectsActiveInStudies", true);
+        setCheckboxStateById("requireVolunteerRecruitment", false);
+        setCheckboxStateById("allowRecruitmentEligible", false);
+        setCheckboxStateById("allowRecruitmentIdentified", false);
+        setCheckboxStateById("allowRecruitmentIneligible", false);
+        setCheckboxStateById("allowRecruitmentRemoved", false);
+        setCheckboxStateById("allowEligibilityEligible", true);
+        setCheckboxStateById("allowEligibilityPending", true);
+        setCheckboxStateById("allowEligibilityIneligible", true);
+        setCheckboxStateById("allowEligibilityUnspecified", true);
+        setCheckboxStateById("allowStatusActive", true);
+        setCheckboxStateById("allowStatusComplete", false);
+        setCheckboxStateById("allowStatusTerminated", false);
+        setCheckboxStateById("allowStatusWithdrawn", false);
+        setCheckboxStateById("requireInformedConsent", false);
+        setCheckboxStateById("requireOverVolunteeringCheck", false);
+    }
+
+    async function ansWaitForSaveOutcome(modal, timeoutMs) {
+        var waited = 0;
+        while (waited < timeoutMs) {
+            if (hasSuccessAlert()) return { ok: true, message: "success alert" };
+            if (hasDuplicateVolunteerError(modal) || hasValidationError()) {
+                return { ok: false, message: "validation error" };
+            }
+            var alertDanger = document.querySelector("div.alert.alert-danger, div.alert-danger");
+            if (alertDanger) {
+                return { ok: false, message: ansNormalizeText(alertDanger.textContent) || "error alert" };
+            }
+            await sleep(300);
+            waited += 300;
+        }
+        return { ok: null, message: "timed out waiting for save result" };
+    }
+
+    async function ansEditCohortIfNeeded(current) {
+        var editLink = document.querySelector('a[href^="/secure/administration/manage/studies/cohort/update/"][data-toggle="modal"]');
+        var cohortId = current && current.cohortId ? String(current.cohortId) : "";
+        var mapKey = "activityPlanState.cohortAdd.editDoneMap";
+        var map = {};
+        try {
+            var raw = localStorage.getItem(mapKey);
+            if (raw) map = JSON.parse(raw);
+        } catch (e) {}
+        if (!editLink || (cohortId && map[cohortId])) return true;
+        editLink.click();
+        var editModal = await waitForSelector("#ajaxModal, .modal", 7000);
+        if (!editModal) throw new Error("Cohort Edit modal did not open.");
+        await sleep(1000);
+        var controlsReady = await ansWaitForCohortEditControls(editModal);
+        if (!controlsReady) throw new Error("Cohort Edit modal controls did not load.");
+        var profileName = current && current.useReusableSubject ? "reuseExistingSubject" : "newSubject";
+        ansApplyCohortConfigProfile(profileName);
+        var reason = editModal.querySelector("textarea#reasonForChange");
+        if (reason) {
+            reason.value = "Test";
+            reason.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        if (cohortId) {
+            map[cohortId] = 1;
+            try { localStorage.setItem(mapKey, JSON.stringify(map)); } catch (e2) {}
+        }
+        var saveBtn = await waitForSelector("#actionButton", 5000);
+        if (!saveBtn) throw new Error("Could not find Save button in Cohort Edit modal.");
+        saveBtn.click();
+        await sleep(2200);
+        return true;
+    }
+
+    async function ansSelectActivityPlan(modal, current) {
+        var planSel = await waitForSelector("select#activityPlan", 7000);
+        if (!planSel) throw new Error("Activity Plan dropdown was not found.");
+        var desiredId = current && current.activityPlanId ? String(current.activityPlanId) : "";
+        var found = false;
+        if (desiredId) {
+            var opt = planSel.querySelector('option[value="' + desiredId.replace(/"/g, '\\"') + '"]');
+            if (opt) {
+                planSel.value = desiredId;
+                found = true;
+            }
+        }
+        if (!found) {
+            var desiredName = ansNormalizeText(current && current.activityPlanName);
+            var opts = planSel.querySelectorAll("option");
+            for (var i = 0; i < opts.length; i++) {
+                if ((opts[i].value || "").trim() && ansNormalizeText(opts[i].textContent) === desiredName) {
+                    planSel.value = opts[i].value;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            throw new Error("Activity Plan '" + (current.activityPlanName || current.activityPlanId || "") + "' was not available for this cohort.");
+        }
+        planSel.dispatchEvent(new Event("change", { bubbles: true }));
+        log("ANS: selected activity plan " + String(planSel.value));
+        await sleep(700);
+    }
+
+    async function ansWaitForEnabledElement(selector, timeoutMs) {
+        var start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            var el = document.querySelector(selector);
+            if (el && !el.disabled && !el.hasAttribute("disabled")) return el;
+            await sleep(250);
+        }
+        return null;
+    }
+
+    async function ansWaitForVolunteerSelect2(modal, timeoutMs) {
+        var start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            var freshModal = document.querySelector("#ajaxModal, .modal") || modal;
+            var container = freshModal ? (freshModal.querySelector("#s2id_volunteer") || freshModal.querySelector(".select2-container.form-control.select2")) : null;
+            var hiddenSelect = freshModal ? freshModal.querySelector("select#volunteer, select[name='volunteer']") : null;
+            var disabled = false;
+            if (hiddenSelect && (hiddenSelect.disabled || hiddenSelect.hasAttribute("disabled"))) disabled = true;
+            if (container && !disabled) return container;
+            await sleep(250);
+        }
+        return null;
+    }
+
+    async function ansOpenVolunteerSearch(container) {
+        var choice = container ? container.querySelector("a.select2-choice") : null;
+        if (choice) {
+            choice.click();
+            await sleep(200);
+        }
+        var focusser = container ? container.querySelector("input.select2-focusser") : null;
+        if (focusser) {
+            focusser.focus();
+            focusser.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
+            focusser.click();
+            await sleep(200);
+        }
+        var drop = document.querySelector("#select2-drop.select2-drop-active") || (container ? container.querySelector(".select2-drop") : null);
+        if (!drop && choice) {
+            choice.click();
+            await sleep(300);
+            drop = document.querySelector("#select2-drop.select2-drop-active") || (container ? container.querySelector(".select2-drop") : null);
+        }
+        var input = drop ? drop.querySelector("input.select2-input") : null;
+        if (!input) input = await waitForSelector("#select2-drop.select2-drop-active input.select2-input", 1500);
+        return { drop: drop, input: input };
+    }
+
+    async function ansSelectVolunteerBySearch(modal, searchTerm, label) {
+        searchTerm = ansNormalizeText(searchTerm);
+        if (!searchTerm) throw new Error("Reusable subject search term is missing.");
+        log("ANS: preparing volunteer source for " + (label || "specific subject"));
+        var searchSel = await ansWaitForEnabledElement("select#cohortAssignmentSearch", 12000);
+        if (searchSel && searchSel.value !== "Existing") {
+            searchSel.value = "Existing";
+            searchSel.dispatchEvent(new Event("change", { bubbles: true }));
+            log("ANS: volunteer source set to Existing Cohort Assignments");
+            await sleep(1000);
+        }
+        var subjInput = await waitForSelector("input#subjectNumber", 3000);
+        if (!subjInput && modal) subjInput = modal.querySelector("input[name='subjectNumber']");
+        if (subjInput) {
+            subjInput.value = searchTerm;
+            subjInput.dispatchEvent(new Event("input", { bubbles: true }));
+            subjInput.dispatchEvent(new Event("change", { bubbles: true }));
+            log("ANS: populated Subject Number input=" + searchTerm);
+            await sleep(500);
+        } else {
+            log("ANS: Subject Number input not found; continuing with volunteer dropdown search");
+        }
+        var s2container = await ansWaitForVolunteerSelect2(modal, 15000);
+        if (!s2container) throw new Error("Volunteer Select2 field was not found.");
+        var opened = await ansOpenVolunteerSearch(s2container);
+        var s2drop = opened.drop;
+        var s2input = opened.input;
+        if (!s2input) throw new Error("Volunteer search input was not found.");
+        log("ANS: searching reusable subject with '" + searchTerm + "'");
+        s2input.value = searchTerm;
+        s2input.dispatchEvent(new Event("input", { bubbles: true }));
+        s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: searchTerm, keyCode: searchTerm.charCodeAt(0) || 65 }));
+        var resultWaited = 0;
+        while (resultWaited < 10000) {
+            s2drop = document.querySelector("#select2-drop.select2-drop-active") || s2drop;
+            var noResults = s2drop && s2drop.querySelector(".select2-no-results");
+            var loading = s2drop && s2drop.querySelector(".select2-searching, .select2-more-results");
+            var selectable = s2drop ? s2drop.querySelector(".select2-result-selectable:not(.select2-disabled)") : null;
+            if (selectable) break;
+            if (noResults && !loading) throw new Error("Reusable subject was not found in the volunteer dropdown.");
+            await sleep(250);
+            resultWaited += 250;
+        }
+        var waited = 0;
+        while (waited < 7000) {
+            s2input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
+            s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
+            await sleep(400);
+            var chosenEl = s2container.querySelector(".select2-chosen") || s2container.querySelector('[id^="select2-chosen-"]');
+            var chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
+            var cls = s2container.getAttribute("class") || "";
+            if (cls.indexOf("select2-allowclear") !== -1 && cls.indexOf("select2-dropdown-open") === -1 && chosenText && chosenText.toLowerCase() !== "search") {
+                var volId = extractVolunteerIdFromChosenText(chosenText);
+                if (volId) {
+                    localStorage.setItem(STORAGE_ANS_CURRENT_VOLUNTEER, volId);
+                    setLastVolunteerId(volId);
+                    appendSelectedVolunteerId(volId);
+                }
+                log("ANS: reusable volunteer selected " + chosenText + " parsedId=" + String(volId));
+                return true;
+            }
+            waited += 400;
+        }
+        throw new Error("Could not confirm reusable subject selection.");
+    }
+
+    async function ansSelectRandomVolunteer(modal) {
+        log("ANS: preparing volunteer source");
+        var searchSel = await ansWaitForEnabledElement("select#cohortAssignmentSearch", 12000);
+        if (searchSel && searchSel.value !== "AllVolunteers") {
+            searchSel.value = "AllVolunteers";
+            searchSel.dispatchEvent(new Event("change", { bubbles: true }));
+            log("ANS: volunteer source set to AllVolunteers");
+            await sleep(1000);
+        }
+        var s2container = await ansWaitForVolunteerSelect2(modal, 15000);
+        if (!s2container) throw new Error("Volunteer Select2 field was not found.");
+        log("ANS: volunteer selector is ready");
+        var letters = "abcdefghijklmnopqrstuvwxyz".split("");
+        var usedLetters = getUsedLetters();
+        for (var attempts = 0; attempts < 26; attempts++) {
+            var letter = pickRandomUnusedLetter(letters, usedLetters);
+            if (!letter) break;
+            usedLetters.push(letter);
+            setUsedLetters(usedLetters);
+            log("ANS: searching volunteer with letter '" + letter + "' (" + (attempts + 1) + "/26)");
+            var opened = await ansOpenVolunteerSearch(s2container);
+            var s2drop = opened.drop;
+            var s2input = opened.input;
+            if (!s2input) throw new Error("Volunteer search input was not found.");
+            s2input.value = letter;
+            s2input.dispatchEvent(new Event("input", { bubbles: true }));
+            s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: letter, keyCode: letter.toUpperCase().charCodeAt(0) }));
+            await sleep(500);
+            var resultWaited = 0;
+            var hasSelectableResult = false;
+            while (resultWaited < 4000) {
+                s2drop = document.querySelector("#select2-drop.select2-drop-active") || s2drop;
+                var noResults = s2drop && s2drop.querySelector(".select2-no-results");
+                var loading = s2drop && s2drop.querySelector(".select2-searching, .select2-more-results");
+                var selectable = s2drop ? s2drop.querySelector(".select2-result-selectable:not(.select2-disabled)") : null;
+                if (selectable) {
+                    hasSelectableResult = true;
+                    break;
+                }
+                if (noResults && !loading) break;
+                await sleep(250);
+                resultWaited += 250;
+            }
+            if (!hasSelectableResult) {
+                log("ANS: no selectable volunteer result for letter '" + letter + "', trying next letter");
+                continue;
+            }
+            var waited = 0;
+            while (waited < 5000) {
+                s2input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
+                s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
+                await sleep(400);
+                var chosenEl = s2container.querySelector(".select2-chosen") || s2container.querySelector('[id^="select2-chosen-"]');
+                var chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
+                var cls = s2container.getAttribute("class") || "";
+                if (cls.indexOf("select2-allowclear") !== -1 && cls.indexOf("select2-dropdown-open") === -1 && chosenText && chosenText.toLowerCase() !== "search") {
+                    var volId = extractVolunteerIdFromChosenText(chosenText);
+                    if (volId) {
+                        localStorage.setItem(STORAGE_ANS_CURRENT_VOLUNTEER, volId);
+                        setLastVolunteerId(volId);
+                        appendSelectedVolunteerId(volId);
+                    }
+                    log("ANS: volunteer selected " + chosenText + " parsedId=" + String(volId));
+                    return true;
+                }
+                waited += 400;
+            }
+            log("ANS: volunteer result for letter '" + letter + "' did not confirm, trying next letter");
+        }
+        throw new Error("Could not select an available volunteer after trying all random letters.");
+    }
+
+    async function processAddNewSubjectOnCohortPage() {
+        if (isPaused()) {
+            log("ANS: paused; exiting cohort page");
+            return;
+        }
+        var current = ansGetCurrent();
+        var queue = ansGetQueue();
+        var idx = ansGetIndex();
+        if (!current || !queue.length) {
+            log("ANS: missing queue/current state; clearing");
+            clearAddNewSubjectData();
+            clearRunMode();
+            return;
+        }
+        ansShowProgress("Adding new subject...");
+        ansUpdateProgress("Adding new subject...", (idx + 1) + "/" + queue.length + ": " + current.epochName + " > " + current.cohortName);
+
+        var successOnLoad = hasSuccessAlert();
+        var guard = getCohortGuard();
+        if (successOnLoad || guard === "postsave") {
+            await ansActivateCurrentVolunteer();
+            return;
+        }
+
+        await clickActionsDropdownIfNeeded();
+        await ansEditCohortIfNeeded(current);
+        setCohortGuard("inprogress");
+        clearLastVolunteerId();
+        clearSelectedVolunteerIds();
+        clearUsedLetters();
+
+        var opened = await clickActionsDropdownIfNeeded();
+        if (!opened) throw new Error("Could not open cohort Actions menu.");
+        var addLink = await waitForSelector('a#addCohortAssignmentButton[data-toggle="modal"]', 5000);
+        if (!addLink) addLink = document.querySelector('a[href^="/secure/study/cohortassign/manage/save/"][data-toggle="modal"]');
+        if (!addLink) throw new Error("Could not find Add Cohort Assignment button.");
+        addLink.click();
+        var modal = await waitForSelector("#ajaxModal, .modal", 7000);
+        if (!modal) throw new Error("Add Subject modal did not open.");
+        await ansSelectActivityPlan(modal, current);
+
+        var initialSegmentRefDiv = modal.querySelector("div#initialSegmentReferenceDiv");
+        if (initialSegmentRefDiv && window.getComputedStyle(initialSegmentRefDiv).display !== "none") {
+            var dateInput = modal.querySelector("input#initialSegmentReference");
+            if (dateInput && !dateInput.value) {
+                dateInput.value = formatDateForClinSpark(new Date());
+                dateInput.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+
+        if (current.useReusableSubject) {
+            var reuseSubject = ansGetReuseSubject();
+            if (!reuseSubject) {
+                throw new Error("Reusable screening subject is missing. The screening cohort must complete before adding the same subject to other epochs.");
+            }
+            var reuseSearch = reuseSubject.subjectNumber || reuseSubject.chosenText || reuseSubject.volunteerId || "";
+            log("ANS: reusing screening subject for " + current.epochName + " > " + current.cohortName);
+            await ansSelectVolunteerBySearch(modal, reuseSearch, "reusable screening subject");
+        } else {
+            await ansSelectRandomVolunteer(modal);
+        }
+        var saveBtn = await waitForSelector('button#actionButton.btn.green[type="button"]', 5000);
+        if (!saveBtn) saveBtn = document.querySelector("button#actionButton");
+        if (!saveBtn) throw new Error("Save button was not found in Add Subject modal.");
+        setCohortGuard("postsave");
+        saveBtn.click();
+        log("ANS: Add Subject save clicked");
+        var saveOutcome = await ansWaitForSaveOutcome(modal, 12000);
+        log("ANS: Add Subject save outcome ok=" + String(saveOutcome.ok) + " message=" + saveOutcome.message);
+        if (saveOutcome.ok === false) {
+            setCohortGuard("");
+            var cancelBtn = getModalCancelButton(modal);
+            if (cancelBtn) {
+                cancelBtn.click();
+                await waitUntilHidden("#ajaxModal, .modal", 5000);
+            }
+            throw new Error("ClinSpark rejected the selected volunteer: " + saveOutcome.message);
+        }
+    }
+
+    async function ansActivateCurrentVolunteer() {
+        var queue = ansGetQueue();
+        var idx = ansGetIndex();
+        var current = ansGetCurrent();
+        var targetVolId = "";
+        try { targetVolId = localStorage.getItem(STORAGE_ANS_CURRENT_VOLUNTEER) || ""; } catch (e) {}
+        if (!targetVolId) targetVolId = getLastVolunteerId() || getLastSelectedVolunteerId();
+        if (!targetVolId) throw new Error("Could not determine the saved volunteer id for activation.");
+        ansUpdateProgress("Activating new subject...", (idx + 1) + "/" + queue.length + ": " + (current ? current.cohortName : ""));
+        var listReady = await waitForListTable(15000);
+        if (!listReady) await sleep(800);
+        var targetRow = null;
+        var waited = 0;
+        while (waited < 30000) {
+            targetRow = findCohortRowByVolunteerId(targetVolId);
+            if (targetRow) break;
+            await sleep(400);
+            waited += 400;
+        }
+        if (!targetRow) throw new Error("Could not find the newly added volunteer row for activation.");
+        if (current && current.createReusableSubject && !ansGetReuseSubject()) {
+            var subjectSpan = targetRow.querySelector("span.tooltips[data-original-title='Subject Number']");
+            var subjectAnchor = targetRow.querySelector("a[href*='/secure/study/subjects/show/']");
+            var volunteerAnchor = targetRow.querySelector("a[href*='/secure/volunteers/manage/show/']");
+            var subjectNumber = ansNormalizeText(subjectSpan ? subjectSpan.textContent : (subjectAnchor ? subjectAnchor.textContent : ""));
+            var chosenText = ansNormalizeText(volunteerAnchor ? volunteerAnchor.textContent : "");
+            ansSetReuseSubject({
+                volunteerId: String(targetVolId),
+                subjectNumber: subjectNumber,
+                chosenText: chosenText,
+                sourceEpochName: current.epochName,
+                sourceCohortName: current.cohortName
+            });
+        }
+        var actionBtn = getRowActionButton(targetRow);
+        if (!actionBtn) throw new Error("Could not find row Actions button for activation.");
+        actionBtn.click();
+        await sleep(300);
+        var planLink = getMenuLinkActivatePlan(targetRow);
+        if (planLink) {
+            planLink.click();
+            await clickBootboxOk(5000);
+            await sleep(800);
+        }
+        var found = await waitForActivateVolunteerById(targetVolId, 45000);
+        if (found && found.link) {
+            found.link.click();
+            await clickBootboxOk(5000);
+            await sleep(800);
+        } else {
+            throw new Error("Activate Volunteer link was not found for volunteerId=" + String(targetVolId) + ". The subject may not have been saved into this cohort.");
+        }
+        ansSetIndex(idx + 1);
+        setCohortGuard("");
+        clearSelectedVolunteerIds();
+        try { localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER); } catch (e2) {}
+        if (idx + 1 >= queue.length) {
+            log("ANS: queue complete after " + (idx + 1) + "/" + queue.length);
+            ansShowComplete();
+        } else {
+            log("ANS: advancing to next queue item " + (idx + 2) + "/" + queue.length);
+            ansNavigateToCurrent();
+        }
+    }
+
+    async function processAddNewSubjectOnPageLoad() {
+        if (getRunMode() !== RUNMODE_ADD_NEW_SUBJECT) return;
+        try {
+            if (isCohortShowPage()) {
+                await processAddNewSubjectOnCohortPage();
+            } else if (location.pathname.indexOf("/secure/administration/studies/show") !== -1) {
+                ansNavigateToCurrent();
+            }
+        } catch (err) {
+            ansShowProgress("Add New Subject stopped");
+            ansUpdateProgress("Add New Subject stopped", String(err && err.message ? err.message : err));
+            log("ANS: error - " + String(err));
         }
     }
 
@@ -17936,8 +23843,10 @@
             localStorage.removeItem(STORAGE_BPL_CURRENT_INDEX);
             localStorage.removeItem(STORAGE_BPL_RUNNING);
             localStorage.removeItem(STORAGE_BPL_SEGMENT_CHECKBOXES);
+            localStorage.removeItem(STORAGE_BPL_SESSION);
+            localStorage.removeItem(STORAGE_BPL_SESSION_BACKUP);
         } catch (e) {}
-        log("BPL: runtime storage cleared (session state preserved)");
+        log("BPL: runtime storage cleared");
     }
 
     function isOnBPLPage() {
@@ -19060,232 +24969,32 @@
     }
 
     function saveBPLSessionState(segmentFormMap, formDataStore, segmentCheckboxStates, formInstanceCounter) {
-        try {
-            var state = {
-                version: BPL_STATE_VERSION,
-                savedAt: new Date().toISOString(),
-                segmentFormMap: segmentFormMap,
-                formDataStore: formDataStore,
-                segmentCheckboxStates: segmentCheckboxStates,
-                formInstanceCounter: formInstanceCounter
-            };
-            var serialized = JSON.stringify(state);
-            localStorage.setItem(STORAGE_BPL_SESSION, serialized);
-            localStorage.setItem(STORAGE_BPL_SESSION_BACKUP, serialized);
-            log("BPL: session state saved (version=" + BPL_STATE_VERSION + ", size=" + serialized.length + " bytes)");
-        } catch (e) {
-            log("BPL: failed to save session state - " + String(e));
-        }
+        // Previous-session persistence is intentionally disabled. The active builder state lives in memory only.
     }
 
     function restoreBPLSessionState(segments, studyEvents, forms) {
-        var raw = null;
-        var source = "primary";
         try {
-            raw = localStorage.getItem(STORAGE_BPL_SESSION);
-            if (!raw) {
-                raw = localStorage.getItem(STORAGE_BPL_SESSION_BACKUP);
-                if (raw) {
-                    source = "backup";
-                    log("BPL: primary session state missing, recovered from backup");
-                }
-            }
+            localStorage.removeItem(STORAGE_BPL_SESSION);
+            localStorage.removeItem(STORAGE_BPL_SESSION_BACKUP);
+            localStorage.removeItem(STORAGE_BPL_SEGMENT_CHECKBOXES);
         } catch (e) {
-            log("BPL: localStorage read error during restore - " + String(e));
+            log("BPL: unable to clear previous session state during fresh start - " + String(e));
         }
-        if (!raw) {
-            log("BPL: no saved session state found (checked primary and backup)");
-            return null;
-        }
-        var state = null;
-        try {
-            state = JSON.parse(raw);
-        } catch (parseErr) {
-            log("BPL: corrupted session data in " + source + " - " + String(parseErr));
-            if (source === "primary") {
-                try {
-                    var backupRaw = localStorage.getItem(STORAGE_BPL_SESSION_BACKUP);
-                    if (backupRaw) {
-                        state = JSON.parse(backupRaw);
-                        source = "backup (fallback after primary corruption)";
-                        log("BPL: recovered session state from backup after primary corruption");
-                    }
-                } catch (backupErr) {
-                    log("BPL: backup also corrupted - " + String(backupErr) + " - preserving raw data");
-                    return null;
-                }
-            }
-            if (!state) {
-                log("BPL: unable to parse any stored session state - preserving raw data in storage");
-                return null;
-            }
-        }
-        if (!state || !state.segmentFormMap || !state.formDataStore) {
-            log("BPL: saved session state is structurally invalid (source=" + source + ")");
-            return null;
-        }
-        var savedVersion = state.version || 0;
-        if (savedVersion !== BPL_STATE_VERSION) {
-            log("BPL: version mismatch - saved=" + savedVersion + " current=" + BPL_STATE_VERSION + " - attempting migration");
-            if (savedVersion < BPL_STATE_VERSION) {
-                state.version = BPL_STATE_VERSION;
-                log("BPL: migrated state from version " + savedVersion + " to " + BPL_STATE_VERSION);
-            } else {
-                log("BPL: saved version " + savedVersion + " is newer than current " + BPL_STATE_VERSION + " - loading anyway, preserving raw data");
-            }
-        }
-        log("BPL: restoring session state from " + source + " (version=" + savedVersion + ", savedAt=" + (state.savedAt || "unknown") + ")");
-        try {
-            var validSegmentValues = {};
-            for (var si = 0; si < segments.length; si++) {
-                validSegmentValues[segments[si].value] = true;
-            }
-            var validFormValues = {};
-            for (var fi = 0; fi < forms.length; fi++) {
-                validFormValues[forms[fi].value] = true;
-            }
-            var validEventValues = {};
-            for (var ei = 0; ei < studyEvents.length; ei++) {
-                validEventValues[studyEvents[ei].value] = true;
-            }
-            var restoredSegmentFormMap = {};
-            var restoredFormDataStore = {};
-            var restoredSegmentCheckboxStates = {};
-            var maxIndex = 0;
-            var restoredFormCount = 0;
-            var skippedSegmentCount = 0;
-            var skippedFormCount = 0;
-            var skippedEventCount = 0;
-            var savedMap = state.segmentFormMap;
-            var savedData = state.formDataStore;
-            var savedCheckboxes = state.segmentCheckboxStates || {};
-            for (var segVal in savedMap) {
-                if (!savedMap.hasOwnProperty(segVal)) {
-                    continue;
-                }
-                if (!validSegmentValues[segVal]) {
-                    skippedSegmentCount = skippedSegmentCount + 1;
-                    log("BPL: restore skipping removed segment " + segVal);
-                    continue;
-                }
-                var savedForms = savedMap[segVal];
-                if (!Array.isArray(savedForms)) {
-                    log("BPL: restore skipping malformed forms array for segment " + segVal);
-                    continue;
-                }
-                var validForms = [];
-                for (var fIdx = 0; fIdx < savedForms.length; fIdx++) {
-                    var sf = savedForms[fIdx];
-                    if (!sf || !sf.value) {
-                        log("BPL: restore skipping malformed form entry at index " + fIdx + " in segment " + segVal);
-                        continue;
-                    }
-                    if (!validFormValues[sf.value]) {
-                        skippedFormCount = skippedFormCount + 1;
-                        log("BPL: restore skipping removed form " + sf.text + " (value=" + sf.value + ") in segment " + segVal);
-                        continue;
-                    }
-                    var oldKey = segVal + "|" + sf.value + "|" + sf.index;
-                    var fd = savedData[oldKey];
-                    if (fd && fd.autoPopulated && fd.modified) {
-                        log("BPL: restore skipping modified auto-populated form " + sf.text + " (key=" + oldKey + ") - SA table will provide current values");
-                        continue;
-                    }
-                    validForms.push({
-                        value: sf.value,
-                        text: sf.text,
-                        index: sf.index,
-                        autoPopulated: sf.autoPopulated || false
-                    });
-                    if (sf.index > maxIndex) {
-                        maxIndex = sf.index;
-                    }
-                    if (fd) {
-                        var filteredEvents = [];
-                        var savedEvents = fd.studyEvents || [];
-                        for (var evi = 0; evi < savedEvents.length; evi++) {
-                            if (fd.autoPopulated) {
-                                filteredEvents.push(savedEvents[evi]);
-                            } else if (validEventValues[savedEvents[evi].value]) {
-                                filteredEvents.push(savedEvents[evi]);
-                            } else {
-                                skippedEventCount = skippedEventCount + 1;
-                                log("BPL: restore skipping removed study event " + savedEvents[evi].text + " (value=" + savedEvents[evi].value + ")");
-                            }
-                        }
-                        restoredFormDataStore[oldKey] = {
-                            days: fd.days || 0,
-                            hours: fd.hours || 0,
-                            minutes: fd.minutes || 0,
-                            seconds: fd.seconds || 0,
-                            hidden: fd.hidden || false,
-                            mandatory: fd.mandatory !== false,
-                            enforce: fd.enforce || false,
-                            preWindow: fd.preWindow || "",
-                            postWindow: fd.postWindow || "",
-                            refActivity: fd.refActivity || false,
-                            preReference: fd.preReference || false,
-                            studyEvents: filteredEvents,
-                            autoPopulated: fd.autoPopulated || false,
-                            modified: fd.modified || false,
-                            editHref: fd.editHref || "",
-                            saRowIndex: fd.saRowIndex,
-                            originalValues: fd.originalValues || null,
-                            timepointRaw: fd.timepointRaw || "",
-                            timepointCleaned: fd.timepointCleaned || "",
-                            timepointDisplay: fd.timepointDisplay || "",
-                            segmentRefDateTime: fd.segmentRefDateTime || "N/A",
-                            exampleTime: fd.exampleTime || "N/A"
-                        };
-                    }
-                    restoredFormCount = restoredFormCount + 1;
-                }
-                restoredSegmentFormMap[segVal] = validForms;
-            }
-            for (var cbKey in savedCheckboxes) {
-                if (!savedCheckboxes.hasOwnProperty(cbKey)) {
-                    continue;
-                }
-                if (validSegmentValues[cbKey]) {
-                    restoredSegmentCheckboxStates[cbKey] = savedCheckboxes[cbKey];
-                }
-            }
-            var restoredCounter = state.formInstanceCounter || 0;
-            if (maxIndex > restoredCounter) {
-                restoredCounter = maxIndex;
-            }
-            log("BPL: session state restored from " + source + " - " + restoredFormCount + " forms, skipped " + skippedSegmentCount + " segments, " + skippedFormCount + " forms, " + skippedEventCount + " events");
-            return {
-                segmentFormMap: restoredSegmentFormMap,
-                formDataStore: restoredFormDataStore,
-                segmentCheckboxStates: restoredSegmentCheckboxStates,
-                formInstanceCounter: restoredCounter
-            };
-        } catch (e) {
-            log("BPL: failed to restore session state - " + String(e) + " - preserving raw data in storage");
-            return null;
-        }
+        log("BPL: previous-session restore disabled; starting fresh");
+        return null;
     }
 
     function clearBPLSessionState() {
         try {
             localStorage.removeItem(STORAGE_BPL_SESSION);
+            localStorage.removeItem(STORAGE_BPL_SESSION_BACKUP);
+            localStorage.removeItem(STORAGE_BPL_SEGMENT_CHECKBOXES);
         } catch (e) {}
         log("BPL: session state cleared");
     }
 
     function clearBPLSessionStateWithBackup() {
-        try {
-            var existing = localStorage.getItem(STORAGE_BPL_SESSION);
-            if (existing) {
-                localStorage.setItem(STORAGE_BPL_SESSION_BACKUP, existing);
-                log("BPL: session state backed up before clear");
-            }
-            localStorage.removeItem(STORAGE_BPL_SESSION);
-        } catch (e) {
-            log("BPL: error during session clear with backup - " + String(e));
-        }
-        log("BPL: session state cleared (backup preserved)");
+        clearBPLSessionState();
     }
 
     function createBPLSelectionGUI(segments, studyEvents, forms, saTableData, segmentOffsets) {
@@ -19342,23 +25051,16 @@
             }
         } catch (e) {}
 
-        try {
-            var savedStates = localStorage.getItem(STORAGE_BPL_SEGMENT_CHECKBOXES);
-            if (savedStates) {
-                segmentCheckboxStates = JSON.parse(savedStates);
-            }
-        } catch (e) {}
-
         for (var si = 0; si < segments.length; si++) {
-            segmentCheckboxStates[segments[si].value] = segmentCheckboxStates[segments[si].value] !== false;
+            segmentCheckboxStates[segments[si].value] = true;
             segmentFormMap[segments[si].value] = [];
         }
 
-        var restoredState = restoreBPLSessionState(segments, studyEvents, forms);
+        restoreBPLSessionState(segments, studyEvents, forms);
         var saTableItems = (saTableData && saTableData.saTableItems) ? saTableData.saTableItems : [];
         if (saTableItems.length > 0) {
-            log("BPL: merging " + saTableItems.length + " SA table items with session state");
-            var mergeResult = bplMergeSaTableWithSession(saTableItems, restoredState, segments, segmentOffsets || {}, forms, studyEvents);
+            log("BPL: loading " + saTableItems.length + " existing SA table item(s) into a fresh builder session");
+            var mergeResult = bplMergeSaTableWithSession(saTableItems, null, segments, segmentOffsets || {}, forms, studyEvents);
             for (var mSeg in mergeResult.segmentFormMap) {
                 if (mergeResult.segmentFormMap.hasOwnProperty(mSeg)) {
                     if (segmentFormMap.hasOwnProperty(mSeg)) {
@@ -19372,34 +25074,7 @@
                 }
             }
             formInstanceCounter = mergeResult.formInstanceCounter;
-            if (restoredState && restoredState.segmentCheckboxStates) {
-                for (var rCb in restoredState.segmentCheckboxStates) {
-                    if (restoredState.segmentCheckboxStates.hasOwnProperty(rCb)) {
-                        segmentCheckboxStates[rCb] = restoredState.segmentCheckboxStates[rCb];
-                    }
-                }
-            }
-            log("BPL: merge applied - formInstanceCounter=" + formInstanceCounter);
-        } else if (restoredState) {
-            for (var rSeg in restoredState.segmentFormMap) {
-                if (restoredState.segmentFormMap.hasOwnProperty(rSeg)) {
-                    if (segmentFormMap.hasOwnProperty(rSeg)) {
-                        segmentFormMap[rSeg] = restoredState.segmentFormMap[rSeg];
-                    }
-                }
-            }
-            for (var rKey in restoredState.formDataStore) {
-                if (restoredState.formDataStore.hasOwnProperty(rKey)) {
-                    formDataStore[rKey] = restoredState.formDataStore[rKey];
-                }
-            }
-            for (var rCb2 in restoredState.segmentCheckboxStates) {
-                if (restoredState.segmentCheckboxStates.hasOwnProperty(rCb2)) {
-                    segmentCheckboxStates[rCb2] = restoredState.segmentCheckboxStates[rCb2];
-                }
-            }
-            formInstanceCounter = restoredState.formInstanceCounter;
-            log("BPL: session restore applied (no SA table data) - formInstanceCounter=" + formInstanceCounter);
+            log("BPL: fresh existing-form load applied - formInstanceCounter=" + formInstanceCounter);
         }
 
         function saveSession() {
@@ -20346,6 +26021,119 @@
             return row;
         }
 
+        function bplMarkAutoPopulatedModified(key, data) {
+            if (!key || !data) return;
+            if (data.autoPopulated && !data.originalValues) {
+                data.originalValues = {
+                    days: data.days || 0,
+                    hours: data.hours || 0,
+                    minutes: data.minutes || 0,
+                    seconds: data.seconds || 0,
+                    hidden: !!data.hidden,
+                    mandatory: data.mandatory !== false,
+                    enforce: !!data.enforce,
+                    preWindow: data.preWindow || "",
+                    postWindow: data.postWindow || "",
+                    refActivity: !!data.refActivity,
+                    preReference: !!data.preReference,
+                    studyEventText: (data.studyEvents && data.studyEvents.length > 0) ? (data.studyEvents[0].text || "") : "",
+                    studyEventValue: (data.studyEvents && data.studyEvents.length > 0) ? (data.studyEvents[0].value || "") : ""
+                };
+                log("BPL: created missing originalValues for auto-populated form " + key);
+            }
+            if (data.autoPopulated && data.originalValues) {
+                var orig = data.originalValues;
+                var currentEvText = (data.studyEvents && data.studyEvents.length > 0) ? (data.studyEvents[0].text || "") : "";
+                var originalEvText = orig.studyEventText || "";
+                data.modified = (
+                    (data.days || 0) !== (orig.days || 0) ||
+                    (data.hours || 0) !== (orig.hours || 0) ||
+                    (data.minutes || 0) !== (orig.minutes || 0) ||
+                    (data.seconds || 0) !== (orig.seconds || 0) ||
+                    !!data.hidden !== !!orig.hidden ||
+                    data.mandatory !== (orig.mandatory !== false) ||
+                    !!data.enforce !== !!orig.enforce ||
+                    (data.preWindow || "") !== (orig.preWindow || "") ||
+                    (data.postWindow || "") !== (orig.postWindow || "") ||
+                    !!data.refActivity !== !!orig.refActivity ||
+                    !!data.preReference !== !!orig.preReference ||
+                    currentEvText !== originalEvText
+                );
+            }
+        }
+
+        function bplApplyTimeCalculationToData(key, data, rawValue) {
+            var inputVal = String(rawValue || "").trim();
+            if (!inputVal) return { ok: false, message: "Enter a time calculation first." };
+            if (!key || !data) return { ok: false, message: "No form row selected." };
+            if (data.refActivity) return { ok: false, message: "Cannot apply time calculation to the reference activity itself." };
+            var keyParts = key.split("|");
+            var refDateTimeStr = data.segmentRefDateTime;
+            if (!refDateTimeStr || refDateTimeStr === "N/A") {
+                refDateTimeStr = getSegmentRefDateTime(keyParts[0]);
+            }
+            if (!refDateTimeStr || refDateTimeStr === "N/A") {
+                refDateTimeStr = getReferenceActivityExampleTime(keyParts[0], key);
+            }
+            if (!refDateTimeStr || refDateTimeStr === "N/A") {
+                return { ok: false, message: "No reference activity time available for this segment." };
+            }
+            data._preApplyState = {
+                days: data.days || 0,
+                hours: data.hours || 0,
+                minutes: data.minutes || 0,
+                seconds: data.seconds || 0,
+                preReference: !!data.preReference
+            };
+            if (/^-?\d+$/.test(inputVal)) {
+                var totalMin = parseInt(inputVal, 10);
+                var isNeg = totalMin < 0;
+                totalMin = Math.abs(totalMin);
+                data.days = Math.floor(totalMin / 1440);
+                var leftover = totalMin % 1440;
+                data.hours = Math.floor(leftover / 60);
+                data.minutes = leftover % 60;
+                data.seconds = 0;
+                data.preReference = isNeg;
+            } else {
+                if (!/^\d{1,3}:\d{1,2}(?::\d{1,2})?$/.test(inputVal)) {
+                    return { ok: false, message: "Use HH:MM:SS, HH:MM, or whole minutes." };
+                }
+                var refDate = bplParseClinSparkDateTime(refDateTimeStr);
+                if (!refDate) return { ok: false, message: "Could not parse reference activity time." };
+                var tp = inputVal.split(":");
+                var inH = parseInt(tp[0], 10) || 0;
+                var inM = tp.length >= 2 ? (parseInt(tp[1], 10) || 0) : 0;
+                var inS = tp.length >= 3 ? (parseInt(tp[2], 10) || 0) : 0;
+                if (inM > 59 || inS > 59) return { ok: false, message: "Minutes and seconds must be 0-59." };
+                var inputTotalSec = (inH * 3600) + (inM * 60) + inS;
+                var refTotalSec = (refDate.getHours() * 3600) + (refDate.getMinutes() * 60) + refDate.getSeconds();
+                var diffSec = inputTotalSec - refTotalSec;
+                data.preReference = diffSec < 0;
+                diffSec = Math.abs(diffSec);
+                data.days = Math.floor(diffSec / 86400);
+                diffSec = diffSec % 86400;
+                data.hours = Math.floor(diffSec / 3600);
+                diffSec = diffSec % 3600;
+                data.minutes = Math.floor(diffSec / 60);
+                data.seconds = diffSec % 60;
+            }
+            data.segmentRefDateTime = refDateTimeStr;
+            data.timepointDisplay = "";
+            data.timepointCleaned = bplFormatTimePoint(data.days || 0, data.hours || 0, data.minutes || 0, data.seconds || 0, data.preReference || false);
+            data.exampleTime = bplComputeExampleTime(refDateTimeStr, data.timepointCleaned, data.preReference || false);
+            bplMarkAutoPopulatedModified(key, data);
+            formDataStore[key] = data;
+            log("BPL: applied time calculation '" + inputVal + "' to form " + key + " -> " + data.timepointCleaned);
+            return { ok: true, message: "Applied time calculation." };
+        }
+
+        function bplRefreshSelectedTimePanel() {
+            if (selectedFormKey && formDataStore[selectedFormKey]) {
+                renderTimePanel(formDataStore[selectedFormKey], selectedFormKey);
+            }
+        }
+
         function createBPLTimeInput(labelText, id, max) {
             var row = document.createElement("div");
             row.style.cssText = "display:flex;flex-direction:column;gap:2px;";
@@ -20538,87 +26326,28 @@
                 applyTimeBtnEl.addEventListener("click", function() {
                     var atInput = document.getElementById("bplApplyTimeCalc");
                     var inputVal = atInput ? atInput.value.trim() : "";
-                    if (!inputVal) return;
-                    var refActCb = document.getElementById("bplRefActivity");
-                    if (refActCb && refActCb.checked) {
-                        alert("Cannot apply time calculation to the reference activity itself.");
-                        return;
-                    }
-                    var refDateTimeStr = data.segmentRefDateTime;
-                    if (!refDateTimeStr || refDateTimeStr === "N/A") {
-                        var kp = key.split("|");
-                        refDateTimeStr = getSegmentRefDateTime(kp[0]);
-                    }
-                    if (!refDateTimeStr || refDateTimeStr === "N/A") {
-                        var kpRef = key.split("|");
-                        refDateTimeStr = getReferenceActivityExampleTime(kpRef[0], key);
-                    }
-                    if (!refDateTimeStr || refDateTimeStr === "N/A") {
-                        alert("No reference activity time available for this segment.");
-                        return;
-                    }
                     var dEl = document.getElementById("bplDays");
                     var hEl = document.getElementById("bplHours");
                     var mEl = document.getElementById("bplMinutes");
                     var sEl = document.getElementById("bplSeconds");
                     var prEl = document.getElementById("bplPreReference");
-                    data._preApplyState = {
-                        days: dEl ? dEl.value : "0",
-                        hours: hEl ? hEl.value : "0",
-                        minutes: mEl ? mEl.value : "0",
-                        seconds: sEl ? sEl.value : "0",
-                        preReference: prEl ? prEl.checked : false
-                    };
-                    var isMinutesOnly = /^-?\d+$/.test(inputVal);
-                    if (isMinutesOnly) {
-                        var totalMin = parseInt(inputVal);
-                        var isNeg = totalMin < 0;
-                        totalMin = Math.abs(totalMin);
-                        var cDays = Math.floor(totalMin / 1440);
-                        var leftover = totalMin % 1440;
-                        var cHours = Math.floor(leftover / 60);
-                        var cMinutes = leftover % 60;
-                        if (prEl) prEl.checked = isNeg;
-                        if (dEl) dEl.value = String(cDays);
-                        if (hEl) hEl.value = String(cHours);
-                        if (mEl) mEl.value = String(cMinutes);
-                        if (sEl) sEl.value = "0";
-                    } else {
-                        var refDate = bplParseClinSparkDateTime(refDateTimeStr);
-                        if (!refDate) {
-                            alert("Could not parse reference activity time.");
-                            return;
-                        }
-                        var tp = inputVal.split(":");
-                        var inH = parseInt(tp[0]) || 0;
-                        var inM = tp.length >= 2 ? (parseInt(tp[1]) || 0) : 0;
-                        var inS = tp.length >= 3 ? (parseInt(tp[2]) || 0) : 0;
-                        var refH = refDate.getHours();
-                        var refM = refDate.getMinutes();
-                        var refS = refDate.getSeconds();
-                        var inputTotalSec = (inH * 3600) + (inM * 60) + inS;
-                        var refTotalSec = (refH * 3600) + (refM * 60) + refS;
-                        var diffSec = inputTotalSec - refTotalSec;
-                        var isPreRef = diffSec < 0;
-                        diffSec = Math.abs(diffSec);
-                        var cD = Math.floor(diffSec / 86400);
-                        diffSec = diffSec % 86400;
-                        var cH = Math.floor(diffSec / 3600);
-                        diffSec = diffSec % 3600;
-                        var cMi = Math.floor(diffSec / 60);
-                        var cS = diffSec % 60;
-                        if (prEl) prEl.checked = isPreRef;
-                        if (dEl) dEl.value = String(cD);
-                        if (hEl) hEl.value = String(cH);
-                        if (mEl) mEl.value = String(cMi);
-                        if (sEl) sEl.value = String(cS);
+                    saveFormDataFromPanel(selectedFormKey);
+                    data = formDataStore[key] || data;
+                    var result = bplApplyTimeCalculationToData(key, data, inputVal);
+                    if (!result.ok) {
+                        alert(result.message);
+                        return;
                     }
+                    if (dEl) dEl.value = String(data.days || 0);
+                    if (hEl) hEl.value = String(data.hours || 0);
+                    if (mEl) mEl.value = String(data.minutes || 0);
+                    if (sEl) sEl.value = String(data.seconds || 0);
+                    if (prEl) prEl.checked = !!data.preReference;
                     var uBtn = document.getElementById("bplUndoTimeBtn");
                     if (uBtn) {
                         uBtn.disabled = false;
                         uBtn.style.cssText = "padding:6px 10px;border-radius:4px;border:1px solid #dc3545;background:#dc3545;color:#fff;font-size:11px;cursor:pointer;white-space:nowrap;";
                     }
-                    saveFormDataFromPanel(selectedFormKey);
                     renderCenterPanel(centerSearch.value);
                     runAutoValidation();
                 });
@@ -20813,8 +26542,11 @@
             }
         }
 
-        function renderCenterPanel(filter) {
-            saveFormDataFromPanel(selectedFormKey);
+        function renderCenterPanel(filter, options) {
+            options = options || {};
+            if (!options.skipPanelSave) {
+                saveFormDataFromPanel(selectedFormKey);
+            }
             var scrollTop = centerBody.scrollTop;
             centerBody.innerHTML = "";
             var bplDuplicateKeys = bplFindDuplicates(segments, segmentFormMap, formDataStore, segmentCheckboxStates);
@@ -20883,9 +26615,6 @@
                 segCb.style.cssText = "width:16px;height:16px;cursor:pointer;accent-color:#007bff;";
                 segCb.addEventListener("change", function() {
                     segmentCheckboxStates[this.dataset.segmentValue] = this.checked;
-                    try {
-                        localStorage.setItem(STORAGE_BPL_SEGMENT_CHECKBOXES, JSON.stringify(segmentCheckboxStates));
-                    } catch (e) {}
                     saveSession();
                     runAutoValidation();
                 });
@@ -21371,15 +27100,15 @@
                             rowBorderColor = "#b45cff";
                             rowBg = "#352044";
                         }
-                        var autoPopBorderLeft = "";
+                        var autoPopIndicatorStyle = "";
                         if (isAutoPopulated) {
                             if (isDuplicate) {
-                                autoPopBorderLeft = "border-left:3px solid #cc3333;";
+                                autoPopIndicatorStyle = "box-shadow:inset 3px 0 0 #cc3333;";
                             } else {
-                                autoPopBorderLeft = isModifiedAuto ? "border-left:3px solid #4caf50;" : "border-left:3px solid #d4a017;";
+                                autoPopIndicatorStyle = isModifiedAuto ? "box-shadow:inset 3px 0 0 #4caf50;" : "box-shadow:inset 3px 0 0 #d4a017;";
                             }
                         }
-                        formRow.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:4px;border:1px solid " + rowBorderColor + ";border-radius:5px;background:" + rowBg + ";transition:all 0.15s ease;" + autoPopBorderLeft;
+                        formRow.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:4px;border:1px solid " + rowBorderColor + ";border-radius:5px;background:" + rowBg + ";transition:background 0.15s ease,border-color 0.15s ease,opacity 0.15s ease;box-sizing:border-box;" + autoPopIndicatorStyle;
                         if (isAutoPopulated && !isModifiedAuto) {
                             formRow.style.opacity = "0.85";
                         }
@@ -21702,12 +27431,56 @@
                         }
                         var etStr2 = fData2.exampleTime || "N/A";
                         var timeRefLabel = document.createElement("span");
-                        timeRefLabel.textContent = tpStr2 + "   |   " + etStr2;
+                        timeRefLabel.textContent = etStr2 + "   |   " + tpStr2;
                         timeRefLabel.style.cssText = "font-size:12px;color:#ffffffff;white-space:pre;flex-shrink:0;min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:220px;";
+                        var inlineTimeWrap = document.createElement("div");
+                        inlineTimeWrap.title = "Apply Time Calculation";
+                        inlineTimeWrap.style.cssText = "width:86px;min-width:86px;max-width:86px;display:block;flex:0 0 86px;";
+                        var inlineTimeInput = document.createElement("input");
+                        inlineTimeInput.type = "text";
+                        inlineTimeInput.placeholder = "HH:MM";
+                        inlineTimeInput.setAttribute("aria-label", "Apply Time Calculation for " + fEntry.text);
+                        inlineTimeInput.title = "Enter minutes or HH:MM, then press Enter or leave the field to apply.";
+                        inlineTimeInput.style.cssText = "width:100%;height:24px;padding:2px 6px;border-radius:4px;border:1px solid #555;background:#191919;color:#fff;font-size:11px;box-sizing:border-box;outline:none;";
+                        inlineTimeInput.addEventListener("click", function(e) { e.stopPropagation(); });
+                        inlineTimeInput.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+                        var applyInlineTimeValue = (function(fk, input) {
+                            return function(e, keepFocus) {
+                                var rawInput = input.value;
+                                if (!String(rawInput || "").trim()) return;
+                                var d = formDataStore[fk] || getDefaultFormData();
+                                var result = bplApplyTimeCalculationToData(fk, d, rawInput);
+                                if (!result.ok) {
+                                    showCopyToast(result.message, e);
+                                    if (keepFocus) input.focus();
+                                    return;
+                                }
+                                input.value = "";
+                                renderCenterPanel(centerSearch.value, { skipPanelSave: selectedFormKey === fk });
+                                bplRefreshSelectedTimePanel();
+                                runAutoValidation();
+                                showCopyToast(result.message, e);
+                            };
+                        })(fKey, inlineTimeInput);
+                        inlineTimeInput.addEventListener("change", function(e) {
+                            e.stopPropagation();
+                            applyInlineTimeValue(e, false);
+                        });
+                        inlineTimeInput.addEventListener("keydown", (function(applyFn) {
+                            return function(e) {
+                                e.stopPropagation();
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    applyFn(e, true);
+                                }
+                            };
+                        })(applyInlineTimeValue));
+                        inlineTimeWrap.appendChild(inlineTimeInput);
                         var iconsStr = bplBuildStatusIcons(fData2);
                         var iconsLabel = document.createElement("span");
                         iconsLabel.textContent = iconsStr;
-                        iconsLabel.style.cssText = "font-size:11px;flex-shrink:0;white-space:nowrap;";
+                        iconsLabel.style.cssText = "font-size:11px;flex:0 0 46px;min-width:46px;text-align:left;white-space:nowrap;overflow:hidden;";
+                        formRow.appendChild(inlineTimeWrap);
                         formRow.appendChild(iconsLabel);
                         formRow.appendChild(timeRefLabel);
                         var undoFormBtn = document.createElement("button");
@@ -23252,8 +29025,8 @@
             progressContent.setComplete();
             log("BPL Update: all update items processed");
 
-            // Remove successfully updated auto-populated forms from session
-            // so they don't get re-pulled as stale duplicates in the next session
+            // Remove successfully updated auto-populated forms from the active builder state
+            // so the current UI does not keep stale duplicates after update.
             var removedFromSession = 0;
             for (var ri = 0; ri < updateItems.length; ri++) {
                 var rItem = updateItems[ri];
@@ -23263,7 +29036,7 @@
             }
             if (removedFromSession > 0) {
                 saveSession();
-                log("BPL Update: session saved after removing " + removedFromSession + " successfully updated forms");
+                log("BPL Update: active builder state refreshed after removing " + removedFromSession + " successfully updated forms");
             }
         }
         if (!BPL_CANCELLED && !BPL_ARCHIVE_DEFERRED) await bplExecutePendingArchive();
@@ -23708,7 +29481,7 @@
                 if (guiResult.saveSession) {
                     guiResult.saveSession();
                 }
-                log("BPL: GUI popup closed, session state preserved in localStorage");
+                log("BPL: GUI popup closed, previous-session restore is disabled");
                 if (guiResult.cleanupKeybind) {
                     guiResult.cleanupKeybind();
                 }
@@ -29666,6 +35439,54 @@
         return true;
     }
 
+    function collectAllHasReadyFormModal() {
+        var formEl = document.querySelector("form#modalInput");
+        if (!formEl) return false;
+        var hasGroup = !!formEl.querySelector("div[id^='itemGroupData_'], table[id^='collectTable_'], tr[id^='itemDataCollectRow_']");
+        var hasSave = !!document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
+        return hasGroup || hasSave;
+    }
+
+    async function waitForCollectAllFormReady(timeoutMs) {
+        var max = typeof timeoutMs === "number" ? timeoutMs : 15000;
+        var start = Date.now();
+        var lastLogAt = 0;
+        while (Date.now() - start < max) {
+            if (COLLECT_ALL_CANCELLED || isPaused()) return false;
+
+            if (collectAllHasReadyFormModal()) {
+                log("CollectAll: form modal ready after Collect click");
+                return true;
+            }
+
+            var formOrderDiv = document.getElementById("requireFormOrderDiv");
+            if (formOrderDiv && isFormOrderModalVisible()) {
+                log("CollectAll: delayed form order modal detected while waiting for form");
+                await handleFormOrderModal();
+                await sleep(300);
+                continue;
+            }
+
+            var barcodeDiv = document.getElementById("requireSubjectBarcodeVerifyDiv");
+            if (barcodeDiv && isBarcodeVerifyModalVisible()) {
+                log("CollectAll: delayed barcode modal detected while waiting for form");
+                await APS_RunBarcode();
+                await waitForAnyModalToClose(5000);
+                await sleep(300);
+                continue;
+            }
+
+            var elapsed = Date.now() - start;
+            if (elapsed - lastLogAt >= 2000) {
+                log("CollectAll: waiting for form modal to load after Collect click waited=" + String(elapsed) + "ms");
+                lastLogAt = elapsed;
+            }
+            await sleep(250);
+        }
+        log("CollectAll: form modal did not become ready after Collect click within " + String(max) + "ms");
+        return false;
+    }
+
     // Await modal close: waits until no visible Bootstrap modal or backdrop remains or timeout.
     async function waitForAnyModalToClose(timeoutMs) {
         var max = typeof timeoutMs === "number" ? timeoutMs : 12000;
@@ -30274,6 +36095,17 @@
                         await handleFormOrderModal();
                     }
                 }
+            }
+
+            var formReady = await waitForCollectAllFormReady(18000);
+            if (!formReady) {
+                log("CollectAll: skipping Run Form because form modal never became ready for formId=" + String(pickedFormId));
+                cleanupCollectAllModalArtifacts();
+                addFormToList(formName, "Skipped - form did not open", pickedFormId);
+                await waitForFormTableRefresh(1000);
+                await sleep(250);
+                safety = safety + 1;
+                continue;
             }
 
             log("CollectAll: launching Run Form (" + String(formValueMode) + ") for formId=" + String(pickedFormId));
@@ -33320,6 +39152,123 @@
         return s;
     }
 
+    function normalizeImportIECohortKeywordString(value) {
+        var parts = String(value || "").split(",");
+        var cleaned = [];
+        var seen = {};
+        var i = 0;
+        while (i < parts.length) {
+            var part = parts[i].replace(/\s+/g, " ").trim();
+            var key = part.toLowerCase();
+            if (part && !seen[key]) {
+                seen[key] = true;
+                cleaned.push(part);
+            }
+            i = i + 1;
+        }
+        return cleaned.join(", ");
+    }
+
+    function getImportIECohortKeywordsArray(value) {
+        var normalized = normalizeImportIECohortKeywordString(value);
+        if (!normalized) return [];
+        var raw = normalized.split(",");
+        var out = [];
+        var i = 0;
+        while (i < raw.length) {
+            var kw = normalizeTextForCompare(raw[i]);
+            if (kw) out.push(kw);
+            i = i + 1;
+        }
+        return out;
+    }
+
+    function loadImportIECohortKeywords() {
+        try {
+            return normalizeImportIECohortKeywordString(localStorage.getItem(STORAGE_IMPORT_IE_COHORT_KEYWORDS) || "");
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function saveImportIECohortKeywords(value) {
+        var normalized = normalizeImportIECohortKeywordString(value);
+        try {
+            if (normalized) {
+                localStorage.setItem(STORAGE_IMPORT_IE_COHORT_KEYWORDS, normalized);
+            } else {
+                localStorage.removeItem(STORAGE_IMPORT_IE_COHORT_KEYWORDS);
+            }
+        } catch (e) {}
+        return normalized;
+    }
+
+    async function applyImportIECohortKeywords(cohortKeywordString) {
+        var keywords = getImportIECohortKeywordsArray(cohortKeywordString);
+        if (keywords.length === 0) {
+            log("ImportIE: cohort keywords empty, skipping cohort selection");
+            return { applied: false, matched: 0, missing: [] };
+        }
+        var cohortSel = document.querySelector("select#cohorts");
+        if (!cohortSel) {
+            cohortSel = await waitForElement("select#cohorts", 5000);
+        }
+        if (!cohortSel) {
+            log("ImportIE: select#cohorts not found, cannot apply cohort keywords=" + JSON.stringify(cohortKeywordString));
+            return { applied: false, matched: 0, missing: keywords };
+        }
+        await waitForSelectOptions(cohortSel, 1, 5000);
+        var opts = cohortSel.querySelectorAll("option");
+        var matchedValues = [];
+        var matchedByKeyword = {};
+        var oi = 0;
+        while (oi < opts.length) {
+            var opt = opts[oi];
+            var val = String(opt.value || "").trim();
+            var txt = normalizeTextForCompare(opt.textContent || "");
+            if (val && txt) {
+                var ki = 0;
+                while (ki < keywords.length) {
+                    if (txt.indexOf(keywords[ki]) !== -1) {
+                        matchedValues.push(val);
+                        matchedByKeyword[keywords[ki]] = true;
+                        break;
+                    }
+                    ki = ki + 1;
+                }
+            }
+            oi = oi + 1;
+        }
+        var missing = [];
+        var mi = 0;
+        while (mi < keywords.length) {
+            if (!matchedByKeyword[keywords[mi]]) missing.push(keywords[mi]);
+            mi = mi + 1;
+        }
+        if (matchedValues.length === 0) {
+            log("ImportIE: no cohorts matched keywords=" + JSON.stringify(keywords));
+            return { applied: false, matched: 0, missing: missing };
+        }
+        var vi = 0;
+        while (vi < opts.length) {
+            opts[vi].selected = matchedValues.indexOf(String(opts[vi].value || "").trim()) !== -1;
+            vi = vi + 1;
+        }
+        if (typeof jQuery !== "undefined" && jQuery && jQuery.fn && jQuery.fn.select2) {
+            try {
+                jQuery(cohortSel).select2("val", matchedValues);
+            } catch (e) {
+                log("ImportIE: jQuery select2 cohort set error=" + String(e));
+                select2TriggerChange(cohortSel);
+            }
+        } else {
+            select2TriggerChange(cohortSel);
+        }
+        await sleep(importIERandomDelay());
+        log("ImportIE: applied cohort keywords=" + JSON.stringify(cohortKeywordString) + " matchedValues=" + JSON.stringify(matchedValues) + " missing=" + JSON.stringify(missing));
+        return { applied: true, matched: matchedValues.length, missing: missing };
+    }
+
     function extractIECode(text) {
         var s = (text + "").trim();
         var match = IE_CODE_REGEX.exec(s);
@@ -35734,12 +41683,69 @@
         var footerBar = document.createElement("div");
         footerBar.style.display = "flex";
         footerBar.style.alignItems = "center";
-        footerBar.style.justifyContent = "flex-end";
+        footerBar.style.justifyContent = "space-between";
         footerBar.style.gap = "10px";
         footerBar.style.padding = "12px 16px";
         footerBar.style.borderTop = "1px solid #333";
         footerBar.style.flexShrink = "0";
         footerBar.style.background = "#0d0d0d";
+
+        var cohortControls = document.createElement("div");
+        cohortControls.style.display = "flex";
+        cohortControls.style.alignItems = "center";
+        cohortControls.style.gap = "8px";
+        cohortControls.style.minWidth = "0";
+        cohortControls.style.flex = "1";
+
+        var cohortLabel = document.createElement("label");
+        cohortLabel.textContent = "Cohort";
+        cohortLabel.style.color = "#ddd";
+        cohortLabel.style.fontSize = "12px";
+        cohortLabel.style.fontWeight = "600";
+        cohortLabel.style.margin = "0";
+        cohortLabel.style.flexShrink = "0";
+
+        var cohortInput = document.createElement("input");
+        cohortInput.type = "text";
+        cohortInput.placeholder = "e.g. Screening, Panel A1a";
+        cohortInput.value = loadImportIECohortKeywords();
+        cohortInput.style.width = "260px";
+        cohortInput.style.maxWidth = "32vw";
+        cohortInput.style.padding = "7px 9px";
+        cohortInput.style.borderRadius = "4px";
+        cohortInput.style.border = "1px solid #444";
+        cohortInput.style.background = "#1a1a1a";
+        cohortInput.style.color = "#fff";
+        cohortInput.style.fontSize = "12px";
+        cohortInput.style.outline = "none";
+
+        var cohortSaveBtn = document.createElement("button");
+        cohortSaveBtn.textContent = "Save";
+        cohortSaveBtn.style.background = "#2a2a2a";
+        cohortSaveBtn.style.color = "#fff";
+        cohortSaveBtn.style.border = "1px solid #444";
+        cohortSaveBtn.style.padding = "7px 12px";
+        cohortSaveBtn.style.borderRadius = "4px";
+        cohortSaveBtn.style.cursor = "pointer";
+        cohortSaveBtn.style.fontSize = "12px";
+        cohortSaveBtn.style.fontWeight = "600";
+
+        var cohortSavedIndicator = document.createElement("span");
+        cohortSavedIndicator.style.fontSize = "11px";
+        cohortSavedIndicator.style.whiteSpace = "nowrap";
+        cohortSavedIndicator.style.color = normalizeImportIECohortKeywordString(cohortInput.value) ? "#5cb85c" : "#888";
+        cohortSavedIndicator.textContent = normalizeImportIECohortKeywordString(cohortInput.value) ? "Saved" : "No cohort filter";
+
+        cohortControls.appendChild(cohortLabel);
+        cohortControls.appendChild(cohortInput);
+        cohortControls.appendChild(cohortSaveBtn);
+        cohortControls.appendChild(cohortSavedIndicator);
+
+        var actionControls = document.createElement("div");
+        actionControls.style.display = "flex";
+        actionControls.style.alignItems = "center";
+        actionControls.style.gap = "10px";
+        actionControls.style.flexShrink = "0";
 
         var selectAllBtn = document.createElement("button");
         selectAllBtn.textContent = "Select All";
@@ -35777,6 +41783,19 @@
                 }
             }
             updateSelectedCountAndConfirmState();
+        });
+
+        cohortInput.addEventListener("input", function () {
+            cohortSavedIndicator.textContent = "Unsaved";
+            cohortSavedIndicator.style.color = "#ffb74d";
+        });
+        cohortSaveBtn.addEventListener("click", function () {
+            var savedCohorts = normalizeImportIECohortKeywordString(cohortInput.value);
+            saveImportIECohortKeywords(savedCohorts);
+            cohortInput.value = savedCohorts;
+            cohortSavedIndicator.textContent = savedCohorts ? "Saved" : "No cohort filter";
+            cohortSavedIndicator.style.color = savedCohorts ? "#5cb85c" : "#888";
+            log("ImportIE: saved cohort keywords=" + JSON.stringify(savedCohorts));
         });
 
         var clearAllBtn = document.createElement("button");
@@ -35841,6 +41860,11 @@
 
         confirmBtn.addEventListener("click", function () {
             log("ImportIE: Confirm clicked in review panel");
+            var cohortKeywordsForRun = normalizeImportIECohortKeywordString(cohortInput.value);
+            saveImportIECohortKeywords(cohortKeywordsForRun);
+            cohortInput.value = cohortKeywordsForRun;
+            cohortSavedIndicator.textContent = cohortKeywordsForRun ? "Saved" : "No cohort filter";
+            cohortSavedIndicator.style.color = cohortKeywordsForRun ? "#5cb85c" : "#888";
             captureSelectionState();
             var selected = [];
             var gi = 0;
@@ -35863,7 +41887,7 @@
             }
             log("ImportIE: confirmed " + String(selected.length) + " items");
             overlay.remove();
-            onConfirm(selected);
+            onConfirm(selected, cohortKeywordsForRun);
         });
 
         var codeSortToggleBtn = document.createElement("button");
@@ -35951,11 +41975,13 @@
             }
         });
 
-        footerBar.appendChild(selectAllBtn);
-        footerBar.appendChild(codeSortToggleBtn);
-        footerBar.appendChild(dupToggleBtn);
-        footerBar.appendChild(clearAllBtn);
-        footerBar.appendChild(confirmBtn);
+        actionControls.appendChild(selectAllBtn);
+        actionControls.appendChild(codeSortToggleBtn);
+        actionControls.appendChild(dupToggleBtn);
+        actionControls.appendChild(clearAllBtn);
+        actionControls.appendChild(confirmBtn);
+        footerBar.appendChild(cohortControls);
+        footerBar.appendChild(actionControls);
         container.appendChild(footerBar);
 
         overlay.appendChild(container);
@@ -36109,9 +42135,13 @@
         };
     }
 
-    async function executeSelectedMappings(selectedMappings, existingCodeSet) {
+    async function executeSelectedMappings(selectedMappings, existingCodeSet, cohortKeywordString) {
         log("ImportIE: executeSelectedMappings start count=" + String(selectedMappings.length));
         IMPORT_IE_CANCELED = false;
+        var cohortKeywordsForRun = normalizeImportIECohortKeywordString(cohortKeywordString);
+        if (cohortKeywordsForRun) {
+            log("ImportIE: cohort keyword filter active=" + JSON.stringify(cohortKeywordsForRun));
+        }
         var progress = buildProgressPopup(selectedMappings);
         var successes = 0;
         var failures = 0;
@@ -36314,6 +42344,25 @@
                 continue;
             }
             await sleep(importIERandomDelay() + 300);
+
+            if (cohortKeywordsForRun) {
+                log("ImportIE: step d2 - applying cohort keywords=" + JSON.stringify(cohortKeywordsForRun));
+                var cohortApplyResult = await applyImportIECohortKeywords(cohortKeywordsForRun);
+                if (!cohortApplyResult.applied || cohortApplyResult.matched === 0 || (cohortApplyResult.missing && cohortApplyResult.missing.length > 0)) {
+                    var cohortErr = !cohortApplyResult.applied || cohortApplyResult.matched === 0 ? "No cohort matched the saved keyword(s)" : "Missing cohort keyword match: " + cohortApplyResult.missing.join(", ");
+                    log("ImportIE: cohort keyword selection failed; " + cohortErr);
+                    progress.updateItem(mi, "Failed", cohortErr);
+                    failures = failures + 1;
+                    progress.updateSummary(successes, failures);
+                    var cbCohort = document.querySelector("#ajaxModal .modal-content button.close");
+                    if (cbCohort) {
+                        cbCohort.click();
+                        await waitForIEModalClose(5000);
+                    }
+                    mi = mi + 1;
+                    continue;
+                }
+            }
 
             log("ImportIE: step e - selecting scheduled activity value='" + String(mapping.ids.scheduledActivityValue) + "'");
             var schedSelE = document.querySelector("select#scheduledActivity");
@@ -36968,13 +43017,13 @@
                 }
 
                 log("ImportIE: step 5 - showing review panel");
-                buildImportIEReviewPanel(existingCodeSet, mappings, eligibilityItemPool, collectionDurationMs, function (selectedMappings) {
+                buildImportIEReviewPanel(existingCodeSet, mappings, eligibilityItemPool, collectionDurationMs, function (selectedMappings, cohortKeywordString) {
                     log("ImportIE: user confirmed " + String(selectedMappings.length) + " mappings");
                     if (selectedMappings.length === 0) {
                         log("ImportIE: no items selected, stopping");
                         return;
                     }
-                    executeSelectedMappings(selectedMappings, existingCodeSet);
+                    executeSelectedMappings(selectedMappings, existingCodeSet, cohortKeywordString);
                 });
 
             } catch (err) {
@@ -48231,6 +54280,9 @@
                 localStorage.removeItem(STORAGE_CLEAR_MAPPING_POPUP);
             } else if (runMode === RUNMODE_ELIG_IMPORT) {
                 localStorage.removeItem(STORAGE_IMPORT_ELIG_POPUP);
+            } else if (runMode === RUNMODE_LPB) {
+                localStorage.removeItem(STORAGE_LPB_PENDING);
+                localStorage.removeItem(STORAGE_LPB_CANCEL);
             }
         } catch (e) {}
     }
@@ -50582,6 +56634,20 @@
         addExistingSubjectBtn.onmouseenter = () => { addExistingSubjectBtn.style.background = "#4a37a0"; };
         addExistingSubjectBtn.onmouseleave = () => { addExistingSubjectBtn.style.background = "#5b43c7"; };
 
+        var addNewSubjectBtn = document.createElement("button");
+        addNewSubjectBtn.textContent = "Add New Subject";
+        addNewSubjectBtn.style.background = "#2563eb";
+        addNewSubjectBtn.style.color = "#fff";
+        addNewSubjectBtn.style.border = "none";
+        addNewSubjectBtn.style.borderRadius = scale(BUTTON_BORDER_RADIUS_PX);
+        addNewSubjectBtn.style.padding = scale(BUTTON_PADDING_PX);
+        addNewSubjectBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
+        addNewSubjectBtn.style.cursor = "pointer";
+        addNewSubjectBtn.style.fontWeight = "500";
+        addNewSubjectBtn.style.transition = "background 0.2s";
+        addNewSubjectBtn.onmouseenter = () => { addNewSubjectBtn.style.background = "#1d4ed8"; };
+        addNewSubjectBtn.onmouseleave = () => { addNewSubjectBtn.style.background = "#2563eb"; };
+
         // var saBuilderBtn = document.createElement("button");
         // saBuilderBtn.textContent = "Scheduled Activities Builder";
         // saBuilderBtn.style.background = "#5b43c7";
@@ -50661,6 +56727,36 @@
         searchMethodsBtn.addEventListener("click", function() {
             log("[SearchMethods] Button clicked");
             openMethodsLibraryModal();
+        });
+
+        var formalExpressionEditorBtn = document.createElement("button");
+        formalExpressionEditorBtn.textContent = "Method Editor";
+        formalExpressionEditorBtn.style.background = "#2563eb";
+        formalExpressionEditorBtn.style.color = "#fff";
+        formalExpressionEditorBtn.style.border = "none";
+        formalExpressionEditorBtn.style.borderRadius = "6px";
+        formalExpressionEditorBtn.style.padding = "8px";
+        formalExpressionEditorBtn.style.cursor = "pointer";
+        formalExpressionEditorBtn.onmouseenter = function() { this.style.background = "#1d4ed8"; };
+        formalExpressionEditorBtn.onmouseleave = function() { this.style.background = "#2563eb"; };
+        formalExpressionEditorBtn.addEventListener("click", function() {
+            log("[FormalExpressionEditor] Button clicked");
+            runFormalExpressionEditor();
+        });
+
+        var formPreviewBtn = document.createElement("button");
+        formPreviewBtn.textContent = "Form Preview";
+        formPreviewBtn.style.background = "#0d9488";
+        formPreviewBtn.style.color = "#fff";
+        formPreviewBtn.style.border = "none";
+        formPreviewBtn.style.borderRadius = "6px";
+        formPreviewBtn.style.padding = "8px";
+        formPreviewBtn.style.cursor = "pointer";
+        formPreviewBtn.onmouseenter = function() { this.style.background = "#0f766e"; };
+        formPreviewBtn.onmouseleave = function() { this.style.background = "#0d9488"; };
+        formPreviewBtn.addEventListener("click", function() {
+            log("[FormPreview] Button clicked");
+            runFormPreview();
         });
 
         var archiveUpdateFormsBtn = document.createElement("button");
@@ -50878,6 +56974,24 @@
         });
         PULL_LAB_BARCODE_BUTTON_REF = pullLabBarcodeBtn;
 
+        var labPanelsBuilderBtn = document.createElement("button");
+        labPanelsBuilderBtn.textContent = "Lab Panels Builder";
+        labPanelsBuilderBtn.style.background = "#0d9488";
+        labPanelsBuilderBtn.style.color = "#fff";
+        labPanelsBuilderBtn.style.border = "none";
+        labPanelsBuilderBtn.style.borderRadius = scale(BUTTON_BORDER_RADIUS_PX);
+        labPanelsBuilderBtn.style.padding = scale(BUTTON_PADDING_PX);
+        labPanelsBuilderBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
+        labPanelsBuilderBtn.style.cursor = "pointer";
+        labPanelsBuilderBtn.style.fontWeight = "500";
+        labPanelsBuilderBtn.style.transition = "background 0.2s";
+        labPanelsBuilderBtn.onmouseenter = function() { this.style.background = "#0f766e"; };
+        labPanelsBuilderBtn.onmouseleave = function() { this.style.background = "#0d9488"; };
+        labPanelsBuilderBtn.addEventListener("click", function() {
+            log("Lab Panels Builder: button clicked");
+            runLabPanelsBuilder();
+        });
+
         var importFromLibBtn = document.createElement("button");
         importFromLibBtn.textContent = "Import from Library";
         importFromLibBtn.style.background = "#38dae6";
@@ -50964,7 +57078,7 @@
 
         // Apply glassmorphism theme to all panel buttons if glass theme is active
         if (glass) {
-            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, parseMethodBtn, searchMethodsBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, findFormAndEventsBtn, editStudyEventsBtn, editItemRefBtn, pullLabBarcodeBtn, clearMappingBtn, collectAllBtn, svcBtn, downloadDtsBtn];
+            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, addNewSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, formPreviewBtn, parseMethodBtn, searchMethodsBtn, formalExpressionEditorBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, findFormAndEventsBtn, editStudyEventsBtn, editItemRefBtn, pullLabBarcodeBtn, labPanelsBuilderBtn, clearMappingBtn, collectAllBtn, svcBtn, downloadDtsBtn];
             for (var gi = 0; gi < allPanelBtns.length; gi++) {
                 var gb = allPanelBtns[gi];
                 gb.className = "ie-btn-primary";
@@ -50991,10 +57105,14 @@
             "Import Cohort Subjects": runNonScrnBtn,
             "Pull Barcode": runBarcodeBtn,
             "Pull Lab Barcode": pullLabBarcodeBtn,
+            "Lab Panels Builder": labPanelsBuilderBtn,
             "Add Existing Subject": addExistingSubjectBtn,
+            "Add New Subject": addNewSubjectBtn,
             "Search Methods": searchMethodsBtn,
+            "Formal Expression Editor": formalExpressionEditorBtn,
             "PLAP Builder": bplBtn,
             "Import from Library": importFromLibBtn,
+            "Form Preview": formPreviewBtn,
             "Run Form": runFormBtn,
             "Collect All": collectAllBtn,
             "Import I/E": importEligBtn,
@@ -51149,6 +57267,11 @@
         addExistingSubjectBtn.addEventListener("click", async function () {
             log("Add Existing Subject: button clicked");
             await startAddExistingSubject();
+        });
+        addNewSubjectBtn.addEventListener("click", async function () {
+            status.textContent = "Preparing Add New Subject...";
+            log("Add New Subject: button clicked");
+            await startAddNewSubject();
         });
         runAddCohortBtn.addEventListener("click", function () {
             status.textContent = "Preparing Add Cohort Subjects...";
@@ -52021,8 +58144,15 @@
         } catch (e) {
             runModeRaw = null;
         }
+        if (runModeRaw === RUNMODE_LPB || lpbLoadPending()) {
+            if (lpbResumePendingRun()) return;
+        }
         if (runModeRaw === RUNMODE_ADD_EXISTING_SUBJECT) {
             processAESOnPageLoad();
+            return;
+        }
+        if (runModeRaw === RUNMODE_ADD_NEW_SUBJECT) {
+            processAddNewSubjectOnPageLoad();
             return;
         }
 
@@ -52091,6 +58221,10 @@
         }
         var onStudyShow = isStudyShowPage();
         if (onStudyShow) {
+            if (getRunMode() === RUNMODE_ADD_NEW_SUBJECT) {
+                processAddNewSubjectOnPageLoad();
+                return;
+            }
             processStudyShowPage();
             processStudyShowPageForNonScrn();
             processStudyShowPageForAddCohort();
@@ -52122,9 +58256,12 @@
             var amode = getRunMode();
             var autoImport = getQueryParam("autocohortimport");
             var autoAdd = getQueryParam("autocohortadd");
+            var autoAddNewSubject = getQueryParam("autoaddnewsubject");
             var autoNonScreen = getQueryParam("autocohortnonscreen");
             if (amode === "epochImport" || autoImport === "1") {
                 processCohortShowPageImportNonScrn();
+            } else if (amode === RUNMODE_ADD_NEW_SUBJECT || autoAddNewSubject === "1") {
+                processAddNewSubjectOnPageLoad();
             } else if (amode === "epochAddCohort" || autoAdd === "1") {
                 processCohortShowPageAddCohort();
             } else if (autoNonScreen === "1") {
