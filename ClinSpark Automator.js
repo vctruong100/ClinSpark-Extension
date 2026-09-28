@@ -11180,11 +11180,11 @@
                     var fk = getFormDataKey(sv, fEntry.value, fEntry.index);
                     var fd = formDataStore[fk] || getDefaultFormData();
                                         var isAuto = fEntry.autoPopulated || fd.autoPopulated;
-                    if (isAuto && fEntry.archiveRequested) {
-                        log("BPL: skipping auto-populated item marked Deleted so it can be removed: " + fEntry.text + " in segment " + sText);
-                        continue;
-                    }
                     if (isAuto && !fd.modified) {
+                        if (fEntry.archiveRequested) {
+                            log("BPL: skipping unmodified auto-populated item marked Deleted so it can be removed: " + fEntry.text + " in segment " + sText);
+                            continue;
+                        }
                         log("BPL: skipping unmodified auto-populated item " + fEntry.text + " in segment " + sText);
                         continue;
                     }
@@ -11229,7 +11229,11 @@
                             label: labelStr2,
                             status: "Pending"
                         });
-                        log("BPL: queued modified auto-populated item for update: " + fEntry.text + " in segment " + sText + " editHref=" + (fd.editHref || ""));
+                        if (fEntry.archiveRequested) {
+                            log("BPL: queued modified auto-populated item marked Deleted for pre-archive update: " + fEntry.text + " in segment " + sText + " editHref=" + (fd.editHref || ""));
+                        } else {
+                            log("BPL: queued modified auto-populated item for update: " + fEntry.text + " in segment " + sText + " editHref=" + (fd.editHref || ""));
+                        }
                         continue;
                     }
                     var evts = fd.studyEvents || [];
@@ -11738,7 +11742,8 @@
                 if (!entry.archiveRequested || !(entry.autoPopulated || data.autoPopulated)) continue;
                 var id = bplGetScheduledActivityId(data.editHref || entry.editHref);
                 if (!id || data.archived) continue;
-                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, saRowIndex:data.saRowIndex });
+                var originalRefActivity = data.originalValues && data.originalValues.refActivity !== undefined ? !!data.originalValues.refActivity : !!data.refActivity;
+                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, originalRefActivity:originalRefActivity, saRowIndex:data.saRowIndex });
             }
         }
         return bplSortArchiveItems(result);
@@ -11790,18 +11795,75 @@
         proceed.onclick = function() { popup.close(); onConfirm(); };
     }
 
-    async function bplExecutePendingArchive() {
-        if (!BPL_PENDING_ARCHIVE_ITEMS.length || !BPL_PENDING_ARCHIVE_REASON) return;
-        var items = BPL_PENDING_ARCHIVE_ITEMS.slice();
-        var reason = BPL_PENDING_ARCHIVE_REASON;
+    async function bplExecuteArchiveItemsNow(items, reason, keepPendingCleanup) {
+        if (!items || !items.length || !reason) return [];
         for (var ri = 0; ri < items.length; ri++) items[ri].archiveReason = reason;
-        BPL_PENDING_ARCHIVE_ITEMS = [];
-        BPL_PENDING_ARCHIVE_REASON = "";
-        BPL_ARCHIVE_DEFERRED = false;
         if (BPL_PROGRESS_POPUP_REF) { try { BPL_PROGRESS_POPUP_REF.close(); } catch (e) {} BPL_PROGRESS_POPUP_REF = null; }
         BPL_CANCELLED = false;
         var results = await aprExecuteDeletion(items, reason);
-        if (BPL_PENDING_ARCHIVE_CLEANUP) { BPL_PENDING_ARCHIVE_CLEANUP(results); BPL_PENDING_ARCHIVE_CLEANUP = null; }
+        if (BPL_PENDING_ARCHIVE_CLEANUP) {
+            BPL_PENDING_ARCHIVE_CLEANUP(results);
+            if (!keepPendingCleanup) BPL_PENDING_ARCHIVE_CLEANUP = null;
+        }
+        return results || [];
+    }
+
+    async function bplExecutePendingArchive() {
+        if (!BPL_PENDING_ARCHIVE_ITEMS.length || !BPL_PENDING_ARCHIVE_REASON) return [];
+        var items = BPL_PENDING_ARCHIVE_ITEMS.slice();
+        var reason = BPL_PENDING_ARCHIVE_REASON;
+        BPL_PENDING_ARCHIVE_ITEMS = [];
+        BPL_PENDING_ARCHIVE_REASON = "";
+        BPL_ARCHIVE_DEFERRED = false;
+        return await bplExecuteArchiveItemsNow(items, reason, false);
+    }
+
+    function bplTakePreAddReferenceArchiveItems(addItems) {
+        if (!BPL_PENDING_ARCHIVE_ITEMS.length || !addItems || !addItems.length) return [];
+        var refSegments = {};
+        for (var ai = 0; ai < addItems.length; ai++) {
+            if (addItems[ai] && addItems[ai].refActivity) {
+                refSegments[String(addItems[ai].segmentText || addItems[ai].segment || "")] = true;
+            }
+        }
+        if (!Object.keys(refSegments).length) return [];
+        var selected = [];
+        var remaining = [];
+        for (var pi = 0; pi < BPL_PENDING_ARCHIVE_ITEMS.length; pi++) {
+            var item = BPL_PENDING_ARCHIVE_ITEMS[pi];
+            var itemSegment = String((item && item.segment) || "");
+            var isOriginalReference = !!(item && (item.originalRefActivity || item.refActivity));
+            if (refSegments[itemSegment] && isOriginalReference) {
+                selected.push(item);
+            } else {
+                remaining.push(item);
+            }
+        }
+        BPL_PENDING_ARCHIVE_ITEMS = remaining;
+        if (selected.length > 0) {
+            log("BPL: pre-add archive priority found " + selected.length + " old reference activity form(s) to remove before adding new reference activity form(s)");
+        }
+        return selected;
+    }
+
+    function bplRemovalResultsHaveFailures(results) {
+        for (var i = 0; i < (results || []).length; i++) {
+            if (results[i] && results[i].status === "Failed") return true;
+        }
+        return false;
+    }
+
+    async function bplExecutePreAddReferenceArchiveIfNeeded(addItems) {
+        var items = bplTakePreAddReferenceArchiveItems(addItems);
+        if (!items.length) return true;
+        var results = await bplExecuteArchiveItemsNow(items, BPL_PENDING_ARCHIVE_REASON, true);
+        if (APR_PROGRESS_POPUP_REF) { try { APR_PROGRESS_POPUP_REF.close(); } catch (e) {} APR_PROGRESS_POPUP_REF = null; APR_CANCELLED = false; }
+        if (bplRemovalResultsHaveFailures(results)) {
+            log("BPL: pre-add reference activity archive failed; skipping add phase to avoid reference activity conflict");
+            return false;
+        }
+        log("BPL: pre-add reference activity archive completed; continuing add phase");
+        return true;
     }
 
     function bplStartConfirmedWorkflow(updateItems, mappedItems, archiveItems, reason) {
@@ -12179,6 +12241,11 @@
         // The update phase already completed successfully at this point.
         BPL_CANCELLED = false;
 
+        var preAddReferenceReady = await bplExecutePreAddReferenceArchiveIfNeeded(addItems);
+        if (!preAddReferenceReady) {
+            return;
+        }
+
         await sleep(1000);
 
         if (BPL_CANCELLED) {
@@ -12190,6 +12257,11 @@
     }
 
     async function startBPLAddProcess(mappedItems) {
+        var preAddReferenceReady = await bplExecutePreAddReferenceArchiveIfNeeded(mappedItems);
+        if (!preAddReferenceReady) {
+            return;
+        }
+
         var existingItems = [];
         try {
             var raw = localStorage.getItem(STORAGE_BPL_EXISTING);
@@ -17409,6 +17481,81 @@
         return text.indexOf("archive") !== -1 && text.indexOf("un-archive") === -1;
     }
 
+    async function aprPostArchiveRequest(archiveUrl, id, reason) {
+        if (!archiveUrl) {
+            aprLog("archive URL missing for id " + id);
+            return false;
+        }
+        var absoluteUrl = "";
+        try {
+            absoluteUrl = new URL(archiveUrl, location.origin).href;
+        } catch (e) {
+            aprLog("invalid archive URL for id " + id + ": " + String(archiveUrl));
+            return false;
+        }
+
+        try {
+            aprLog("opening archive form safely for id " + id);
+            var getResp = await fetch(absoluteUrl, {
+                credentials: "include",
+                headers: { "X-Requested-With": "XMLHttpRequest" }
+            });
+            if (!getResp.ok) {
+                aprLog("archive form request failed for id " + id + " status=" + getResp.status);
+                return false;
+            }
+            var html = await getResp.text();
+            var tmp = document.createElement("div");
+            tmp.innerHTML = html;
+            var form = tmp.querySelector("form#modalInput") || tmp.querySelector("form");
+            var params = new URLSearchParams();
+            if (form) {
+                var fields = form.querySelectorAll("input[name], textarea[name], select[name]");
+                for (var i = 0; i < fields.length; i++) {
+                    var field = fields[i];
+                    var name = field.getAttribute("name");
+                    if (!name) continue;
+                    if ((field.type === "checkbox" || field.type === "radio") && !field.checked) continue;
+                    params.set(name, field.value || "");
+                }
+            }
+            params.set("archived", "on");
+            params.set("reasonForChange", reason || "Archiving forms");
+
+            var postResp = await fetch(absoluteUrl, {
+                method: "POST",
+                credentials: "include",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest"
+                },
+                body: params.toString()
+            });
+            var result = await postResp.text();
+            if (!postResp.ok) {
+                aprLog("archive POST failed for id " + id + " status=" + postResp.status);
+                return false;
+            }
+            if (result.indexOf("successpath:") !== 0 && result.toLowerCase().indexOf("error") !== -1) {
+                aprLog("archive POST returned a validation/error response for id " + id);
+                return false;
+            }
+            try {
+                if (typeof loadScheduledActivities === "function") {
+                    loadScheduledActivities();
+                }
+            } catch (refreshErr) {
+                aprLog("loadScheduledActivities failed after archive id " + id + ": " + String(refreshErr));
+            }
+            await sleep(1200);
+            aprLog("archive POST completed safely for id " + id);
+            return true;
+        } catch (err) {
+            aprLog("archive request failed for id " + id + ": " + String(err));
+            return false;
+        }
+    }
+
     async function aprClickRemovalActionForRow(row, id) {
         var toggleBtn = row.querySelector("button.dropdown-toggle");
         if (toggleBtn) {
@@ -17423,14 +17570,17 @@
         }
         var archiveLink = row.querySelector("a[href*='archivescheduledactivity/" + id + "']");
         if (aprIsArchiveActionLink(archiveLink)) {
-            archiveLink.click();
-            aprLog("clicked archive UI for id " + id);
-            return { action: "archive", clicked: true };
+            var archiveHref = archiveLink.getAttribute("href") || "";
+            aprLog("prepared safe archive request for id " + id);
+            return { action: "archive", clicked: true, archiveUrl: archiveHref };
         }
         return { action: "none", clicked: false };
     }
 
-    async function aprCompleteArchiveModal(id, reason) {
+    async function aprCompleteArchiveModal(id, reason, archiveUrl) {
+        if (archiveUrl) {
+            return await aprPostArchiveRequest(archiveUrl, id, reason);
+        }
         var modal = null;
         if (typeof waitForSAModal === "function") {
             modal = await waitForSAModal(15000);
@@ -17657,7 +17807,7 @@
                 }
 
                 if (actionResult.action === "archive") {
-                    var archived = await aprCompleteArchiveModal(item.id, item.archiveReason);
+                    var archived = await aprCompleteArchiveModal(item.id, item.archiveReason, actionResult.archiveUrl);
                     if (!archived) {
                         pItem.status = "Failed";
                         progressContent.updateItem(idx, "Failed");
@@ -19851,6 +20001,10 @@
         var normalizedTarget = isVisibilityField
         ? normalizeVisibilityText(targetText)
         : normalizeSAText(targetText).toLowerCase();
+        if (!normalizedTarget) {
+            log("Archive/Update Forms: empty target text for " + selectId + "; refusing to select placeholder");
+            return false;
+        }
 
         var opts = sel.querySelectorAll("option");
         var matchValue = null;
@@ -19858,10 +20012,13 @@
         // First pass: exact match (strict comparison)
         for (var i = 0; i < opts.length; i++) {
             var opt = opts[i];
+            if (opt.disabled) continue;
             var optText = normalizeSAText(opt.textContent);
             var optNorm = isVisibilityField
             ? normalizeVisibilityText(optText)
             : optText.toLowerCase();
+            var optValue = (opt.value || "").trim();
+            if (!optNorm || (isVisibilityField && !optValue)) continue;
 
             // Strict comparison - both normalized texts must match exactly
             if (optNorm === normalizedTarget) {
@@ -19876,7 +20033,10 @@
         if (!matchValue && isVisibilityField) {
             for (var j = 0; j < opts.length; j++) {
                 var opt2 = opts[j];
+                if (opt2.disabled) continue;
                 var optText2 = normalizeVisibilityText(opt2.textContent);
+                var optValue2 = (opt2.value || "").trim();
+                if (!optText2 || !optValue2) continue;
 
                 if (optText2.indexOf(normalizedTarget) !== -1 || normalizedTarget.indexOf(optText2) !== -1) {
                     matchValue = opt2.value;
@@ -20024,8 +20184,9 @@
         if (!sel) return false;
         var selectedOpt = sel.options[sel.selectedIndex];
         if (!selectedOpt) return false;
-        var selectedText = normalizeSAText(selectedOpt.textContent);
-        var expected = normalizeSAText(expectedText);
+        var isVisibilityField = selectId.indexOf("visible") === 0;
+        var selectedText = isVisibilityField ? normalizeVisibilityText(selectedOpt.textContent) : normalizeSAText(selectedOpt.textContent);
+        var expected = isVisibilityField ? normalizeVisibilityText(expectedText) : normalizeSAText(expectedText);
         return selectedText.toLowerCase() === expected.toLowerCase();
     }
 
@@ -20067,10 +20228,17 @@
     // Set Select2 value by text with retry and verification
     async function setSelect2ValueByTextVerified(selectId, targetText, maxRetries) {
         var retries = maxRetries || 3;
+        var isVisibilityField = selectId.indexOf("visible") === 0;
         for (var attempt = 0; attempt < retries; attempt++) {
             if (attempt > 0) {
                 log("Archive/Update Forms: retry " + attempt + " for " + selectId + " = '" + targetText + "'");
                 await sleep(800);
+            }
+            if (isVisibilityField) {
+                var optionsReady = await waitForSelect2HasOptions(selectId, attempt === 0 ? 10000 : 6000);
+                if (!optionsReady) {
+                    log("Archive/Update Forms: options not ready for " + selectId + " before selecting '" + targetText + "' (attempt " + (attempt + 1) + ")");
+                }
             }
             var set = await setSelect2ValueByText(selectId, targetText);
             if (set) {
@@ -20677,83 +20845,103 @@
                             if (newVisModal) {
                                 await sleep(800);
 
-                                var visSuccess = true;
-
-                                // 1. Activity Plan
-                                if (visibilityProps.activityPlan) {
-                                    var apSet = await setSelect2ValueByText("visibleActivityPlan", visibilityProps.activityPlan);
-                                    if (!apSet) {
-                                        visSuccess = false;
-                                    } else {
-                                        await sleep(500);
-                                        await waitForSelect2OptionsChange("visibleScheduledActivity", 5000);
-                                        await sleep(500);
-                                    }
-                                }
-
-                                // 2. Scheduled Activity
-                                if (visSuccess && visibilityProps.scheduledActivity) {
-                                    var targetSA = rebuildScheduledActivityForTarget(visibilityProps.scheduledActivity, occ.eventText);
-                                    var saSet = false;
-                                    for (var retry = 0; retry < 3; retry++) {
-                                        saSet = await setSelect2ValueByText("visibleScheduledActivity", targetSA);
-                                        if (saSet) break;
+                                var visSuccess = false;
+                                var visValidationText = "";
+                                for (var visAttempt = 0; visAttempt < 3 && !ARCHIVE_UPDATE_FORMS_CANCELLED; visAttempt++) {
+                                    if (visAttempt > 0) {
+                                        log("Archive/Update Forms: Step 4 - retrying visibility configuration after validation issue (attempt " + (visAttempt + 1) + ")");
                                         await sleep(1000);
                                     }
-                                    if (!saSet) {
-                                        visSuccess = false;
-                                    } else {
-                                        await sleep(500);
-                                        await waitForSelect2OptionsChange("visibleItemRef", 5000);
-                                        await sleep(500);
-                                    }
-                                }
 
-                                // 3. Item
-                                if (visSuccess && visibilityProps.item) {
-                                    var itemSet = false;
-                                    for (var retry = 0; retry < 3; retry++) {
-                                        itemSet = await setSelect2ValueByText("visibleItemRef", visibilityProps.item);
-                                        if (itemSet) break;
-                                        await sleep(1000);
-                                    }
-                                    if (!itemSet) {
-                                        visSuccess = false;
-                                    } else {
-                                        await sleep(500);
-                                        await waitForSelect2OptionsChange("visibleCodeListItem", 5000);
-                                        await sleep(500);
-                                    }
-                                }
+                                    var attemptOk = true;
 
-                                // 4. Item Value
-                                if (visSuccess && visibilityProps.itemValue) {
-                                    var ivSet = false;
-                                    for (var retry = 0; retry < 3; retry++) {
-                                        ivSet = await setSelect2ValueByText("visibleCodeListItem", visibilityProps.itemValue);
-                                        if (ivSet) break;
-                                        await sleep(1000);
+                                    // 1. Activity Plan
+                                    if (visibilityProps.activityPlan) {
+                                        var apSet = await setSelect2ValueByTextVerified("visibleActivityPlan", visibilityProps.activityPlan, 4);
+                                        if (!apSet) {
+                                            attemptOk = false;
+                                        } else {
+                                            await sleep(500);
+                                            await waitForSelect2HasOptions("visibleScheduledActivity", 10000);
+                                            await sleep(500);
+                                        }
                                     }
-                                    if (!ivSet) {
-                                        visSuccess = false;
-                                    } else {
-                                        await sleep(500);
-                                    }
-                                }
 
-                                // Reason + Save
-                                var visReasonEl = document.getElementById("reasonForChange");
-                                if (visReasonEl) {
-                                    visReasonEl.value = visibilityReason || "Add visibility condition";
-                                    visReasonEl.dispatchEvent(new Event("change", { bubbles: true }));
-                                }
-                                var visSaveBtn = document.getElementById("actionButton");
-                                if (visSaveBtn) {
-                                    visSaveBtn.click();
-                                    await waitForSAModalClose(10000);
+                                    // 2. Scheduled Activity
+                                    if (attemptOk && visibilityProps.scheduledActivity) {
+                                        var targetSA = rebuildScheduledActivityForTarget(visibilityProps.scheduledActivity, occ.eventText);
+                                        var saSet = await setSelect2ValueByTextVerified("visibleScheduledActivity", targetSA, 4);
+                                        if (!saSet) {
+                                            attemptOk = false;
+                                        } else {
+                                            await sleep(500);
+                                            await waitForSelect2HasOptions("visibleItemRef", 10000);
+                                            await sleep(500);
+                                        }
+                                    }
+
+                                    // 3. Item
+                                    if (attemptOk && visibilityProps.item) {
+                                        var itemSet = await setSelect2ValueByTextVerified("visibleItemRef", visibilityProps.item, 4);
+                                        if (!itemSet) {
+                                            attemptOk = false;
+                                        } else {
+                                            await sleep(500);
+                                            await waitForSelect2HasOptions("visibleCodeListItem", 10000);
+                                            await sleep(500);
+                                        }
+                                    }
+
+                                    // 4. Item Value
+                                    if (attemptOk && visibilityProps.itemValue) {
+                                        var ivSet = await setSelect2ValueByTextVerified("visibleCodeListItem", visibilityProps.itemValue, 4);
+                                        if (!ivSet) {
+                                            attemptOk = false;
+                                        } else {
+                                            await sleep(500);
+                                        }
+                                    }
+
+                                    if (!attemptOk) {
+                                        continue;
+                                    }
+
+                                    // Reason + Save
+                                    var visReasonEl = document.getElementById("reasonForChange");
+                                    if (visReasonEl) {
+                                        visReasonEl.value = visibilityReason || "Add visibility condition";
+                                        visReasonEl.dispatchEvent(new Event("input", { bubbles: true }));
+                                        visReasonEl.dispatchEvent(new Event("change", { bubbles: true }));
+                                    }
+                                    var visSaveBtn = document.getElementById("actionButton");
+                                    if (visSaveBtn) {
+                                        visSaveBtn.click();
+                                        await sleep(900);
+                                        var visAlert = newVisModal.querySelector(".alert-danger");
+                                        visValidationText = visAlert ? normalizeSAText(visAlert.textContent) : "";
+                                        if (visValidationText) {
+                                            log("Archive/Update Forms: Step 4 - ClinSpark validation alert after visibility save: " + visValidationText);
+                                            continue;
+                                        }
+                                        var closed = await waitForSAModalClose(10000);
+                                        if (closed) {
+                                            visSuccess = true;
+                                            break;
+                                        }
+                                        visAlert = newVisModal.querySelector(".alert-danger");
+                                        visValidationText = visAlert ? normalizeSAText(visAlert.textContent) : "";
+                                        if (visValidationText) {
+                                            log("Archive/Update Forms: Step 4 - ClinSpark validation alert after visibility save: " + visValidationText);
+                                        } else {
+                                            log("Archive/Update Forms: Step 4 - visibility modal stayed open after save; retrying");
+                                        }
+                                    }
                                 }
                                 await sleep(800);
-                                log("Archive/Update Forms: Step 4 - visibility " + (visSuccess ? "set successfully" : "set with issues"));
+                                if (!visSuccess) {
+                                    throw new Error("Visibility condition could not be saved" + (visValidationText ? ": " + visValidationText : ""));
+                                }
+                                log("Archive/Update Forms: Step 4 - visibility set successfully");
                             } else {
                                 log("Archive/Update Forms: Step 4 - visibility modal did not open");
                                 await closeCurrentModal();
@@ -47647,6 +47835,185 @@
         }
     }
 
+    function editSE_normalizeType(value) {
+        var text = String(value || "").trim().toLowerCase();
+        if (text === "unscheduled") return "Unscheduled";
+        if (text === "common") return "Common";
+        return "Scheduled";
+    }
+
+    function editSE_findTableColumnIndex(tbody, labels) {
+        var table = tbody ? tbody.closest("table") : null;
+        if (!table) return -1;
+        var headers = table.querySelectorAll("thead th, thead td");
+        for (var hi = 0; hi < headers.length; hi++) {
+            var text = (headers[hi].textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            for (var li = 0; li < labels.length; li++) {
+                if (text === String(labels[li]).toLowerCase()) return hi;
+            }
+        }
+        return -1;
+    }
+
+    function editSE_readRowType(row, cells, typeIndex) {
+        if (typeIndex >= 0 && typeIndex < cells.length) {
+            var tableTypeText = (cells[typeIndex].textContent || "").replace(/\s+/g, " ").trim();
+            if (/^(Scheduled|Unscheduled|Common)$/i.test(tableTypeText)) return editSE_normalizeType(tableTypeText);
+        }
+        var typeLink = row.querySelector('a[href*="/studyeventtype/"], a[href*="studyEventType"]');
+        var typeText = typeLink ? typeLink.textContent : "";
+        if (!typeText) {
+            for (var ti = 0; ti < cells.length; ti++) {
+                var cellText = (cells[ti].textContent || "").replace(/\s+/g, " ").trim();
+                if (/^(Scheduled|Unscheduled|Common)$/i.test(cellText)) {
+                    typeText = cellText;
+                    break;
+                }
+            }
+        }
+        return editSE_normalizeType(typeText);
+    }
+
+    function editSE_readRowLocked(row, cells, lockIndex) {
+        if (lockIndex >= 0 && lockIndex < cells.length) {
+            var lockedText = (cells[lockIndex].textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            if (lockedText === "yes" || lockedText === "locked" || lockedText === "true") return true;
+            if (lockedText === "no" || lockedText === "unlocked" || lockedText === "false") return false;
+        }
+        var lockAction = row.querySelector('a[href*="/locking/studyevent/"]');
+        if (lockAction) {
+            var lockText = (lockAction.textContent || "").toLowerCase();
+            if (lockText.indexOf("unlock") !== -1) return true;
+            if (lockText.indexOf("lock") !== -1) return false;
+        }
+        if (row.querySelector("i.fa-lock")) return true;
+        var titleText = "";
+        var titled = row.querySelectorAll("[title], [data-original-title]");
+        for (var li = 0; li < titled.length; li++) {
+            titleText += " " + (titled[li].getAttribute("title") || titled[li].getAttribute("data-original-title") || "");
+        }
+        return /\blocked\b/i.test(titleText);
+    }
+
+    function editSE_showPageIsLocked(doc) {
+        var unlockLink = editSE_findModalLink(doc, "/locking/studyevent/", "unlock");
+        if (unlockLink) return true;
+        var lockLink = editSE_findModalLink(doc, "/locking/studyevent/", "lock");
+        if (lockLink) return false;
+        var bodyText = (doc && doc.body ? doc.body.textContent : "").replace(/\s+/g, " ");
+        if (/\bUnlock\b/.test(bodyText)) return true;
+        if (/\bLock\b/.test(bodyText)) return false;
+        return null;
+    }
+
+    function editSE_formFieldValue(inp) {
+        var inpType = (inp.getAttribute("type") || "").toLowerCase();
+        var inpTag = inp.tagName.toLowerCase();
+        if (inpType === "checkbox" || inpType === "radio") {
+            if (inp.checked || inp.hasAttribute("checked")) {
+                return inp.value || inp.getAttribute("value") || "on";
+            }
+            return null;
+        }
+        if (inpTag === "select") {
+            var selOpt = inp.querySelector("option[selected]");
+            if (!selOpt && typeof inp.selectedIndex === "number" && inp.selectedIndex >= 0) selOpt = inp.options[inp.selectedIndex];
+            if (!selOpt) selOpt = inp.querySelector("option");
+            return selOpt ? (selOpt.value || selOpt.getAttribute("value") || selOpt.textContent || "") : "";
+        }
+        return inp.value || inp.getAttribute("value") || "";
+    }
+
+    function editSE_buildFormParts(form, overrides, omitKeys) {
+        var omit = omitKeys || {};
+        var allInputs = form.querySelectorAll("input, textarea, select");
+        var parts = [];
+        for (var fi = 0; fi < allInputs.length; fi++) {
+            var inp = allInputs[fi];
+            var inpName = inp.getAttribute("name");
+            if (!inpName || omit[inpName]) continue;
+            var inpValue = editSE_formFieldValue(inp);
+            if (inpValue === null) continue;
+            parts.push(encodeURIComponent(inpName) + "=" + encodeURIComponent(inpValue));
+        }
+        overrides = overrides || {};
+        for (var key in overrides) {
+            if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+                parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(overrides[key]));
+            }
+        }
+        return parts.join("&");
+    }
+
+    function editSE_findModalLink(doc, hrefNeedle, textNeedle) {
+        var byHref = doc.querySelectorAll('a[href*="' + hrefNeedle + '"]');
+        for (var i = 0; i < byHref.length; i++) {
+            var txt = (byHref[i].textContent || "").toLowerCase();
+            var needle = String(textNeedle || "").toLowerCase();
+            if (!needle) return byHref[i].getAttribute("href");
+            if (needle === "lock") {
+                if (txt.indexOf("unlock") !== -1) continue;
+                if (txt.indexOf("lock") !== -1) return byHref[i].getAttribute("href");
+            } else if (txt.indexOf(needle) !== -1) {
+                return byHref[i].getAttribute("href");
+            }
+        }
+        return null;
+    }
+
+    async function editSE_changeLockState(showDoc, ue, actionText, reasonText, plog) {
+        var actionLower = String(actionText || "").toLowerCase();
+        var lockLink = editSE_findModalLink(showDoc, "/locking/studyevent/", actionLower);
+        if (!lockLink) {
+            return { ok: false, blocked: true, message: actionText + " action was not available." };
+        }
+        var unlockUrl = lockLink.startsWith("http") ? lockLink : location.origin + lockLink;
+        plog("  " + actionText + "ing study event: " + (ue.originalName || ue.name));
+        var unlockHtml = await fetchPage(unlockUrl);
+        var unlockDoc = parseHtml(unlockHtml);
+        var unlockForm = unlockDoc.querySelector("form");
+        if (!unlockForm) {
+            return { ok: false, blocked: true, message: actionText + " modal form was not found." };
+        }
+        var unlockData = editSE_buildFormParts(unlockForm, {
+            reasonForChange: reasonText
+        }, {
+            reasonForChange: true
+        });
+        var resultHtml = await submitForm(unlockUrl, unlockData);
+        var resultDoc = parseHtml(resultHtml);
+        var danger = resultDoc.querySelector("div.alert.alert-danger, .alert-danger");
+        if (danger) {
+            var dangerText = (danger.textContent || "").replace(/\s+/g, " ").trim();
+            if (dangerText.indexOf("Study event locking state cannot be changed") !== -1) {
+                return { ok: false, blocked: true, message: dangerText };
+            }
+            return { ok: false, blocked: false, message: dangerText };
+        }
+        return { ok: true, blocked: false, message: "" };
+    }
+
+    async function editSE_tryUnlockStudyEvent(showDoc, ue, plog) {
+        return await editSE_changeLockState(showDoc, ue, "Unlock", "Unlock to update study event", plog);
+    }
+
+    async function editSE_tryRelockStudyEvent(showDoc, ue, plog) {
+        return await editSE_changeLockState(showDoc, ue, "Lock", "Lock after update study event", plog);
+    }
+
+    async function editSE_relockIfNeeded(showUrl, ue, unlockedForTypeUpdate, plog) {
+        if (!unlockedForTypeUpdate || !ue || !ue.locked || !showUrl) return true;
+        var relockHtml = await fetchPage(showUrl);
+        var relockDoc = parseHtml(relockHtml);
+        var relockResult = await editSE_tryRelockStudyEvent(relockDoc, ue, plog);
+        if (!relockResult.ok) {
+            plog("WARN: Study event was updated/unlocked but could not be locked back: " + relockResult.message);
+            return false;
+        }
+        plog("  ✓ Study event locked back after update.");
+        return true;
+    }
+
     function editSE_collectStudyEvents() {
         var tbody = document.getElementById("sortableTable");
         if (!tbody) {
@@ -47654,6 +48021,8 @@
             return [];
         }
         var rows = tbody.querySelectorAll("tr");
+        var lockIndex = editSE_findTableColumnIndex(tbody, ["Locked", "Lock"]);
+        var typeIndex = editSE_findTableColumnIndex(tbody, ["Type", "Study Event Type"]);
         var results = [];
         for (var i = 0; i < rows.length; i++) {
             var row = rows[i];
@@ -47667,9 +48036,11 @@
             // study event name is inside the anchor in the first td (dragHandle)
             var name = anchor ? anchor.textContent.trim() : "";
             if (!name) continue;
-            results.push({ name: name, href: href, originalName: name });
+            var eventType = editSE_readRowType(row, cells, typeIndex);
+            var isLocked = editSE_readRowLocked(row, cells, lockIndex);
+            results.push({ name: name, href: href, originalName: name, type: eventType, originalType: eventType, locked: isLocked });
         }
-        log("[EditSE] Collected " + results.length + " study events");
+        log("[EditSE] Collected " + results.length + " study events (lockColumn=" + lockIndex + ", typeColumn=" + typeIndex + ")");
         return results;
     }
 
@@ -47699,12 +48070,15 @@
         var glass = isGlassTheme();
 
         // State
-        var rows = []; // {name, href, originalName, status:'original'|'added'|'updated', reason:'Update'}
+        var rows = []; // {name, href, originalName, type, originalType, locked, status:'original'|'added'|'updated', reason:'Update'}
         for (var ci = 0; ci < collected.length; ci++) {
             rows.push({
                 name: collected[ci].name,
                 href: collected[ci].href,
                 originalName: collected[ci].name,
+                type: editSE_normalizeType(collected[ci].type),
+                originalType: editSE_normalizeType(collected[ci].originalType || collected[ci].type),
+                locked: !!collected[ci].locked,
                 status: "original",
                 reason: "Update"
             });
@@ -47890,6 +48264,28 @@
         editNameInput.style.outline = "none";
         editBox.appendChild(editNameInput);
 
+        var editTypeLabel = document.createElement("div");
+        editTypeLabel.textContent = "Study Event Type";
+        editTypeLabel.style.fontSize = "11px";
+        editTypeLabel.style.color = glass ? "rgba(255,255,255,0.65)" : "#999";
+        editBox.appendChild(editTypeLabel);
+
+        var editTypeSelect = document.createElement("select");
+        editTypeSelect.style.padding = "6px 10px";
+        editTypeSelect.style.borderRadius = "6px";
+        editTypeSelect.style.border = "1px solid " + (glass ? "rgba(255,255,255,0.25)" : "#555");
+        editTypeSelect.style.background = glass ? "rgba(15,10,40,0.55)" : "#222";
+        editTypeSelect.style.color = "#fff";
+        editTypeSelect.style.fontSize = "13px";
+        editTypeSelect.style.outline = "none";
+        ["Scheduled", "Unscheduled", "Common"].forEach(function(typeName) {
+            var opt = document.createElement("option");
+            opt.value = typeName;
+            opt.textContent = typeName;
+            editTypeSelect.appendChild(opt);
+        });
+        editBox.appendChild(editTypeSelect);
+
         var editReasonLabel = document.createElement("div");
         editReasonLabel.textContent = "Reason";
         editReasonLabel.style.fontSize = "11px";
@@ -48007,6 +48403,22 @@
             return "";
         }
 
+        function getTypeBadge(row) {
+            var type = editSE_normalizeType(row.type);
+            var color = type === "Scheduled" ? "#60a5fa" : (type === "Unscheduled" ? "#f472b6" : "#a78bfa");
+            var lockBadge = row.locked
+                ? '<span title="Locked study event" style="color:#f87171;font-size:11px;font-weight:700;margin-left:8px;"><i class="fa fa-lock"></i> Locked</span>'
+                : '<span title="Unlocked study event" style="color:#34d399;font-size:11px;font-weight:700;margin-left:8px;"><i class="fa fa-unlock"></i> Unlocked</span>';
+            return '<span style="display:inline-block;margin-top:3px;color:' + color + ';font-size:11px;font-weight:700;">' + escapeHTML(type) + '</span>' + lockBadge;
+        }
+
+        function editSE_recomputeRowStatus(row) {
+            if (!row || row.status === "added") return;
+            var nameChanged = String(row.name || "").trim() !== String(row.originalName || "").trim();
+            var typeChanged = editSE_normalizeType(row.type) !== editSE_normalizeType(row.originalType);
+            row.status = (nameChanged || typeChanged) ? "updated" : "original";
+        }
+
         function renderTable() {
             tableBody.innerHTML = "";
             var filter = searchInput.value.trim().toLowerCase();
@@ -48043,9 +48455,9 @@
                     var nameTd = document.createElement("td");
                     nameTd.style.padding = "6px 8px";
                     if (rows[idx].status === "updated") {
-                        nameTd.innerHTML = '<div style="font-size:11px;color:' + (glass ? 'rgba(255,255,255,0.62)' : '#999') + ';">Original: ' + escapeHTML(rows[idx].originalName || '') + '</div><div style="font-weight:600;color:#fbbf24;">Updated: ' + escapeHTML(rows[idx].name) + '</div>';
+                        nameTd.innerHTML = '<div style="font-size:11px;color:' + (glass ? 'rgba(255,255,255,0.62)' : '#999') + ';">Original: ' + escapeHTML(rows[idx].originalName || '') + ' (' + escapeHTML(editSE_normalizeType(rows[idx].originalType)) + ')</div><div style="font-weight:600;color:#fbbf24;">Updated: ' + escapeHTML(rows[idx].name) + ' (' + escapeHTML(editSE_normalizeType(rows[idx].type)) + ')</div>' + getTypeBadge(rows[idx]);
                     } else {
-                        nameTd.innerHTML = '<span>' + escapeHTML(rows[idx].name) + '</span>' + getStatusBadge(rows[idx].status);
+                        nameTd.innerHTML = '<div><span>' + escapeHTML(rows[idx].name) + '</span>' + getStatusBadge(rows[idx].status) + '</div>' + getTypeBadge(rows[idx]);
                     }
                     tr.appendChild(nameTd);
 
@@ -48130,6 +48542,8 @@
             editBox.style.display = "flex";
             var r = rows[idx];
             editNameInput.value = r.name;
+            editTypeSelect.value = editSE_normalizeType(r.type);
+            editTypeSelect.disabled = (r.status === "added");
             editReasonInput.value = r.reason || "Update";
             editReasonInput.disabled = (r.status === "added");
             editNameInput.focus();
@@ -48203,7 +48617,7 @@
             for (var ni = 0; ni < names.length; ni++) {
                 var normalized = names[ni].toLowerCase();
                 if (existing[normalized]) continue;
-                var newRow = { name: names[ni], href: null, originalName: null, status: "added", reason: "" };
+                var newRow = { name: names[ni], href: null, originalName: null, type: "Scheduled", originalType: "Scheduled", locked: false, status: "added", reason: "" };
                 rows.push(newRow); addedRows.push(newRow); existing[normalized] = true;
             }
             if (!addedRows.length) { addError.textContent = "All entered study events already exist"; return; }
@@ -48233,14 +48647,7 @@
             var r = rows[selectedIdx];
             var newName = editNameInput.value;
             r.name = newName;
-            // determine status
-            if (r.status !== "added") {
-                if (newName.trim() !== r.originalName.trim()) {
-                    r.status = "updated";
-                } else {
-                    r.status = "original";
-                }
-            }
+            editSE_recomputeRowStatus(r);
             renderTable();
             validate();
         });
@@ -48259,6 +48666,19 @@
             rows[selectedIdx].reason = editReasonInput.value;
         });
 
+        editTypeSelect.addEventListener("change", function() {
+            if (locked || selectedIdx < 0 || selectedIdx >= rows.length) return;
+            var r = rows[selectedIdx];
+            if (r.status === "added") {
+                editTypeSelect.value = "Scheduled";
+                return;
+            }
+            r.type = editSE_normalizeType(editTypeSelect.value);
+            editSE_recomputeRowStatus(r);
+            renderTable();
+            validate();
+        });
+
         // Confirm
         confirmBtn.addEventListener("click", function() {
             if (confirmBtn.disabled || locked) return;
@@ -48273,6 +48693,9 @@
                     name: rows[oi].name.trim(),
                     href: rows[oi].href,
                     originalName: rows[oi].originalName,
+                    type: editSE_normalizeType(rows[oi].type),
+                    originalType: editSE_normalizeType(rows[oi].originalType),
+                    locked: !!rows[oi].locked,
                     status: rows[oi].status,
                     reason: rows[oi].reason
                 });
@@ -48416,11 +48839,47 @@
                 }
 
                 try {
+                    var originalType = editSE_normalizeType(ue.originalType);
+                    var requestedType = editSE_normalizeType(ue.type);
+                    var nameChanged = String(ue.name || "").trim() !== String(ue.originalName || "").trim();
+                    var typeChanged = requestedType !== originalType;
+                    var canChangeType = typeChanged;
+                    var unlockedForTypeUpdate = false;
+
                     // Step 1: Fetch the show page to discover the edit link
                     var showUrl = location.origin + ueHref;
                     plog("  Fetching show page: " + showUrl);
                     var showHtml = await fetchPage(showUrl);
                     var showDoc = parseHtml(showHtml);
+
+                    var showLocked = editSE_showPageIsLocked(showDoc);
+                    if (typeChanged) {
+                        plog("  Lock check before type update: table=" + (ue.locked ? "locked" : "unlocked") + ", showPage=" + (showLocked === null ? "unknown" : (showLocked ? "locked" : "unlocked")));
+                    }
+
+                    if (typeChanged && (showLocked === true || (showLocked === null && ue.locked))) {
+                        var unlockResult = await editSE_tryUnlockStudyEvent(showDoc, ue, plog);
+                        if (!unlockResult.ok) {
+                            canChangeType = false;
+                            if (unlockResult.blocked) {
+                                plog("  Type update skipped for " + ueName + ": " + unlockResult.message);
+                            } else {
+                                plog("ERROR: Could not unlock " + ueName + ": " + unlockResult.message);
+                                updateErrors++;
+                            }
+                        } else {
+                            plog("  Study event unlocked for type update.");
+                            unlockedForTypeUpdate = true;
+                            showHtml = await fetchPage(showUrl);
+                            showDoc = parseHtml(showHtml);
+                        }
+                    }
+
+                    if (!nameChanged && typeChanged && !canChangeType) {
+                        plog("  No editable changes remain for " + ueName + "; moving on.");
+                        doneSteps++;
+                        continue;
+                    }
 
                     // Step 2: Find the edit link (href containing "update/studyevent")
                     var editLink = null;
@@ -48461,50 +48920,37 @@
                         continue;
                     }
 
-                    // Step 4: Build URL-encoded form data from all inputs (preserves hidden fields, CSRF, etc.)
-                    var allInputs = form.querySelectorAll("input, textarea, select");
-                    var formDataParts = [];
-                    for (var fi = 0; fi < allInputs.length; fi++) {
-                        var inp = allInputs[fi];
-                        var inpName = inp.getAttribute("name");
-                        if (!inpName) continue;
-                        var inpType = (inp.getAttribute("type") || "").toLowerCase();
-                        var inpTag = inp.tagName.toLowerCase();
-                        var inpValue = "";
-
-                        if (inpType === "checkbox" || inpType === "radio") {
-                            if (inp.checked || inp.hasAttribute("checked")) {
-                                inpValue = inp.value || inp.getAttribute("value") || "on";
-                            } else {
-                                continue;
-                            }
-                        } else if (inpTag === "select") {
-                            var selOpt = inp.querySelector("option[selected]");
-                            if (selOpt) {
-                                inpValue = selOpt.value || selOpt.getAttribute("value") || "";
-                            } else {
-                                var firstOpt = inp.querySelector("option");
-                                inpValue = firstOpt ? (firstOpt.value || firstOpt.getAttribute("value") || "") : "";
-                            }
-                        } else {
-                            inpValue = inp.value || inp.getAttribute("value") || "";
+                    if (typeChanged && canChangeType) {
+                        var typeSelect = form.querySelector('select[name="studyEventType"], #studyEventType');
+                        if (!typeSelect) {
+                            plog("  Type update skipped for " + ueName + ": studyEventType dropdown was not found.");
+                            canChangeType = false;
+                        } else if (typeSelect.disabled || typeSelect.hasAttribute("disabled")) {
+                            plog("  Type update skipped for " + ueName + ": studyEventType dropdown is still disabled.");
+                            canChangeType = false;
                         }
-
-                        formDataParts.push(encodeURIComponent(inpName) + "=" + encodeURIComponent(inpValue));
                     }
-                    var formDataStr = formDataParts.join("&");
-
-                    // Step 5: Override name and reasonForChange in the encoded form data
-                    // Remove existing name/reasonForChange entries and append new ones
-                    var filteredParts = [];
-                    for (var pi = 0; pi < formDataParts.length; pi++) {
-                        var partKey = formDataParts[pi].split("=")[0];
-                        if (partKey === "name" || partKey === "reasonForChange") continue;
-                        filteredParts.push(formDataParts[pi]);
+                    if (!nameChanged && typeChanged && !canChangeType) {
+                        plog("  No editable changes remain for " + ueName + "; moving on.");
+                        doneSteps++;
+                        continue;
                     }
-                    filteredParts.push("name=" + encodeURIComponent(ue.name));
-                    filteredParts.push("reasonForChange=" + encodeURIComponent(ue.reason || "Update"));
-                    formDataStr = filteredParts.join("&");
+
+                    // Step 4: Build URL-encoded form data from all inputs (preserves hidden fields, CSRF, etc.)
+                    var overrides = {
+                        name: ue.name,
+                        reasonForChange: ue.reason || "Update"
+                    };
+                    var omitKeys = {
+                        name: true,
+                        reasonForChange: true
+                    };
+                    if (typeChanged && canChangeType) {
+                        overrides.studyEventType = requestedType;
+                        omitKeys.studyEventType = true;
+                        plog("  Applying type change: " + originalType + " → " + requestedType);
+                    }
+                    var formDataStr = editSE_buildFormParts(form, overrides, omitKeys);
 
                     // Step 6: POST to the edit URL (same URL used to fetch the modal, NOT form action)
                     plog("  Submitting update to: " + editUrl);
@@ -48516,12 +48962,22 @@
                     if (errorAlert) {
                         var errText = (errorAlert.textContent || "").trim();
                         plog("ERROR: Server returned error for " + ueName + ": " + errText);
+                        var relockedAfterError = await editSE_relockIfNeeded(showUrl, ue, unlockedForTypeUpdate, plog);
+                        if (!relockedAfterError) updateErrors++;
                         updateErrors++;
                     } else {
                         plog("  ✓ Update saved for: " + ueName + " → " + ue.name);
+                        var relockedAfterSuccess = await editSE_relockIfNeeded(showUrl, ue, unlockedForTypeUpdate, plog);
+                        if (!relockedAfterSuccess) updateErrors++;
                     }
                 } catch (editErr) {
                     plog("ERROR updating " + ueName + ": " + String(editErr));
+                    try {
+                        var relockedAfterException = await editSE_relockIfNeeded(showUrl, ue, unlockedForTypeUpdate, plog);
+                        if (!relockedAfterException) updateErrors++;
+                    } catch (relockCatchErr) {
+                        plog("WARN: Re-lock attempt after error also failed: " + String(relockCatchErr));
+                    }
                     updateErrors++;
                 }
 
