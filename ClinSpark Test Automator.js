@@ -18986,6 +18986,18 @@
     var STORAGE_ACTIVE_BUTTON_LOADOUT = "activityPlanState.activeButtonLoadout";
     var SETTINGS_MODAL_OPEN = false;
     var HELP_MODAL_OPEN = false;
+    var HIDDEN_FEATURE_BUTTON_IDS = {
+        "Add Existing Subject": true,
+        "Import Cohort Subjects": true,
+        "Lock Activity Plans": true,
+        "Update Study Status": true,
+        "Lock Sample Paths": true,
+        "Add Cohort Subjects": true
+    };
+
+    function isHiddenFeatureButton(id) {
+        return !!HIDDEN_FEATURE_BUTTON_IDS[id];
+    }
 
     var PANEL_BUTTON_DEFS = [
         { id: "Lock Activity Plans", label: "Lock Activity Plans" },
@@ -19009,6 +19021,7 @@
         { id: "Collect All", label: "Collect All" },
         { id: "Import I/E", label: "Import I/E" },
         { id: "Clear Mapping", label: "Clear Mapping" },
+        { id: "Copy Mapping", label: "Copy Mapping" },
         { id: "Archive/Update Forms", label: "Archive/Update Forms" },
         { id: "Copy Activity Forms", label: "Copy Activity Forms" },
         { id: "Copy A-Plan", label: "Copy A-Plan" },
@@ -19022,7 +19035,9 @@
         { id: "Pause", label: "Pause" },
         { id: "Clear Logs", label: "Clear Logs" },
         { id: "Hide Logs", label: "Hide Logs" }
-    ];
+    ].filter(function(def) {
+        return !isHiddenFeatureButton(def.id);
+    });
 
     function getButtonVisibility() {
         try {
@@ -19144,7 +19159,7 @@
                     { label: "Lock Activity Plans", desc: "Locks activity plans for one or more studies and reports progress for each target." },
                     { label: "Lock Sample Paths", desc: "Locks sample path configurations and attempts electronic approval when a required lock checkbox is disabled; unavailable approvals are reported as skipped." },
                     { label: "Update Study Status", desc: "Updates studies to Active when needed and handles the status change workflow automatically." },
-                    { label: "Run Study Setup", desc: "Runs the full setup pipeline in sequence, including activity plan locking, sample path locking, status updates, cohort setup, and consent steps where configured." }
+                    { label: "Run Study Setup", desc: "Runs the full setup pipeline in sequence and reports each configured setup stage." }
                 ]
             },
             {
@@ -19187,6 +19202,7 @@
                     { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to relevant data pages." },
                     { label: "Import I/E", desc: "Maps inclusion/exclusion check items to Activity Plan forms and items. Shows expected eligibility defaults and supports selective mapping cleanup." },
                     { label: "Clear Mapping", desc: "Scans eligibility mappings, displays selectable eligibility items, and removes only the mappings confirmed by the user." },
+                    { label: "Copy Mapping", desc: "Copies existing eligibility mappings into an editable full-screen staging workspace, supports bulk activity-plan and cohort changes, then creates new mappings from each source row's Copy action." },
                     { label: "Edit Study Events List", desc: "Adds, renames, reorders, and saves study event list changes in one batch." },
                     { label: "Set Visibility Condition", desc: "Sets show/hide conditions on scheduled activity forms using auto-populated visibility references, with refresh handling and animated loading states." }
                 ]
@@ -19213,7 +19229,16 @@
                     { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space." }
                 ]
             }
-        ];
+        ].map(function(section) {
+            return {
+                title: section.title,
+                features: section.features.filter(function(feature) {
+                    return !isHiddenFeatureButton(feature.label);
+                })
+            };
+        }).filter(function(section) {
+            return section.features.length > 0;
+        });
 
         var overlay = document.createElement("div");
         overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:30000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
@@ -37631,7 +37656,1225 @@
         }
         return deleted;
     }
+    //==========================
+    // COPY MAPPING FEATURE
+    //==========================
+    var STORAGE_COPY_MAPPING_WIDTHS = "activityPlanState.copyMapping.panelWidths";
+    var COPY_MAPPING_POPUP_REF = null;
+    var COPY_MAPPING_CANCELLED = false;
 
+    function copyMappingLog(msg) { log("Copy Mapping: " + String(msg)); }
+    function copyMappingNormalize(text) { return String(text || "").replace(/\s+/g, " ").trim(); }
+    function copyMappingKeyText(text) {
+        return copyMappingNormalize(text).toLowerCase()
+            .replace(/^[0-9]+\.\s*/, "")
+            .replace(/[\+\-]\d{1,2}:\d{2}:\d{2}/g, "")
+            .replace(/\s*\(\d+\)\s*$/g, "")
+            .replace(/[^\w\s]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+    function copyMappingShort(text, maxLen) {
+        var s = copyMappingNormalize(text);
+        var n = maxLen || 90;
+        return s.length > n ? s.slice(0, n - 1) + "..." : s;
+    }
+    function copyMappingIsEligibilityPage() {
+        return location.pathname === ELIGIBILITY_LIST_PATH &&
+            (location.hostname === "cenexel.clinspark.com" || location.hostname === "cenexeltest.clinspark.com");
+    }
+    function copyMappingGetTbody() { return clearMappingGetTbody(); }
+    function copyMappingExtractOOR(cell) {
+        if (!cell) return "";
+        var span = cell.querySelector("[data-original-title*='Out of Range'], .tooltips[title*='Out of Range']");
+        var txt = span ? span.textContent : cell.textContent;
+        var m = String(txt || "").match(/Out\s*of\s*Range\?\s*(Yes|No)/i);
+        return m ? m[1] : "";
+    }
+    function copyMappingExtractLabTest(cell) {
+        var txt = copyMappingNormalize(cell ? cell.textContent : "");
+        var m = txt.match(/Lab\s*Test\s*:\s*([^]*?)(?:\s+Out\s*of\s*Range\?|$)/i);
+        if (!m) return null;
+        var full = copyMappingNormalize(m[1]);
+        var codeMatch = full.match(/\(([^()]+)\)\s*$/);
+        return {
+            text: full,
+            name: copyMappingNormalize(full.replace(/\s*\([^()]+\)\s*$/, "")),
+            code: codeMatch ? copyMappingNormalize(codeMatch[1]) : ""
+        };
+    }
+    function copyMappingExtractRow(tr, index) {
+        var tds = tr ? tr.querySelectorAll("td") : [];
+        if (!tds || tds.length < 9) return null;
+        var copyLink = tr.querySelector("a[href*='/secure/crfdesign/studylibrary/eligibility/copy/']");
+        if (!copyLink) return null;
+        var itemLink = tds[0].querySelector("a[href*='/secure/crfdesign/studylibrary/show/item/']");
+        var checkItemLink = tds[5].querySelector("a[href*='/secure/crfdesign/studylibrary/show/item/']");
+        var saLink = tds[4].querySelector("a[href*='/secure/crfdesign/activityplans/show/']");
+        var apSpan = tds[4].querySelector('span.tooltips[data-original-title="Activity Plan"]');
+        var copyUrl = copyLink.getAttribute("href") || "";
+        var idMatch = copyUrl.match(/\/copy\/(\d+)/);
+        var uid = "cm_src_" + String(index) + "_" + String(idMatch && idMatch[1] ? idMatch[1] : Date.now());
+        var itemType = copyMappingNormalize(tds[0].childNodes[0] ? tds[0].childNodes[0].textContent : "");
+        var labTest = copyMappingExtractLabTest(tds[5]) || copyMappingExtractLabTest(tds[0]);
+        var labTestCell = labTest && copyMappingExtractLabTest(tds[5]) ? tds[5] : tds[0];
+        var rec = {
+            uid: uid,
+            sourceUid: uid,
+            copyUrl: copyUrl,
+            itemType: itemType,
+            itemName: itemLink ? copyMappingNormalize(itemLink.textContent) : copyMappingNormalize(tds[0].textContent),
+            sex: copyMappingNormalize(tds[1].textContent) || "Both",
+            cohort: copyMappingNormalize(tds[2].textContent),
+            cohortType: copyMappingNormalize(tds[3].textContent),
+            scheduledActivityText: saLink ? copyMappingNormalize(saLink.textContent) : copyMappingNormalize(tds[4].textContent),
+            activityPlanText: apSpan ? copyMappingNormalize(apSpan.textContent) : "",
+            checkItemText: checkItemLink ? copyMappingNormalize(checkItemLink.textContent) : copyMappingNormalize(tds[5].textContent),
+            labTestText: labTest ? labTest.text : "",
+            labTestName: labTest ? labTest.name : "",
+            labTestCode: labTest ? labTest.code : "",
+            outOfRange: labTest ? copyMappingExtractOOR(labTestCell) : copyMappingExtractOOR(tds[5]),
+            operator: copyMappingNormalize(tds[6].textContent),
+            value: copyMappingNormalize(tds[7].textContent),
+            rowIndex: index,
+            originalKey: "",
+            dirty: false
+        };
+        rec.originalKey = copyMappingBuildIdentity(rec);
+        return rec;
+    }
+    function copyMappingBuildIdentity(item) {
+        return [item.itemName, item.sex, item.cohort, item.cohortType, item.activityPlanText, item.scheduledActivityText, item.checkItemText, item.labTestText, item.outOfRange, item.operator, item.value].map(copyMappingKeyText).join("|");
+    }
+    async function copyMappingCollectRows() {
+        await waitForClearMappingTableReady(15000);
+        var tbody = copyMappingGetTbody();
+        var results = [];
+        if (!tbody) return results;
+        var rows = tbody.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+            if (clearMappingIsPlaceholderRow(rows[i])) continue;
+            var rec = copyMappingExtractRow(rows[i], i);
+            if (rec) results.push(rec);
+        }
+        copyMappingLog("collected source rows=" + String(results.length));
+        return results;
+    }
+    function copyMappingCollectSelectOptions(selector) {
+        var sel = document.querySelector(selector);
+        var options = [];
+        if (!sel) return options;
+        var opts = sel.querySelectorAll("option");
+        for (var i = 0; i < opts.length; i++) {
+            var value = copyMappingNormalize(opts[i].value);
+            var text = copyMappingNormalize(opts[i].textContent);
+            if (!value && !text) continue;
+            options.push({ value: value, text: text });
+        }
+        return options;
+    }
+    async function copyMappingCollectModalOptions() {
+        var options = { eligibility: [], activityPlans: [], cohorts: [], cohortTypes: [], sex: [] };
+        var opened = await openAddEligibilityModal();
+        if (!opened) return options;
+        await sleep(600);
+        options.eligibility = copyMappingCollectSelectOptions("select#eligibilityItemRef");
+        options.activityPlans = copyMappingCollectSelectOptions("select#activityPlan");
+        options.cohorts = copyMappingCollectSelectOptions("select#cohorts, select#cohort");
+        options.cohortTypes = copyMappingCollectSelectOptions("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']");
+        options.sex = copyMappingCollectSelectOptions("select#sexOption");
+        await closeCurrentModal();
+        copyMappingLog("modal options collected eligibility=" + options.eligibility.length + " plans=" + options.activityPlans.length);
+        return options;
+    }
+    function copyMappingCloneItem(item) {
+        var copy = JSON.parse(JSON.stringify(item || {}));
+        copy.uid = "cm_stage_" + Date.now() + "_" + Math.floor(Math.random() * 1000000);
+        copy.sourceUid = item.sourceUid || item.uid;
+        copy.dirty = false;
+        copy._copyMappingOriginal = {};
+        ["itemName", "sex", "cohort", "cohortType", "activityPlanText", "scheduledActivityText", "checkItemText", "labTestText", "outOfRange", "operator", "value"].forEach(function(key) {
+            copy._copyMappingOriginal[key] = copyMappingNormalize(copy[key] || "");
+        });
+        copy._changedKeys = {};
+        return copy;
+    }
+    function copyMappingRefreshChangedKeys(item) {
+        var keys = ["itemName", "sex", "cohort", "cohortType", "activityPlanText", "scheduledActivityText", "checkItemText", "labTestText", "outOfRange", "operator", "value"];
+        var original = item._copyMappingOriginal || {};
+        var changed = {};
+        for (var i = 0; i < keys.length; i++) {
+            var key = keys[i];
+            if (copyMappingNormalize(item[key] || "") !== copyMappingNormalize(original[key] || "")) {
+                changed[key] = true;
+            }
+        }
+        item._changedKeys = changed;
+        item.dirty = Object.keys(changed).length > 0;
+    }
+    function copyMappingTokenSet(text) {
+        var s = copyMappingKeyText(text);
+        var parts = s ? s.split(" ") : [];
+        var map = {};
+        for (var i = 0; i < parts.length; i++) if (parts[i].length > 1) map[parts[i]] = true;
+        return map;
+    }
+    function copyMappingSimilarity(a, b) {
+        if (!a || !b) return 0;
+        var aaText = copyMappingKeyText(a);
+        var bbText = copyMappingKeyText(b);
+        if (aaText === bbText) return 1;
+        if (aaText.indexOf(bbText) >= 0 || bbText.indexOf(aaText) >= 0) return 0.9;
+        var aa = copyMappingTokenSet(aaText);
+        var bb = copyMappingTokenSet(bbText);
+        var keys = {};
+        Object.keys(aa).forEach(function(k) { keys[k] = true; });
+        Object.keys(bb).forEach(function(k) { keys[k] = true; });
+        var inter = 0;
+        var union = 0;
+        Object.keys(keys).forEach(function(k) { union++; if (aa[k] && bb[k]) inter++; });
+        return union ? inter / union : 0;
+    }
+    function copyMappingCreateRow(item, mode, onChange) {
+        var row = document.createElement("div");
+        row.style.cssText = "display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:start;padding:10px;border-bottom:1px solid #2b2b2b;background:" + (item.dirty ? "rgba(91,67,199,0.22)" : "transparent") + ";outline:" + (item.dirty ? "1px solid #8f7bff" : "none") + ";";
+        var cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.style.cssText = "margin-top:3px;accent-color:#7c5cff;cursor:pointer;";
+        row.appendChild(cb);
+        var body = document.createElement("div");
+        body.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:4px;";
+        var title = document.createElement("div");
+        title.style.cssText = "font-weight:700;color:#fff;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        var sexIcon = item.sex === "Female" ? "F" : (item.sex === "Male" ? "M" : "B");
+        title.textContent = "[" + sexIcon + "] " + (item.itemType ? item.itemType + " - " : "") + item.itemName;
+        var meta = document.createElement("div");
+        meta.style.cssText = "color:#b9c0d0;font-size:11px;line-height:1.35;";
+        meta.textContent = "Cohort: " + (item.cohort || "Any") + " | Type: " + (item.cohortType || "Any") + " | OOR: " + (item.outOfRange || "No");
+        var path = document.createElement("div");
+        path.style.cssText = "color:#9aa3b8;font-size:11px;line-height:1.35;";
+        path.title = (item.scheduledActivityText || "") + "\n" + (item.activityPlanText || "");
+        path.textContent = copyMappingShort(item.scheduledActivityText || "", 92) + (item.activityPlanText ? " | " + copyMappingShort(item.activityPlanText, 72) : "");
+        var check = document.createElement("div");
+        check.style.cssText = "color:#d7dced;font-size:11px;line-height:1.35;";
+        check.textContent = "Check: " + copyMappingShort(item.checkItemText || "", 70) + " | " + (item.operator || "") + " " + (item.value || "");
+        body.appendChild(title); body.appendChild(meta); body.appendChild(path); body.appendChild(check);
+        row.appendChild(body);
+        var action = document.createElement("button");
+        action.textContent = mode === "source" ? "Copy" : "X";
+        action.title = mode === "source" ? "Copy this mapping to the staging list" : "Remove staged copy";
+        action.style.cssText = "background:" + (mode === "source" ? "#2f80ed" : "#8b2f3d") + ";color:#fff;border:none;border-radius:5px;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer;";
+        row.appendChild(action);
+        row._copyMappingItem = item;
+        row._copyMappingCheckbox = cb;
+        row._copyMappingAction = action;
+        row.addEventListener("click", function(e) {
+            if (e.target === cb || e.target === action) return;
+            cb.checked = !cb.checked;
+            if (typeof onChange === "function") onChange("select", item, row);
+        });
+        cb.addEventListener("change", function() { if (typeof onChange === "function") onChange("select", item, row); });
+        return row;
+    }
+    function copyMappingBuildConfigPanel(container, selectedItems, options, renderAll) {
+        container.innerHTML = "";
+        var selected = selectedItems || [];
+        var title = document.createElement("div");
+        title.style.cssText = "font-weight:800;color:#fff;font-size:14px;margin-bottom:10px;";
+        title.textContent = selected.length > 1 ? "Bulk Configuration (" + selected.length + ")" : (selected.length === 1 ? "Mapping Configuration" : "Select staged rows");
+        container.appendChild(title);
+        if (!selected.length) {
+            var empty = document.createElement("div");
+            empty.style.cssText = "color:#9aa3b8;font-size:12px;line-height:1.5;";
+            empty.textContent = "Select one staged mapping to edit all editable fields, or select multiple staged mappings for bulk activity plan/cohort updates.";
+            container.appendChild(empty);
+            return;
+        }
+        var item = selected[0];
+        var draft = {};
+        var draftKeys = {};
+        function addSelect(label, key, opts, allowBlank, bulkAllowed) {
+            if (selected.length > 1 && !bulkAllowed) return;
+            var wrap = document.createElement("label");
+            wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;margin-bottom:10px;color:#cdd3e1;font-size:12px;font-weight:700;";
+            wrap.appendChild(document.createTextNode(label));
+            var sel = document.createElement("select");
+            sel.style.cssText = "width:100%;background:#151515;color:#fff;border:1px solid #3a3a3a;border-radius:6px;padding:7px;font-size:12px;";
+            if (allowBlank) {
+                var blank = document.createElement("option");
+                blank.value = "";
+                blank.textContent = "";
+                sel.appendChild(blank);
+            }
+            (opts || []).forEach(function(opt) {
+                if (!opt.text && !opt.value) return;
+                var op = document.createElement("option");
+                op.value = opt.text || opt.value;
+                op.textContent = opt.text || opt.value;
+                sel.appendChild(op);
+            });
+            sel.value = item[key] || "";
+            draft[key] = sel.value;
+            sel.addEventListener("change", function() {
+                draft[key] = sel.value;
+                draftKeys[key] = true;
+                saveBtn.disabled = false;
+                saveBtn.style.opacity = "1";
+                saveBtn.textContent = selected.length > 1 ? "Save Bulk Changes" : "Save Changes";
+            });
+            wrap.appendChild(sel);
+            container.appendChild(wrap);
+        }
+        var sexOpts = options.sex && options.sex.length ? options.sex : [{ text: "Both" }, { text: "Male" }, { text: "Female" }];
+        addSelect("Eligibility Item", "itemName", options.eligibility, false, false);
+        addSelect("Sex", "sex", sexOpts, false, false);
+        addSelect("Activity Plan", "activityPlanText", options.activityPlans, false, true);
+        addSelect("Cohort Type", "cohortType", options.cohortTypes, true, true);
+        addSelect("Cohort", "cohort", options.cohorts, true, true);
+        addSelect("Out of Range", "outOfRange", [{ text: "Yes" }, { text: "No" }], true, false);
+        var locked = document.createElement("div");
+        locked.style.cssText = "margin-top:12px;padding:10px;border:1px solid #343a46;border-radius:6px;background:#141923;color:#abb4c8;font-size:12px;line-height:1.5;";
+        locked.textContent = selected.length > 1 ? "Bulk mode can change Activity Plan, Cohort Type, and Cohort only. Click Save Bulk Changes to apply these values to the selected staged rows." : "Check Item, Operator, and Value are copied from the source mapping and are intentionally locked. Click Save Changes to apply the configuration.";
+        container.appendChild(locked);
+        var btnRow = document.createElement("div");
+        btnRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#101010;padding-top:10px;";
+        var saveBtn = document.createElement("button");
+        saveBtn.textContent = selected.length > 1 ? "Save Bulk Changes" : "Save Changes";
+        saveBtn.disabled = true;
+        saveBtn.style.cssText = "background:#198754;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:800;cursor:pointer;opacity:0.55;";
+        saveBtn.addEventListener("click", function() {
+            if (saveBtn.disabled) return;
+            var keys = Object.keys(draftKeys);
+            if (!keys.length) return;
+            for (var si = 0; si < selected.length; si++) {
+                for (var ki = 0; ki < keys.length; ki++) {
+                    selected[si][keys[ki]] = draft[keys[ki]];
+                }
+                copyMappingRefreshChangedKeys(selected[si]);
+            }
+            saveBtn.textContent = "Saved";
+            saveBtn.disabled = true;
+            saveBtn.style.opacity = "0.65";
+            renderAll();
+        });
+        btnRow.appendChild(saveBtn);
+        container.appendChild(btnRow);
+    }
+    function copyMappingShowPanel(sourceRows, options) {
+        var staged = [];
+        var internalClipboard = [];
+        var sourceRowsEls = [];
+        var stagedRowsEls = [];
+        var root = document.createElement("div");
+        root.style.cssText = "height:100%;min-height:0;display:grid;grid-template-columns:1fr 8px 1fr 8px 0.82fr;gap:0;color:#fff;font-size:12px;";
+        var savedWidths = null;
+        try { savedWidths = JSON.parse(localStorage.getItem(STORAGE_COPY_MAPPING_WIDTHS) || "null"); } catch (e) {}
+        if (savedWidths && savedWidths.length === 3) root.style.gridTemplateColumns = savedWidths[0] + "fr 8px " + savedWidths[1] + "fr 8px " + savedWidths[2] + "fr";
+        function panel(titleText) {
+            var p = document.createElement("div");
+            p.style.cssText = "display:flex;flex-direction:column;min-width:0;min-height:0;padding:10px;background:#101010;border:1px solid #2d2d2d;";
+            var t = document.createElement("div");
+            t.style.cssText = "font-size:14px;font-weight:800;color:#fff;margin-bottom:8px;";
+            t.textContent = titleText;
+            p.appendChild(t);
+            return p;
+        }
+        var left = panel("Source Mappings");
+        var middle = panel("Staged Copies");
+        var right = panel("Configuration");
+        var leftSearch = document.createElement("input");
+        var midSearch = document.createElement("input");
+        [leftSearch, midSearch].forEach(function(inp) {
+            inp.type = "search";
+            inp.placeholder = "Search... (comma keywords supported)";
+            inp.style.cssText = "width:100%;box-sizing:border-box;margin-bottom:8px;background:#171717;color:#fff;border:1px solid #333;border-radius:6px;padding:7px 9px;font-size:12px;";
+        });
+        function uniqueSourceValues(field) {
+            var seen = {};
+            var values = [];
+            sourceRows.forEach(function(item) {
+                var val = copyMappingNormalize(item[field] || "");
+                if (!val || seen[val]) return;
+                seen[val] = true;
+                values.push(val);
+            });
+            values.sort(function(a, b) { return a.localeCompare(b); });
+            return values;
+        }
+        function makeSourceFilter(label, field) {
+            var wrap = document.createElement("label");
+            wrap.style.cssText = "display:flex;flex-direction:column;gap:3px;min-width:0;color:#9aa3b8;font-size:10px;font-weight:700;";
+            var text = document.createElement("span");
+            text.textContent = label;
+            var select = document.createElement("select");
+            select.setAttribute("data-copy-mapping-source-filter", field);
+            select.style.cssText = "width:100%;min-width:0;background:#171717;color:#fff;border:1px solid #333;border-radius:5px;padding:5px 6px;font-size:11px;";
+            var all = document.createElement("option");
+            all.value = "";
+            all.textContent = "All";
+            select.appendChild(all);
+            uniqueSourceValues(field).forEach(function(value) {
+                var opt = document.createElement("option");
+                opt.value = value;
+                opt.textContent = value;
+                select.appendChild(opt);
+            });
+            wrap.appendChild(text);
+            wrap.appendChild(select);
+            return { wrap: wrap, select: select, field: field };
+        }
+        var sourceFilters = [
+            makeSourceFilter("Cohort", "cohort"),
+            makeSourceFilter("Cohort Type", "cohortType"),
+            makeSourceFilter("Sex", "sex"),
+            makeSourceFilter("Activity Plan", "activityPlanText")
+        ];
+        var sourceFilterWrap = document.createElement("div");
+        sourceFilterWrap.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:8px;";
+        sourceFilters.forEach(function(filter) { sourceFilterWrap.appendChild(filter.wrap); });
+        var leftControls = document.createElement("div");
+        var midControls = document.createElement("div");
+        [leftControls, midControls].forEach(function(c) { c.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:8px;"; });
+        function smallBtn(text, bg) {
+            var b = document.createElement("button");
+            b.textContent = text;
+            b.style.cssText = "background:" + bg + ";color:#fff;border:none;border-radius:5px;padding:6px 9px;font-size:11px;font-weight:700;cursor:pointer;";
+            return b;
+        }
+        var leftToggle = smallBtn("Select/Deselect All", "#444");
+        var leftCopy = smallBtn("Copy", "#2f80ed");
+        var leftCount = document.createElement("span");
+        leftCount.style.cssText = "margin-left:auto;color:#9aa3b8;";
+        leftControls.appendChild(leftToggle); leftControls.appendChild(leftCopy); leftControls.appendChild(leftCount);
+        var pasteBtn = smallBtn("Paste", "#2f80ed");
+        var midToggle = smallBtn("Select/Deselect All", "#444");
+        var midCount = document.createElement("span");
+        midCount.style.cssText = "margin-left:auto;color:#9aa3b8;";
+        midControls.appendChild(pasteBtn); midControls.appendChild(midToggle); midControls.appendChild(midCount);
+        var leftList = document.createElement("div");
+        var midList = document.createElement("div");
+        [leftList, midList].forEach(function(l) { l.style.cssText = "flex:1;min-height:0;overflow:auto;border:1px solid #262626;border-radius:6px;background:#121212;"; });
+        var config = document.createElement("div");
+        config.style.cssText = "flex:1;min-height:0;overflow:auto;";
+        left.appendChild(leftSearch); left.appendChild(sourceFilterWrap); left.appendChild(leftControls); left.appendChild(leftList);
+        middle.appendChild(midSearch); middle.appendChild(midControls); middle.appendChild(midList);
+        right.appendChild(config);
+        function resizer(idx) {
+            var r = document.createElement("div");
+            r.style.cssText = "cursor:col-resize;background:#262626;";
+            r.addEventListener("mousedown", function(e) {
+                var startX = e.clientX;
+                var panelEls = [left, middle, right];
+                var widths = panelEls.map(function(p) { return p.getBoundingClientRect().width; });
+                function move(ev) {
+                    var dx = ev.clientX - startX;
+                    if (idx === 0) { widths[0] += dx; widths[1] -= dx; } else { widths[1] += dx; widths[2] -= dx; }
+                    var total = Math.max(1, widths[0] + widths[1] + widths[2]);
+                    var fr = widths.map(function(w) { return Math.max(0.35, w / total * 3); });
+                    root.style.gridTemplateColumns = fr[0] + "fr 8px " + fr[1] + "fr 8px " + fr[2] + "fr";
+                    try { localStorage.setItem(STORAGE_COPY_MAPPING_WIDTHS, JSON.stringify(fr)); } catch (err) {}
+                }
+                function up() { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); }
+                document.addEventListener("mousemove", move);
+                document.addEventListener("mouseup", up);
+                e.preventDefault();
+            });
+            return r;
+        }
+        root.appendChild(left); root.appendChild(resizer(0)); root.appendChild(middle); root.appendChild(resizer(1)); root.appendChild(right);
+        var footer = document.createElement("div");
+        footer.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:10px;";
+        var cancelBtn = smallBtn("Cancel", "#555");
+        var confirmBtn = smallBtn("Confirm", "#198754");
+        footer.appendChild(cancelBtn); footer.appendChild(confirmBtn);
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "height:calc(100vh - 86px);display:flex;flex-direction:column;min-height:0;";
+        wrap.appendChild(root); wrap.appendChild(footer);
+        function updateCounts() {
+            leftCount.textContent = String(sourceRowsEls.filter(function(e) { return e.row.style.display !== "none"; }).length) + "/" + sourceRows.length;
+            midCount.textContent = String(stagedRowsEls.filter(function(e) { return e.row.style.display !== "none"; }).length) + "/" + staged.length;
+        }
+        function selectedFrom(entries) { return entries.filter(function(e) { return e.row._copyMappingCheckbox.checked && e.row.style.display !== "none"; }).map(function(e) { return e.item; }); }
+        function refreshStagedHighlights() {
+            stagedRowsEls.forEach(function(e) {
+                var selected = !!(e.row._copyMappingCheckbox && e.row._copyMappingCheckbox.checked);
+                if (selected) {
+                    e.row.style.background = "rgba(47,128,237,0.24)";
+                    e.row.style.outline = "2px solid #5aa2ff";
+                    e.row.style.boxShadow = "inset 3px 0 0 #5aa2ff";
+                } else if (e.item.dirty) {
+                    e.row.style.background = "rgba(91,67,199,0.22)";
+                    e.row.style.outline = "1px solid #8f7bff";
+                    e.row.style.boxShadow = "none";
+                } else {
+                    e.row.style.background = "transparent";
+                    e.row.style.outline = "none";
+                    e.row.style.boxShadow = "none";
+                }
+            });
+        }
+        function updateConfig() {
+            copyMappingBuildConfigPanel(config, selectedFrom(stagedRowsEls), options, renderStaged);
+            refreshStagedHighlights();
+            updateCounts();
+        }
+        function applySearch(input, entries) {
+            entries.forEach(function(e) {
+                var txt = [e.item.itemName, e.item.sex, e.item.cohort, e.item.cohortType, e.item.activityPlanText, e.item.scheduledActivityText, e.item.checkItemText, e.item.operator, e.item.value].join(" ");
+                e.row.style.display = matchesCommaSeparatedSearch(txt, input.value || "") ? "grid" : "none";
+            });
+            updateCounts();
+        }
+        function applySourceFilters() {
+            sourceRowsEls.forEach(function(e) {
+                var txt = [e.item.itemName, e.item.sex, e.item.cohort, e.item.cohortType, e.item.activityPlanText, e.item.scheduledActivityText, e.item.checkItemText, e.item.operator, e.item.value].join(" ");
+                var visible = matchesCommaSeparatedSearch(txt, leftSearch.value || "");
+                if (visible) {
+                    for (var fi = 0; fi < sourceFilters.length; fi++) {
+                        var expected = copyMappingNormalize(sourceFilters[fi].select.value || "");
+                        if (!expected) continue;
+                        if (copyMappingNormalize(e.item[sourceFilters[fi].field] || "") !== expected) {
+                            visible = false;
+                            break;
+                        }
+                    }
+                }
+                e.row.style.display = visible ? "grid" : "none";
+            });
+            updateCounts();
+        }
+        function renderSources() {
+            leftList.innerHTML = "";
+            sourceRowsEls = [];
+            sourceRows.forEach(function(item) {
+                var row = copyMappingCreateRow(item, "source", function(){ updateConfig(); });
+                row._copyMappingAction.addEventListener("click", function(e) { e.stopPropagation(); internalClipboard = [item]; copyMappingLog("copied one source mapping: " + item.itemName); });
+                leftList.appendChild(row);
+                sourceRowsEls.push({ row: row, item: item });
+            });
+            applySourceFilters();
+        }
+        function renderStaged() {
+            var checkedMap = {};
+            stagedRowsEls.forEach(function(e) {
+                if (e.row._copyMappingCheckbox && e.row._copyMappingCheckbox.checked) checkedMap[e.item.uid] = true;
+            });
+            midList.innerHTML = "";
+            stagedRowsEls = [];
+            staged.forEach(function(item) {
+                var row = copyMappingCreateRow(item, "stage", function(){ updateConfig(); });
+                row._copyMappingCheckbox.checked = !!checkedMap[item.uid];
+                row._copyMappingAction.addEventListener("click", function(e) { e.stopPropagation(); staged = staged.filter(function(x) { return x.uid !== item.uid; }); renderStaged(); });
+                midList.appendChild(row);
+                stagedRowsEls.push({ row: row, item: item });
+            });
+            applySearch(midSearch, stagedRowsEls);
+            refreshStagedHighlights();
+            updateConfig();
+        }
+        leftSearch.addEventListener("input", function(){ applySourceFilters(); });
+        sourceFilters.forEach(function(filter) { filter.select.addEventListener("change", applySourceFilters); });
+        midSearch.addEventListener("input", function(){ applySearch(midSearch, stagedRowsEls); });
+        leftToggle.addEventListener("click", function() {
+            var visible = sourceRowsEls.filter(function(e) { return e.row.style.display !== "none"; });
+            var all = visible.length && visible.every(function(e) { return e.row._copyMappingCheckbox.checked; });
+            visible.forEach(function(e) { e.row._copyMappingCheckbox.checked = !all; });
+            updateCounts();
+        });
+        midToggle.addEventListener("click", function() {
+            var visible = stagedRowsEls.filter(function(e) { return e.row.style.display !== "none"; });
+            var all = visible.length && visible.every(function(e) { return e.row._copyMappingCheckbox.checked; });
+            visible.forEach(function(e) { e.row._copyMappingCheckbox.checked = !all; });
+            updateConfig();
+        });
+        leftCopy.addEventListener("click", function() {
+            internalClipboard = selectedFrom(sourceRowsEls);
+            if (!internalClipboard.length) {
+                internalClipboard = sourceRowsEls.filter(function(e) { return e.row.style.display !== "none"; }).map(function(e) { return e.item; });
+            }
+            copyMappingLog("copied selected source mappings=" + internalClipboard.length);
+        });
+        pasteBtn.addEventListener("click", function() { var src = internalClipboard.length ? internalClipboard : selectedFrom(sourceRowsEls); src.forEach(function(item) { staged.push(copyMappingCloneItem(item)); }); renderStaged(); });
+        cancelBtn.addEventListener("click", function() { if (COPY_MAPPING_POPUP_REF) COPY_MAPPING_POPUP_REF.close(); });
+        confirmBtn.addEventListener("click", function() {
+            var existingKeys = {};
+            sourceRows.forEach(function(item) { existingKeys[copyMappingBuildIdentity(item)] = true; });
+            var toCopy = staged.filter(function(item) { return item.dirty && !existingKeys[copyMappingBuildIdentity(item)]; });
+            if (!toCopy.length) { showWarningPopup("Copy Mapping", "No changed, non-duplicate staged mappings are ready to copy."); return; }
+            copyMappingShowConfirm(toCopy, function() { if (COPY_MAPPING_POPUP_REF) COPY_MAPPING_POPUP_REF.close(); copyMappingExecute(toCopy); });
+        });
+        COPY_MAPPING_POPUP_REF = createPopup({ title: "Copy Mapping", content: wrap, width: "100vw", maxWidth: "100vw", height: "100vh", maxHeight: "100vh", onClose: function() { COPY_MAPPING_POPUP_REF = null; } });
+        if (COPY_MAPPING_POPUP_REF && COPY_MAPPING_POPUP_REF.element) {
+            COPY_MAPPING_POPUP_REF.element.style.top = "0";
+            COPY_MAPPING_POPUP_REF.element.style.left = "0";
+            COPY_MAPPING_POPUP_REF.element.style.transform = "none";
+            COPY_MAPPING_POPUP_REF.element.style.borderRadius = "0";
+        }
+        renderSources();
+        renderStaged();
+    }
+    function copyMappingShowConfirm(items, onConfirm) {
+        var box = document.createElement("div");
+        box.style.cssText = "color:#fff;font-size:13px;line-height:1.5;display:flex;flex-direction:column;gap:12px;";
+        var msg = document.createElement("div");
+        msg.innerHTML = "You are about to copy <strong>" + String(items.length) + "</strong> eligibility mapping(s).";
+        var btns = document.createElement("div");
+        btns.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "background:#555;color:#fff;border:none;border-radius:5px;padding:7px 16px;cursor:pointer;";
+        var confirm = document.createElement("button");
+        confirm.textContent = "Copy";
+        confirm.style.cssText = "background:#198754;color:#fff;border:none;border-radius:5px;padding:7px 16px;cursor:pointer;font-weight:700;";
+        btns.appendChild(cancel); btns.appendChild(confirm);
+        box.appendChild(msg); box.appendChild(btns);
+        var popup = createPopup({ title: "Copy Mapping - Confirm", content: box, width: "430px", height: "auto" });
+        cancel.addEventListener("click", function(){ popup.close(); });
+        confirm.addEventListener("click", function(){ popup.close(); onConfirm(); });
+    }
+    function copyMappingCreateStatusPanel(items) {
+        var panel = document.createElement("div");
+        panel.style.cssText = "position:fixed;left:18px;bottom:18px;z-index:1000000;width:420px;max-height:55vh;display:flex;flex-direction:column;background:#111;color:#fff;border:1px solid #444;border-radius:9px;box-shadow:0 12px 35px rgba(0,0,0,0.45);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;font-size:12px;";
+        var header = document.createElement("div");
+        header.style.cssText = "padding:8px 10px;border-bottom:1px solid #333;font-weight:800;cursor:move;user-select:none;display:flex;align-items:center;justify-content:space-between;gap:10px;";
+        var title = document.createElement("span");
+        title.textContent = "Copy Mapping Progress";
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.textContent = "×";
+        closeBtn.title = "Close progress panel";
+        closeBtn.style.cssText = "width:24px;height:24px;line-height:20px;display:flex;align-items:center;justify-content:center;border:1px solid #3f3f3f;border-radius:5px;background:#1f1f1f;color:#e8e8e8;font-size:17px;font-weight:800;cursor:pointer;padding:0;flex:0 0 auto;";
+        closeBtn.addEventListener("mouseenter", function() { closeBtn.style.background = "#3a1f28"; closeBtn.style.borderColor = "#8b3a4a"; });
+        closeBtn.addEventListener("mouseleave", function() { closeBtn.style.background = "#1f1f1f"; closeBtn.style.borderColor = "#3f3f3f"; });
+        closeBtn.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+        closeBtn.addEventListener("click", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            panel.remove();
+        });
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        var summary = document.createElement("div");
+        summary.style.cssText = "padding:8px 12px;color:#cdd3e1;border-bottom:1px solid #252525;";
+        var list = document.createElement("div");
+        list.style.cssText = "overflow:auto;max-height:42vh;";
+        panel.appendChild(header); panel.appendChild(summary); panel.appendChild(list);
+        var rows = [];
+        items.forEach(function(item, idx) {
+            var r = document.createElement("div");
+            r.style.cssText = "padding:8px 10px;border-bottom:1px solid #252525;";
+            r.textContent = String(idx + 1) + ". Pending - " + item.itemName;
+            list.appendChild(r);
+            rows.push(r);
+        });
+        document.body.appendChild(panel);
+        header.addEventListener("mousedown", function(e) {
+            var rect = panel.getBoundingClientRect();
+            var startX = e.clientX;
+            var startY = e.clientY;
+            var startLeft = rect.left;
+            var startTop = rect.top;
+            panel.style.right = "auto";
+            panel.style.bottom = "auto";
+            function move(ev) {
+                var nextLeft = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, startLeft + ev.clientX - startX));
+                var nextTop = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, startTop + ev.clientY - startY));
+                panel.style.left = nextLeft + "px";
+                panel.style.top = nextTop + "px";
+            }
+            function up() {
+                document.removeEventListener("mousemove", move);
+                document.removeEventListener("mouseup", up);
+            }
+            document.addEventListener("mousemove", move);
+            document.addEventListener("mouseup", up);
+            e.preventDefault();
+        });
+        function updateSummary() {
+            var s = rows.filter(function(r) { return r._status === "Success"; }).length;
+            var f = rows.filter(function(r) { return r._status === "Failed"; }).length;
+            var k = rows.filter(function(r) { return r._status === "Skipped"; }).length;
+            summary.textContent = "Total: " + rows.length + " | Success: " + s + " | Failed: " + f + " | Skipped: " + k;
+        }
+        updateSummary();
+        return { update: function(idx, status, detail) {
+            if (!panel.isConnected) return;
+            rows[idx]._status = status;
+            rows[idx].style.color = status === "Success" ? "#8ff0a4" : (status === "Failed" ? "#ff9b9b" : (status === "Skipped" ? "#ffd479" : "#fff"));
+            rows[idx].textContent = String(idx + 1) + ". " + status + " - " + items[idx].itemName + (detail ? " | " + detail : "");
+            updateSummary();
+        } };
+    }
+    async function copyMappingOpenCopyModal(item) {
+        await copyMappingResetListFilters("before opening Copy for " + item.itemName);
+        var match = null;
+        var fallbackMatch = null;
+        var deadline = Date.now() + 1600;
+        while (Date.now() < deadline && !match) {
+            var links = document.querySelectorAll("a[href*='/secure/crfdesign/studylibrary/eligibility/copy/']");
+            for (var i = 0; i < links.length; i++) {
+                var href = links[i].getAttribute("href") || "";
+                if (href === item.copyUrl) {
+                    fallbackMatch = links[i];
+                    if (links[i].offsetParent !== null) {
+                        match = links[i];
+                        break;
+                    }
+                }
+            }
+            if (!match) await sleep(350);
+        }
+        if (!match) match = fallbackMatch;
+        if (match) {
+            try { match.scrollIntoView({ block: "center", inline: "nearest" }); } catch (e) {}
+            return await copyMappingLoadUrlIntoAjaxModal(match.getAttribute("href") || item.copyUrl);
+        }
+        return false;
+    }
+    async function copyMappingLoadUrlIntoAjaxModal(url) {
+        if (!url) return false;
+        var fullUrl = url.indexOf("http") === 0 ? url : location.origin + url;
+        var modalLink = document.querySelector("a[href='" + url.replace(/'/g, "\\'") + "'], a[href='" + fullUrl.replace(/'/g, "\\'") + "']");
+        if (modalLink) {
+            try {
+                modalLink.setAttribute("data-toggle", "modal");
+                modalLink.setAttribute("data-target", "#ajaxModal");
+                var preventNavigation = function(evt) { evt.preventDefault(); };
+                modalLink.addEventListener("click", preventNavigation, true);
+                modalLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                modalLink.removeEventListener("click", preventNavigation, true);
+                var openedByPage = await waitForElement("#ajaxModal .modal-content", 3500);
+                if (openedByPage) {
+                    copyMappingLog("Copy modal opened through ClinSpark modal handler");
+                    return true;
+                }
+                copyMappingLog("ClinSpark modal handler did not open Copy modal; trying fallback loader");
+            } catch (clickErr) {
+                copyMappingLog("ClinSpark modal handler click failed; trying fallback loader: " + String(clickErr));
+            }
+        }
+        if (typeof jQuery === "undefined" || !jQuery) {
+            return await copyMappingFetchUrlIntoAjaxModal(fullUrl);
+        }
+        return await new Promise(function(resolve) {
+            try {
+                var modal = jQuery("#ajaxModal");
+                if (!modal.length) {
+                    jQuery("body").append('<div id="ajaxModal" class="modal fade" tabindex="-1" role="dialog" aria-hidden="true"><div class="modal-dialog"></div></div>');
+                    modal = jQuery("#ajaxModal");
+                }
+                var dialog = modal.find(".modal-dialog");
+                if (!dialog.length) {
+                    modal.html('<div class="modal-dialog"></div>');
+                    dialog = modal.find(".modal-dialog");
+                }
+                try { modal.removeData("bs.modal"); } catch (e0) {}
+                dialog.empty();
+                modal.off("hidden.copyMapping");
+                modal.on("hidden.copyMapping", function() {
+                    modal.off("hidden.copyMapping");
+                    dialog.empty();
+                });
+                dialog.load(fullUrl, function(responseText, textStatus) {
+                    if (textStatus === "error") {
+                        copyMappingLog("safe modal load failed for " + url);
+                        resolve(false);
+                        return;
+                    }
+                    try { modal.modal("show"); } catch (e1) { modal.show().addClass("in"); }
+                    setTimeout(function() {
+                        resolve(!!document.querySelector("#ajaxModal .modal-content"));
+                    }, 350);
+                });
+            } catch (err) {
+                copyMappingLog("safe modal load error: " + String(err));
+                resolve(false);
+            }
+        });
+    }
+    async function copyMappingFetchUrlIntoAjaxModal(fullUrl) {
+        try {
+            copyMappingLog("jQuery unavailable; using fetch modal fallback");
+            var resp = await fetch(fullUrl, { credentials: "same-origin" });
+            if (!resp.ok) {
+                copyMappingLog("fetch modal fallback failed HTTP " + resp.status);
+                return false;
+            }
+            var html = await resp.text();
+            var ajaxModal = document.getElementById("ajaxModal");
+            if (!ajaxModal) {
+                ajaxModal = document.createElement("div");
+                ajaxModal.id = "ajaxModal";
+                ajaxModal.className = "modal fade";
+                ajaxModal.setAttribute("tabindex", "-1");
+                ajaxModal.setAttribute("role", "dialog");
+                ajaxModal.setAttribute("aria-hidden", "true");
+                document.body.appendChild(ajaxModal);
+            }
+            var dialog = ajaxModal.querySelector(".modal-dialog");
+            if (!dialog) {
+                dialog = document.createElement("div");
+                dialog.className = "modal-dialog";
+                ajaxModal.innerHTML = "";
+                ajaxModal.appendChild(dialog);
+            }
+            dialog.innerHTML = html;
+            ajaxModal.style.display = "block";
+            ajaxModal.classList.add("in", "show");
+            ajaxModal.removeAttribute("aria-hidden");
+            document.body.classList.add("modal-open");
+            if (!document.querySelector(".modal-backdrop.copy-mapping-backdrop")) {
+                var backdrop = document.createElement("div");
+                backdrop.className = "modal-backdrop fade in copy-mapping-backdrop";
+                document.body.appendChild(backdrop);
+            }
+            var closeButtons = ajaxModal.querySelectorAll("[data-dismiss='modal'], .close, .bootbox-close-button");
+            for (var i = 0; i < closeButtons.length; i++) {
+                closeButtons[i].addEventListener("click", function(e) {
+                    e.preventDefault();
+                    ajaxModal.classList.remove("in", "show");
+                    ajaxModal.style.display = "none";
+                    ajaxModal.setAttribute("aria-hidden", "true");
+                    var bds = document.querySelectorAll(".modal-backdrop.copy-mapping-backdrop");
+                    for (var bi = 0; bi < bds.length; bi++) bds[bi].remove();
+                    document.body.classList.remove("modal-open");
+                });
+            }
+            return !!document.querySelector("#ajaxModal .modal-content, #ajaxModal form#modalInput");
+        } catch (err) {
+            copyMappingLog("fetch modal fallback error: " + String(err));
+            return false;
+        }
+    }
+    async function copyMappingResetListFilters(reason) {
+        var changed = false;
+        var filterSelectors = ["#eligibilityItemRefs", "#eligibilityCohorts", "#cohortType"];
+        var hasActiveFilter = false;
+        for (var ai = 0; ai < filterSelectors.length; ai++) {
+            var activeSel = document.querySelector(filterSelectors[ai]);
+            if (!activeSel) continue;
+            for (var ao = 0; ao < activeSel.options.length; ao++) {
+                if (activeSel.options[ao].selected) {
+                    hasActiveFilter = true;
+                    break;
+                }
+            }
+            if (hasActiveFilter) break;
+        }
+        try {
+            var resetControl = document.querySelector("[onclick*='resetSearch']");
+            if (!resetControl) {
+                var resetIcon = document.getElementById("resetIcon");
+                resetControl = resetIcon ? resetIcon.closest("span, a, button") : null;
+            }
+            if (resetControl && hasActiveFilter) {
+                resetControl.click();
+                changed = true;
+            }
+        } catch (e) {
+            copyMappingLog("filter reset click failed: " + String(e));
+        }
+        for (var fi = 0; fi < filterSelectors.length; fi++) {
+            var sel = document.querySelector(filterSelectors[fi]);
+            if (!sel) continue;
+            try {
+                var hadSelected = false;
+                for (var soi = 0; soi < sel.options.length; soi++) {
+                    if (sel.options[soi].selected) {
+                        hadSelected = true;
+                        break;
+                    }
+                }
+                if (!hadSelected) continue;
+                for (var oi = 0; oi < sel.options.length; oi++) sel.options[oi].selected = false;
+                sel.value = "";
+                select2TriggerChange(sel);
+                changed = true;
+            } catch (e2) {
+                copyMappingLog("filter select clear failed for " + filterSelectors[fi] + ": " + String(e2));
+            }
+        }
+        copyMappingCloseListFilterDropdowns();
+        if (changed) {
+            copyMappingLog("cleared eligibility list filters" + (reason ? " (" + reason + ")" : ""));
+            await sleep(350);
+            copyMappingCloseListFilterDropdowns();
+        }
+    }
+    function copyMappingCloseListFilterDropdowns() {
+        var filterSelectors = ["#eligibilityItemRefs", "#eligibilityCohorts", "#cohortType"];
+        for (var fi = 0; fi < filterSelectors.length; fi++) {
+            var sel = document.querySelector(filterSelectors[fi]);
+            if (!sel) continue;
+            try {
+                if (typeof jQuery !== "undefined" && jQuery && jQuery.fn && jQuery.fn.select2) {
+                    jQuery(sel).select2("close");
+                }
+            } catch (e) {}
+            var container = document.getElementById("s2id_" + sel.id);
+            if (container) {
+                container.classList.remove("select2-dropdown-open");
+                var input = container.querySelector("input.select2-input");
+                if (input) {
+                    input.value = "";
+                    try { input.blur(); } catch (e2) {}
+                    input.style.width = "22px";
+                    input.removeAttribute("aria-activedescendant");
+                }
+            }
+        }
+        var activeDrops = document.querySelectorAll("#s2id_eligibilityItemRefs .select2-drop, #s2id_eligibilityCohorts .select2-drop, #s2id_cohortType .select2-drop, #select2-drop.select2-drop-active, .select2-drop-mask");
+        for (var di = 0; di < activeDrops.length; di++) {
+            activeDrops[di].classList.remove("select2-drop-active");
+            activeDrops[di].classList.add("select2-display-none");
+            activeDrops[di].style.display = "none";
+        }
+        try {
+            if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains("select2-input")) {
+                document.activeElement.blur();
+            }
+        } catch (e3) {}
+    }
+    async function copyMappingSetSelectByText(selector, text, minScore) {
+        var sel = document.querySelector(selector);
+        if (!sel) sel = await waitForElement(selector, 8000);
+        if (!sel) return false;
+        var opts = sel.querySelectorAll("option");
+        var best = null;
+        var bestScore = 0;
+        for (var i = 0; i < opts.length; i++) {
+            var val = copyMappingNormalize(opts[i].value);
+            var txt = copyMappingNormalize(opts[i].textContent);
+            if (!val && !txt) continue;
+            var score = copyMappingSimilarity(text, txt);
+            if (score > bestScore) { bestScore = score; best = opts[i]; }
+        }
+        if (!best || bestScore < (minScore || 0.72)) return false;
+        sel.value = best.value;
+        select2TriggerChange(sel);
+        await sleep(importIERandomDelay() + 250);
+        return true;
+    }
+    function copyMappingComparatorKey(text) {
+        var s = copyMappingNormalize(text).toLowerCase()
+            .replace(/&gt;/g, ">")
+            .replace(/&lt;/g, "<")
+            .replace(/\s+/g, " ")
+            .trim();
+        if (!s) return "";
+        if (s === "gt" || s === ">" || s === "greater than") return "GT";
+        if (s === "lt" || s === "<" || s === "less than") return "LT";
+        if (s === "ge" || s === ">=" || s === "=>" || s === "greater than or equal" || s === "greater than or equal to") return "GE";
+        if (s === "le" || s === "<=" || s === "=<" || s === "less than or equal" || s === "less than or equal to") return "LE";
+        if (s === "eq" || s === "=" || s === "==" || s === "equal" || s === "equals") return "EQ";
+        if (s === "ne" || s === "!=" || s === "<>" || s === "not equal" || s === "not equals") return "NE";
+        if (s === "notin" || s === "not in") return "NOTIN";
+        return s.toUpperCase();
+    }
+    async function copyMappingSetComparatorSelect(sel, operatorText) {
+        if (!sel || !operatorText) return true;
+        var wanted = copyMappingComparatorKey(operatorText);
+        if (!wanted) return true;
+        var opts = sel.querySelectorAll("option");
+        var best = null;
+        for (var i = 0; i < opts.length; i++) {
+            var valKey = copyMappingComparatorKey(opts[i].value);
+            var txtKey = copyMappingComparatorKey(opts[i].textContent);
+            if (valKey === wanted || txtKey === wanted) {
+                best = opts[i];
+                break;
+            }
+        }
+        if (!best) {
+            copyMappingLog("comparator option not found for '" + operatorText + "'");
+            return false;
+        }
+        sel.value = best.value;
+        select2TriggerChange(sel);
+        await sleep(150);
+        var selected = sel.options[sel.selectedIndex];
+        var selectedKey = copyMappingComparatorKey(selected ? (selected.value || selected.textContent) : sel.value);
+        if (selectedKey !== wanted) {
+            copyMappingLog("comparator verification failed: expected " + wanted + " got " + selectedKey);
+            return false;
+        }
+        return true;
+    }
+    async function copyMappingSetCohorts(text) {
+        var sel = document.querySelector("select#cohorts, select#cohort");
+        if (!sel || !text) return true;
+        return await copyMappingSetSelectByText("select#cohorts, select#cohort", text, 0.68);
+    }
+    async function copyMappingSetCohortType(text) {
+        var sel = document.querySelector("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']");
+        if (!sel || !text) return true;
+        var ok = await copyMappingSetSelectByText("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']", text, 0.68);
+        if (!ok) copyMappingLog("cohort type option not found: " + text);
+        return ok;
+    }
+    async function copyMappingSetOutOfRange(text) {
+        var val = copyMappingNormalize(text);
+        if (!val) return true;
+        var checkbox = document.querySelector("input#outOfRange, input[name*='outOfRange']");
+        if (checkbox && checkbox.type === "checkbox") {
+            var desired = /^yes$/i.test(val);
+            if (checkbox.checked !== desired) checkbox.click();
+            return true;
+        }
+        var sel = document.querySelector("select#outOfRange, select[name*='outOfRange']");
+        if (!sel) return true;
+        return await copyMappingSetSelectByText("select#outOfRange, select[name*='outOfRange']", val, 0.8);
+    }
+    function copyMappingSetCheckboxChecked(checkbox, desired) {
+        if (!checkbox) return false;
+        desired = !!desired;
+        checkbox.checked = desired;
+        checkbox.defaultChecked = desired;
+        if (desired) checkbox.setAttribute("checked", "checked");
+        else checkbox.removeAttribute("checked");
+        if (typeof jQuery !== "undefined") {
+            try { jQuery(checkbox).prop("checked", desired); } catch (e) { }
+        }
+        var span = checkbox.closest("span");
+        if (span) {
+            if (desired) span.classList.add("checked");
+            else span.classList.remove("checked");
+        }
+        var checkerSpan = checkbox.closest(".checker") ? checkbox.closest(".checker").querySelector("span") : null;
+        if (checkerSpan) {
+            if (desired) checkerSpan.classList.add("checked");
+            else checkerSpan.classList.remove("checked");
+        }
+        if (typeof jQuery !== "undefined" && jQuery.uniform && typeof jQuery.uniform.update === "function") {
+            try { jQuery.uniform.update(jQuery(checkbox)); } catch (e) { }
+            try { jQuery.uniform.update(); } catch (e) { }
+        }
+        checkbox.dispatchEvent(new Event("input", { bubbles: true }));
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }
+    async function copyMappingWaitForLabRows(timeoutMs) {
+        var start = Date.now();
+        while (Date.now() - start < (timeoutMs || 10000)) {
+            var tbody = document.querySelector("#labTestsTbody");
+            if (tbody) {
+                var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr")).filter(function (row) {
+                    return row.querySelector("input[type='checkbox'][name^='labTest_']");
+                });
+                if (rows.length) return rows;
+            }
+            await sleep(200);
+        }
+        return [];
+    }
+    function copyMappingLabRowMatches(row, item) {
+        var cells = row ? row.querySelectorAll("td") : [];
+        var txt = copyMappingNormalize(cells[1] ? cells[1].textContent : row.textContent);
+        if (!txt) return false;
+        var txtKey = copyMappingKeyText(txt);
+        var nameKey = copyMappingKeyText(item.labTestName || "");
+        var codeKey = copyMappingKeyText(item.labTestCode || "");
+        var fullKey = copyMappingKeyText(item.labTestText || "");
+        if (codeKey && txtKey.indexOf(codeKey) !== -1) return true;
+        if (fullKey && txtKey.indexOf(fullKey) !== -1) return true;
+        if (nameKey && txtKey.indexOf(nameKey) !== -1) return true;
+        return copyMappingSimilarity(item.labTestText || item.labTestName, txt) >= 0.72;
+    }
+    async function copyMappingConfigureLabTest(item) {
+        if (!item || !item.labTestText) return true;
+        var rows = await copyMappingWaitForLabRows(10000);
+        if (!rows.length) {
+            copyMappingLog("lab test table did not load for " + item.labTestText);
+            return false;
+        }
+        var matched = null;
+        for (var i = 0; i < rows.length; i++) {
+            if (copyMappingLabRowMatches(rows[i], item)) {
+                matched = rows[i];
+                break;
+            }
+        }
+        if (!matched) {
+            copyMappingLog("lab test target not found: " + item.labTestText);
+            return false;
+        }
+        var selectAll = document.querySelector("#selectAllLabTestsCheckbox");
+        if (selectAll) copyMappingSetCheckboxChecked(selectAll, false);
+        for (var ri = 0; ri < rows.length; ri++) {
+            var row = rows[ri];
+            var mainCb = row.querySelector("input[type='checkbox'][name^='labTest_']");
+            copyMappingSetCheckboxChecked(mainCb, false);
+            var oorCb = row.querySelector("input[type='checkbox'][name^='labTestOutOfRangeIneligible_']");
+            if (oorCb) copyMappingSetCheckboxChecked(oorCb, false);
+            var compSel = row.querySelector("select[name^='labTestEligibilityComparator_']");
+            if (compSel) {
+                compSel.value = "";
+                select2TriggerChange(compSel);
+            }
+            var valueInput = row.querySelector("input[name^='labTestValue_']");
+            if (valueInput) {
+                valueInput.value = "";
+                valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+                valueInput.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+        await sleep(150);
+        var targetCb = matched.querySelector("input[type='checkbox'][name^='labTest_']");
+        copyMappingSetCheckboxChecked(targetCb, true);
+        var targetOor = matched.querySelector("input[type='checkbox'][name^='labTestOutOfRangeIneligible_']");
+        if (targetOor) copyMappingSetCheckboxChecked(targetOor, /^yes$/i.test(item.outOfRange || ""));
+        var targetComp = matched.querySelector("select[name^='labTestEligibilityComparator_']");
+        if (targetComp && item.operator) {
+            var compOk = await copyMappingSetComparatorSelect(targetComp, item.operator);
+            if (!compOk) return false;
+        }
+        var targetValue = matched.querySelector("input[name^='labTestValue_']");
+        if (targetValue && item.value) {
+            targetValue.value = item.value;
+            targetValue.dispatchEvent(new Event("input", { bubbles: true }));
+            targetValue.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        if (typeof jQuery !== "undefined" && jQuery.uniform && typeof jQuery.uniform.update === "function") {
+            try { jQuery.uniform.update(); } catch (e) { }
+        }
+        await sleep(250);
+        var checkedRows = rows.filter(function (row) {
+            var cb = row.querySelector("input[type='checkbox'][name^='labTest_']");
+            return cb && cb.checked;
+        });
+        if (checkedRows.length !== 1 || checkedRows[0] !== matched) {
+            var checkedLabels = checkedRows.map(function (row) {
+                var cells = row.querySelectorAll("td");
+                return copyMappingNormalize(cells[1] ? cells[1].textContent : row.textContent);
+            }).join("; ");
+            copyMappingLog("lab test verification failed for " + item.labTestText + "; checked=" + (checkedLabels || "none"));
+            return false;
+        }
+        copyMappingLog("lab test configured: " + item.labTestText + " OOR=" + (item.outOfRange || "No"));
+        return true;
+    }
+    async function copyMappingSetSelectElementByText(sel, text, minScore) {
+        if (!sel) return false;
+        var opts = sel.querySelectorAll("option");
+        var best = null;
+        var bestScore = 0;
+        for (var i = 0; i < opts.length; i++) {
+            var val = copyMappingNormalize(opts[i].value);
+            var txt = copyMappingNormalize(opts[i].textContent);
+            if (!val && !txt) continue;
+            var score = Math.max(copyMappingSimilarity(text, txt), copyMappingSimilarity(text, val));
+            if (score > bestScore) { bestScore = score; best = opts[i]; }
+        }
+        if (!best || bestScore < (minScore || 0.72)) return false;
+        sel.value = best.value;
+        select2TriggerChange(sel);
+        await sleep(150);
+        return true;
+    }
+    async function copyMappingApplyItem(item) {
+        var opened = await copyMappingOpenCopyModal(item);
+        if (!opened) return { ok: false, detail: "Copy modal did not open" };
+        await sleep(600);
+        var changed = item._changedKeys || {};
+        var hasTrackedChanges = Object.keys(changed).length > 0;
+        if (!hasTrackedChanges && item.dirty) {
+            changed = { itemName: true, sex: true, cohortType: true, cohort: true, outOfRange: true, activityPlanText: true, scheduledActivityText: true, checkItemText: true, operator: true, value: true };
+        }
+        var ok = true;
+        if (changed.itemName) {
+            ok = await copyMappingSetSelectByText("select#eligibilityItemRef", item.itemName, 0.72);
+            if (!ok) return { ok: false, detail: "Eligibility item not found" };
+        }
+        var sexSel = document.querySelector("select#sexOption");
+        if (sexSel && item.sex && changed.sex) await copyMappingSetSelectByText("select#sexOption", item.sex, 0.8);
+        if (changed.cohortType) await copyMappingSetCohortType(item.cohortType);
+        if (changed.cohort) await copyMappingSetCohorts(item.cohort);
+        if (changed.outOfRange) await copyMappingSetOutOfRange(item.outOfRange);
+        if (item.labTestText) {
+            ok = await copyMappingConfigureLabTest(item);
+            if (!ok) return { ok: false, detail: "Lab test not found: " + item.labTestText };
+        }
+        if (changed.activityPlanText) {
+            ok = await copyMappingSetSelectByText("select#activityPlan", item.activityPlanText, 0.72);
+            if (!ok) return { ok: false, detail: "Activity plan not found" };
+            var schedSel = document.querySelector("select#scheduledActivity");
+            if (schedSel) await waitForSelectOptions(schedSel, 1, 12000);
+            ok = await copyMappingSetSelectByText("select#scheduledActivity", item.scheduledActivityText, 0.42);
+            if (!ok) return { ok: false, detail: "Similar scheduled activity not found" };
+            var itemSel = document.querySelector("select#itemRef");
+            if (itemSel) await waitForSelectOptions(itemSel, 1, 12000);
+            ok = await copyMappingSetSelectByText("select#itemRef", item.checkItemText, 0.58);
+            if (!ok) return { ok: false, detail: "Similar check item not found" };
+        }
+        if (!item.labTestText && changed.operator && item.operator) {
+            var comparatorSel = document.querySelector("select#eligibilityComparator");
+            if (!comparatorSel) comparatorSel = await waitForElement("select#eligibilityComparator", 8000);
+            ok = await copyMappingSetComparatorSelect(comparatorSel, item.operator);
+            if (!ok) return { ok: false, detail: "Comparator not found: " + item.operator };
+        }
+        if (!item.labTestText && changed.value && item.value) {
+            var codeSel = document.querySelector("select#codeListItem");
+            if (codeSel) {
+                await waitForSelectOptions(codeSel, 1, 8000);
+                await copyMappingSetSelectByText("select#codeListItem", item.value, 0.55);
+            } else {
+                var valueInput = document.querySelector("input#value, input[name='value'], input[name*='eligibilityValue']");
+                if (valueInput) {
+                    valueInput.value = item.value;
+                    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+                    valueInput.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+        }
+        var saveBtn = document.querySelector("button#actionButton");
+        if (!saveBtn) return { ok: false, detail: "Save button not found" };
+        saveBtn.click();
+        var closed = await waitForModalClose(15000);
+        if (!closed) {
+            var err = document.querySelector("#ajaxModal .alert-danger, #ajaxModal .has-error, #ajaxModal .error-message");
+            var detail = err ? copyMappingNormalize(err.textContent) : "Modal did not close after save";
+            await closeCurrentModal();
+            return { ok: false, detail: detail };
+        }
+        return { ok: true, detail: "Copied" };
+    }
+    async function copyMappingExecute(items) {
+        COPY_MAPPING_CANCELLED = false;
+        var status = copyMappingCreateStatusPanel(items);
+        var success = 0;
+        var failed = 0;
+        for (var i = 0; i < items.length; i++) {
+            if (COPY_MAPPING_CANCELLED) { status.update(i, "Skipped", "Cancelled"); continue; }
+            status.update(i, "Running", "Opening source Copy modal");
+            try {
+                var res = await copyMappingApplyItem(items[i]);
+                if (res.ok) { success++; status.update(i, "Success", res.detail); }
+                else { failed++; status.update(i, "Failed", res.detail); await closeCurrentModal(); }
+            } catch (err) {
+                failed++;
+                status.update(i, "Failed", String(err && err.message ? err.message : err));
+                await closeCurrentModal();
+            }
+            await copyMappingResetListFilters("after item " + String(i + 1));
+            await sleep(900);
+        }
+        copyMappingLog("complete success=" + success + " failed=" + failed + " total=" + items.length);
+    }
+    async function runCopyMapping() {
+        copyMappingLog("button clicked");
+        if (!copyMappingIsEligibilityPage()) {
+            showWrongPagePopup("Copy Mapping", ELIGIBILITY_LIST_PATH, location.pathname, location.origin + ELIGIBILITY_LIST_PATH);
+            return;
+        }
+        await copyMappingResetListFilters("before collecting source rows");
+        var rows = await copyMappingCollectRows();
+        if (!rows.length) {
+            showWarningPopup("Copy Mapping", "No eligibility mappings were found in the table.");
+            return;
+        }
+        var options = await copyMappingCollectModalOptions();
+        copyMappingShowPanel(rows, options);
+    }
 
     //==========================
     // RUN SUBJECT ELIGIBILITY FEATURE
@@ -57772,6 +59015,24 @@
         clearMappingBtn.onmouseenter = () => { clearMappingBtn.style.background = "#2bb9c4"; };
         clearMappingBtn.onmouseleave = () => { clearMappingBtn.style.background = "#38dae6"; };
 
+        var copyMappingBtn = document.createElement("button");
+        copyMappingBtn.textContent = "Copy Mapping";
+        copyMappingBtn.style.background = "#38dae6";
+        copyMappingBtn.style.color = "#fff";
+        copyMappingBtn.style.border = "none";
+        copyMappingBtn.style.borderRadius = scale(BUTTON_BORDER_RADIUS_PX);
+        copyMappingBtn.style.padding = scale(BUTTON_PADDING_PX);
+        copyMappingBtn.style.fontSize = scale(PANEL_FONT_SIZE_PX);
+        copyMappingBtn.style.cursor = "pointer";
+        copyMappingBtn.style.fontWeight = "500";
+        copyMappingBtn.style.transition = "background 0.2s";
+        copyMappingBtn.onmouseenter = () => { copyMappingBtn.style.background = "#2bb9c4"; };
+        copyMappingBtn.onmouseleave = () => { copyMappingBtn.style.background = "#38dae6"; };
+        copyMappingBtn.addEventListener("click", async function() {
+            COPY_MAPPING_CANCELLED = false;
+            await runCopyMapping();
+        });
+
         var collectAllBtn = document.createElement("button");
         collectAllBtn.textContent = "Collect All";
         collectAllBtn.style.background = "#f0ad4e";
@@ -57825,7 +59086,7 @@
 
         // Apply glassmorphism theme to all panel buttons if glass theme is active
         if (glass) {
-            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, addNewSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, formPreviewBtn, parseMethodBtn, searchMethodsBtn, formalExpressionEditorBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, findFormAndEventsBtn, editStudyEventsBtn, editItemRefBtn, pullLabBarcodeBtn, labPanelsBuilderBtn, clearMappingBtn, collectAllBtn, svcBtn, downloadDtsBtn];
+            var allPanelBtns = [runPlansBtn, runStudyBtn, runAddCohortBtn, runConsentBtn, runAllBtn, runNonScrnBtn, addExistingSubjectBtn, addNewSubjectBtn, bplBtn, importFromLibBtn, runBarcodeBtn, runFormBtn, formPreviewBtn, parseMethodBtn, searchMethodsBtn, formalExpressionEditorBtn, archiveUpdateFormsBtn, copyFormsBtn, copyAPlanBtn, aprBtn, pauseBtn, clearLogsBtn, toggleLogsBtn, runLockSamplePathsBtn, importEligBtn, clearMappingBtn, copyMappingBtn, findFormAndEventsBtn, editStudyEventsBtn, editItemRefBtn, pullLabBarcodeBtn, labPanelsBuilderBtn, collectAllBtn, svcBtn, downloadDtsBtn];
             for (var gi = 0; gi < allPanelBtns.length; gi++) {
                 var gb = allPanelBtns[gi];
                 gb.className = "ie-btn-primary";
@@ -57864,6 +59125,7 @@
             "Collect All": collectAllBtn,
             "Import I/E": importEligBtn,
             "Clear Mapping": clearMappingBtn,
+            "Copy Mapping": copyMappingBtn,
             "Archive/Update Forms": archiveUpdateFormsBtn,
             "Copy Activity Forms": copyFormsBtn,
             "Copy A-Plan": copyAPlanBtn,

@@ -26,7 +26,7 @@ ClinSpark Extension packages the ClinSpark production, test, and validation auto
 
 ### Study Setup, Subjects, and Testing
 
-Test and validation automators include setup and data collection helpers such as Lock Activity Plans, Lock Sample Paths, Update Study Status, Run Study Setup, Add Cohort Subjects, Import Cohort Subjects, Add Existing Subject, Run ICF Consent, Run Form, and Collect All.
+Test and validation automators include setup and data collection helpers such as Run Study Setup, Add New Subject, Run ICF Consent, Run Form, Collect All, barcode tools, mapping utilities, and library builders.
 
 ### Data Collection and Navigation
 
