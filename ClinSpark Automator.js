@@ -24482,6 +24482,555 @@
         }
     }
 
+    //==========================
+    // PANEL MENU (dropdown groups)
+    //==========================
+    // The main panel groups feature buttons into dropdown menus. Group membership is fixed;
+    // users can reorder menus, reorder buttons inside a menu, hide buttons, and pick colors.
+    // Button ids are the historical feature-button ids, so saved visibility carries over.
+    //==========================
+    var STORAGE_PANEL_MENU = "activityPlanState.panelMenu";
+    var STORAGE_PANEL_MENU_MIGRATED = "activityPlanState.panelMenu.migratedV1";
+    var PANEL_MENU_DEFAULT_ITEM_COLOR = "#2f2f38";
+    var PANEL_MENU_DEFAULT_TRIGGER_COLOR = "#24242c";
+    var PANEL_MENU_GROUPS = [
+        { id: "studySetup", label: "Study Setup", items: ["Run Study Setup", "Add New Subject"] },
+        { id: "barcodes", label: "Barcodes", items: ["Run ICF Consent", "Pull Barcode", "Pull Lab Barcode"] },
+        { id: "activityPlan", label: "Activity Plan", items: ["PLAP Builder", "Activity Plan Removal", "Archive/Update Forms", "Copy Activity Forms", "Copy A-Plan", "Set Visibility Condition"] },
+        { id: "eligibility", label: "Eligibility", items: ["Import I/E", "Copy Mapping", "Clear Mapping"] },
+        { id: "library", label: "Library", items: ["Import from Library", "Import From Library", "Edit Study Events List", "Edit Item Reference", "Edit Forms"] },
+        { id: "labPanel", label: "Lab Panel", items: ["Lab Panels Builder"] },
+        { id: "testerCoder", label: "Tester/Coder", items: ["Run Form", "Collect All", "Search Methods", "Formal Expression Editor", "Item Method Forms", "Parse Study Event", "Parse Forms"] },
+        { id: "misc", label: "Misc.", items: ["Form Preview", "Download DTS Report", "Find Form & Events", "Parse Deviation", "Auto-Resaver", "Subject Eligibility", "Cohort Eligibility", "Print Barcodes", "Hide Logs", "Clear Logs", "Pause"] }
+    ];
+    var PANEL_MENU_FALLBACK_GROUP = "misc";
+    var PANEL_MENU_LABELS = {
+        "Run ICF Consent": "Pull ICF Barcode",
+        "Activity Plan Removal": "Form Remover",
+        "Archive/Update Forms": "Archive & Update Forms",
+        "Copy Activity Forms": "Forms Duplicator",
+        "Copy A-Plan": "Copy Plan-to-Plan",
+        "Import I/E": "Add Mapping",
+        "Import From Library": "Import from Library",
+        "Lab Panels Builder": "Lab Panel Builder",
+        "Formal Expression Editor": "Method Editor",
+        "Download DTS Report": "Download Report",
+        "Find Form & Events": "Find Forms & Events",
+        "Parse Deviation": "Parse Deviations",
+        "Auto-Resaver": "Auto Resaver"
+    };
+    // Feature code rewrites these labels at runtime (Pause/Resume, Hide/Show Logs).
+    var PANEL_MENU_DYNAMIC_LABEL_IDS = { "Pause": true, "Hide Logs": true, "Pull Lab Barcode": true };
+    var PANEL_MENU_OPEN = null;
+
+    function panelMenuIsHexColor(value) {
+        return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+    }
+
+    function panelMenuLabel(id) {
+        if (PANEL_MENU_LABELS[id]) return PANEL_MENU_LABELS[id];
+        for (var i = 0; i < PANEL_BUTTON_DEFS.length; i++) {
+            if (PANEL_BUTTON_DEFS[i].id === id) return PANEL_BUTTON_DEFS[i].label || id;
+        }
+        return id;
+    }
+
+    function panelMenuAvailableIds() {
+        var ids = {};
+        for (var i = 0; i < PANEL_BUTTON_DEFS.length; i++) ids[PANEL_BUTTON_DEFS[i].id] = true;
+        return ids;
+    }
+
+    // Default item ids per group for this environment; unknown available ids fall back to Misc.
+    function panelMenuDefaultItems() {
+        var available = panelMenuAvailableIds();
+        var placed = {};
+        var result = {};
+        for (var gi = 0; gi < PANEL_MENU_GROUPS.length; gi++) {
+            var g = PANEL_MENU_GROUPS[gi];
+            result[g.id] = [];
+            for (var ii = 0; ii < g.items.length; ii++) {
+                var id = g.items[ii];
+                if (available[id] && !placed[id]) {
+                    result[g.id].push(id);
+                    placed[id] = true;
+                }
+            }
+        }
+        for (var di = 0; di < PANEL_BUTTON_DEFS.length; di++) {
+            var extra = PANEL_BUTTON_DEFS[di].id;
+            if (!placed[extra]) {
+                result[PANEL_MENU_FALLBACK_GROUP].push(extra);
+                placed[extra] = true;
+            }
+        }
+        return result;
+    }
+
+    function panelMenuReadRaw() {
+        try {
+            var raw = localStorage.getItem(STORAGE_PANEL_MENU);
+            var parsed = raw ? JSON.parse(raw) : null;
+            return parsed && typeof parsed === "object" ? parsed : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Returns a sanitized { version, groupOrder, itemOrder, groupColors } for this environment.
+    function panelMenuNormalizeConfig(raw) {
+        var defaults = panelMenuDefaultItems();
+        var groupIds = PANEL_MENU_GROUPS.map(function(g) { return g.id; });
+        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {} };
+        var seen = {};
+        var savedOrder = raw && Array.isArray(raw.groupOrder) ? raw.groupOrder : [];
+        for (var i = 0; i < savedOrder.length; i++) {
+            if (groupIds.indexOf(savedOrder[i]) !== -1 && !seen[savedOrder[i]]) {
+                cfg.groupOrder.push(savedOrder[i]);
+                seen[savedOrder[i]] = true;
+            }
+        }
+        for (var gi = 0; gi < groupIds.length; gi++) {
+            if (!seen[groupIds[gi]]) cfg.groupOrder.push(groupIds[gi]);
+        }
+        var savedItems = raw && raw.itemOrder && typeof raw.itemOrder === "object" ? raw.itemOrder : {};
+        for (var gj = 0; gj < groupIds.length; gj++) {
+            var gid = groupIds[gj];
+            var allowed = defaults[gid];
+            var ordered = [];
+            var used = {};
+            var saved = Array.isArray(savedItems[gid]) ? savedItems[gid] : [];
+            for (var si = 0; si < saved.length; si++) {
+                if (allowed.indexOf(saved[si]) !== -1 && !used[saved[si]]) {
+                    ordered.push(saved[si]);
+                    used[saved[si]] = true;
+                }
+            }
+            for (var ai = 0; ai < allowed.length; ai++) {
+                if (!used[allowed[ai]]) ordered.push(allowed[ai]);
+            }
+            cfg.itemOrder[gid] = ordered;
+        }
+        var colors = raw && raw.groupColors && typeof raw.groupColors === "object" ? raw.groupColors : {};
+        for (var ck in colors) {
+            if (Object.prototype.hasOwnProperty.call(colors, ck) && groupIds.indexOf(ck) !== -1 && panelMenuIsHexColor(colors[ck])) {
+                cfg.groupColors[ck] = colors[ck];
+            }
+        }
+        return cfg;
+    }
+
+    function panelMenuGetConfig() {
+        return panelMenuNormalizeConfig(panelMenuReadRaw());
+    }
+
+    function panelMenuSaveConfig(cfg) {
+        try {
+            localStorage.setItem(STORAGE_PANEL_MENU, JSON.stringify(panelMenuNormalizeConfig(cfg)));
+        } catch (e) {}
+    }
+
+    function panelMenuVisibilityMap(layout) {
+        var map = {};
+        var list = layout || getEffectiveButtonLayout();
+        for (var i = 0; i < list.length; i++) map[list[i].id] = list[i].visible !== false;
+        return map;
+    }
+
+    // Keeps the legacy layout's position field in menu order so older code paths stay consistent.
+    function panelMenuLayoutFromConfig(cfg, visibility) {
+        var layout = [];
+        var pos = 0;
+        for (var gi = 0; gi < cfg.groupOrder.length; gi++) {
+            var items = cfg.itemOrder[cfg.groupOrder[gi]] || [];
+            for (var ii = 0; ii < items.length; ii++) {
+                layout.push({ id: items[ii], position: pos++, visible: visibility[items[ii]] !== false });
+            }
+        }
+        return layout;
+    }
+
+    // One-time upgrade per environment: button colors reset to defaults, visibility untouched.
+    function panelMenuMigrateOnce() {
+        var done = false;
+        try { done = localStorage.getItem(STORAGE_PANEL_MENU_MIGRATED) === "1"; } catch (e) { return; }
+        if (done) return;
+        try {
+            localStorage.setItem(STORAGE_BUTTON_COLORS, JSON.stringify({}));
+            localStorage.setItem(STORAGE_PANEL_MENU_MIGRATED, "1");
+            log("Panel menu: upgraded settings (button colors reset, visibility kept)");
+        } catch (e2) {}
+    }
+
+    function panelMenuHexToRgb(hex) {
+        var m = String(hex || "").match(/^#([0-9a-f]{6})$/i);
+        if (!m) return null;
+        var v = parseInt(m[1], 16);
+        return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+    }
+
+    function panelMenuIsLightColor(hex) {
+        var rgb = panelMenuHexToRgb(hex);
+        if (!rgb) return false;
+        function channel(c) {
+            c = c / 255;
+            return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        }
+        var lum = 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+        return lum > 0.36;
+    }
+
+    function panelMenuShiftColor(hex, amount) {
+        var rgb = panelMenuHexToRgb(hex);
+        if (!rgb) return hex;
+        function clamp(v) { return Math.max(0, Math.min(255, v)); }
+        return "#" + [clamp(rgb.r + amount), clamp(rgb.g + amount), clamp(rgb.b + amount)].map(function(p) {
+            return p.toString(16).padStart(2, "0");
+        }).join("");
+    }
+
+    // Writes the CSS variables that drive a trigger's or item's fill, hover and text colors.
+    function panelMenuPaint(el, color) {
+        if (!el) return;
+        if (!panelMenuIsHexColor(color)) {
+            el.style.removeProperty("--aps-fill");
+            el.style.removeProperty("--aps-fill-hover");
+            el.style.removeProperty("--aps-ink");
+            el.removeAttribute("data-clinspark-button-color");
+            return;
+        }
+        var light = panelMenuIsLightColor(color);
+        el.style.setProperty("--aps-fill", color);
+        el.style.setProperty("--aps-fill-hover", panelMenuShiftColor(color, light ? -16 : 18));
+        el.style.setProperty("--aps-ink", light ? "#1c1c24" : "#f5f5f7");
+        el.setAttribute("data-clinspark-button-color", color);
+    }
+
+    function panelMenuEnsureStyles() {
+        var styleId = "clinspark-panel-menu-style";
+        var style = document.getElementById(styleId);
+        if (!style) {
+            style = document.createElement("style");
+            style.id = styleId;
+            document.head.appendChild(style);
+        }
+        var glass = isGlassTheme();
+        var P = "#" + PANEL_ID + " [data-aps-panel-body] button.aps-menu-trigger";
+        var triggerBg = glass ? "rgba(255,255,255,0.12)" : "var(--aps-fill, " + PANEL_MENU_DEFAULT_TRIGGER_COLOR + ")";
+        var triggerHover = glass ? "rgba(255,255,255,0.2)" : "var(--aps-fill-hover, #2e2e38)";
+        var triggerInk = glass ? "#ffffff" : "var(--aps-ink, #ececf1)";
+        var triggerBorder = glass ? "rgba(255,255,255,0.28)" : "#3a3a46";
+        var popBg = glass ? "linear-gradient(160deg, rgba(58,44,122,0.97) 0%, rgba(84,52,128,0.97) 100%)" : "#1b1b21";
+        var popBorder = glass ? "rgba(255,255,255,0.3)" : "#3a3a46";
+        var itemBg = glass ? THEME_GRADIENT_BG : "var(--aps-fill, " + PANEL_MENU_DEFAULT_ITEM_COLOR + ")";
+        var itemHover = glass ? "linear-gradient(135deg, #7b8ff0 0%, #8b5bb8 100%)" : "var(--aps-fill-hover, #3a3a45)";
+        var itemInk = glass ? "#ffffff" : "var(--aps-ink, #f5f5f7)";
+        var font = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
+        style.textContent = [
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] { display:grid; grid-template-columns:repeat(auto-fill, minmax(128px, 1fr)); grid-auto-rows:minmax(36px, auto); gap:6px; align-content:start; }",
+            P + " { all:unset; box-sizing:border-box !important; display:flex !important; align-items:center !important; gap:6px !important; width:100% !important; min-width:0 !important; min-height:36px !important; height:auto !important; padding:7px 10px !important; background:" + triggerBg + " !important; color:" + triggerInk + " !important; border:1px solid " + triggerBorder + " !important; border-radius:8px !important; font:600 12.5px/1.2 " + font + " !important; letter-spacing:.1px !important; cursor:pointer !important; user-select:none !important; transition:background .15s ease, border-color .15s ease, box-shadow .15s ease !important; box-shadow:none !important; }",
+            P + ":hover { background:" + triggerHover + " !important; border-color:" + (glass ? "rgba(255,255,255,0.5)" : "#5f5a8e") + " !important; }",
+            P + ":focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }",
+            P + "[aria-expanded='true'] { border-color:#8b7de8 !important; box-shadow:inset 0 0 0 1px rgba(139,125,232,.45) !important; }",
+            P + " .aps-menu-trigger-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            P + "[data-empty='1'] .aps-menu-trigger-label { opacity:.6; font-weight:500; }",
+            P + " .aps-menu-trigger-chevron { flex:0 0 auto; width:10px; height:10px; opacity:.75; transition:transform .15s ease; }",
+            P + "[aria-expanded='true'] .aps-menu-trigger-chevron { transform:rotate(180deg); }",
+            ".aps-menu-popover { position:fixed; z-index:" + (PANEL_Z_INDEX + 6) + "; box-sizing:border-box; display:none; flex-direction:column; gap:5px; padding:8px 10px 10px; background:" + popBg + "; border:1px solid " + popBorder + "; border-radius:10px; box-shadow:0 16px 40px rgba(0,0,0,.5); overflow-y:auto; overscroll-behavior:contain; font-family:" + font + "; " + (glass ? "backdrop-filter:blur(10px);" : "") + " }",
+            ".aps-menu-popover[data-open='1'] { display:flex; }",
+            ".aps-menu-caret { position:fixed; z-index:" + (PANEL_Z_INDEX + 7) + "; display:none; width:14px; height:14px; box-sizing:border-box; transform:rotate(45deg); background:" + (glass ? "#56418f" : "#1b1b21") + "; pointer-events:none; }",
+            ".aps-menu-caret[data-side='left'] { border-top:1px solid " + popBorder + "; border-right:1px solid " + popBorder + "; }",
+            ".aps-menu-caret[data-side='top'] { border-right:1px solid " + popBorder + "; border-bottom:1px solid " + popBorder + "; }",
+            ".aps-menu-popover .aps-menu-caption { padding:4px 4px 6px; color:" + (glass ? "rgba(255,255,255,.75)" : "#9a9aab") + "; font:700 10.5px/1.2 " + font + "; letter-spacing:.8px; text-transform:uppercase; }",
+            ".aps-menu-popover button.aps-menu-item { all:unset; box-sizing:border-box !important; display:block !important; width:100% !important; padding:9px 14px !important; background:" + itemBg + " !important; color:" + itemInk + " !important; border:1px solid rgba(255,255,255,.07) !important; border-radius:7px !important; font:500 12.5px/1.3 " + font + " !important; text-align:left !important; white-space:normal !important; cursor:pointer !important; transition:background .12s ease, transform .12s ease !important; }",
+            ".aps-menu-popover button.aps-menu-item:hover, .aps-menu-popover button.aps-menu-item:focus-visible { background:" + itemHover + " !important; }",
+            ".aps-menu-popover button.aps-menu-item:focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }",
+            ".aps-menu-popover button.aps-menu-item:disabled { opacity:.55 !important; cursor:not-allowed !important; }",
+            ".aps-menu-popover .aps-menu-empty { padding:10px 14px; color:" + (glass ? "rgba(255,255,255,.8)" : "#a3a3b3") + "; font:italic 12px/1.45 " + font + "; border:1px dashed " + (glass ? "rgba(255,255,255,.35)" : "#3f3f4c") + "; border-radius:7px; }"
+        ].join("\n");
+    }
+
+    function panelMenuChevron() {
+        var ns = "http://www.w3.org/2000/svg";
+        var svg = document.createElementNS(ns, "svg");
+        svg.setAttribute("viewBox", "0 0 10 10");
+        svg.setAttribute("aria-hidden", "true");
+        svg.setAttribute("class", "aps-menu-trigger-chevron");
+        var path = document.createElementNS(ns, "path");
+        path.setAttribute("d", "M1.5 3.5 L5 7 L8.5 3.5");
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", "1.6");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+        return svg;
+    }
+
+    function panelMenuItems(popover) {
+        return Array.prototype.slice.call(popover.querySelectorAll("button.aps-menu-item")).filter(function(b) { return !b.disabled; });
+    }
+
+    function panelMenuCaret() {
+        var caret = document.getElementById("aps-menu-caret");
+        if (!caret) {
+            caret = document.createElement("div");
+            caret.id = "aps-menu-caret";
+            caret.className = "aps-menu-caret";
+            caret.setAttribute("aria-hidden", "true");
+            document.body.appendChild(caret);
+        }
+        return caret;
+    }
+
+    function panelMenuHideCaret() {
+        var caret = document.getElementById("aps-menu-caret");
+        if (caret) caret.style.display = "none";
+    }
+
+    function panelMenuClamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    // Menus fly out beside the panel so they never cover the menu buttons: to the left of a
+    // right-docked panel, above a bottom-docked one. A caret points back at the open menu button.
+    // If there is no room beside the panel, the menu falls back to opening next to its button.
+    function panelMenuPosition(trigger, popover) {
+        var rect = trigger.getBoundingClientRect();
+        var panel = document.getElementById(PANEL_ID);
+        var pr = panel ? panel.getBoundingClientRect() : rect;
+        var vw = window.innerWidth || document.documentElement.clientWidth || 1280;
+        var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+        var margin = 10;
+        var gap = 14;
+        var caretHalf = 7;
+        var caret = panelMenuCaret();
+        var dock = getPanelDock();
+        var width = Math.min(Math.max(248, Math.round(rect.width)), 320, vw - margin * 2);
+        var side = "";
+        var top, left, height, natural;
+        if (dock === "bottom") {
+            var roomAbove = Math.floor(pr.top - gap - margin);
+            if (roomAbove >= 140) {
+                side = "top";
+                popover.style.width = width + "px";
+                popover.style.maxHeight = "none";
+                natural = popover.scrollHeight;
+                height = Math.min(natural, roomAbove);
+                popover.style.maxHeight = roomAbove + "px";
+                left = panelMenuClamp(rect.left + rect.width / 2 - width / 2, margin, vw - width - margin);
+                top = pr.top - gap - height;
+                caret.style.left = (panelMenuClamp(rect.left + rect.width / 2, left + 18, left + width - 18) - caretHalf) + "px";
+                caret.style.top = (pr.top - gap - caretHalf - 1) + "px";
+            }
+        } else {
+            var roomLeft = Math.floor(pr.left - gap - margin);
+            if (roomLeft >= 200) {
+                side = "left";
+                width = Math.min(width, roomLeft);
+                popover.style.width = width + "px";
+                popover.style.maxHeight = "none";
+                natural = popover.scrollHeight;
+                var maxH = vh - margin * 2;
+                height = Math.min(natural, maxH);
+                popover.style.maxHeight = maxH + "px";
+                left = pr.left - gap - width;
+                top = panelMenuClamp(rect.top - 4, margin, vh - margin - height);
+                caret.style.left = (pr.left - gap - caretHalf - 1) + "px";
+                caret.style.top = (panelMenuClamp(rect.top + rect.height / 2, top + 16, top + height - 16) - caretHalf) + "px";
+            }
+        }
+        if (!side) {
+            popover.style.width = width + "px";
+            popover.style.maxHeight = "none";
+            natural = popover.scrollHeight;
+            var below = vh - rect.bottom - margin - 4;
+            var above = rect.top - margin - 4;
+            var openUp = natural > below && above > below;
+            var room = Math.max(120, openUp ? above : below);
+            popover.style.maxHeight = room + "px";
+            height = Math.min(natural, room);
+            top = openUp ? rect.top - 4 - height : rect.bottom + 4;
+            left = panelMenuClamp(rect.left, margin, vw - width - margin);
+            side = openUp ? "above-trigger" : "below-trigger";
+            caret.style.display = "none";
+        } else {
+            caret.setAttribute("data-side", side);
+            caret.style.display = "block";
+        }
+        popover.style.top = Math.max(margin, top) + "px";
+        popover.style.left = left + "px";
+        popover.setAttribute("data-placement", side);
+    }
+
+    function panelMenuClose(restoreFocus) {
+        var state = PANEL_MENU_OPEN;
+        if (!state) return;
+        PANEL_MENU_OPEN = null;
+        if (state.raf) cancelAnimationFrame(state.raf);
+        state.popover.setAttribute("data-open", "0");
+        state.trigger.setAttribute("aria-expanded", "false");
+        panelMenuHideCaret();
+        document.removeEventListener("mousedown", state.onOutside, true);
+        document.removeEventListener("keydown", state.onKey, true);
+        if (restoreFocus) {
+            try { state.trigger.focus(); } catch (e) {}
+        }
+    }
+
+    function panelMenuCloseAll() {
+        panelMenuClose(false);
+    }
+
+    function panelMenuOpen(trigger, popover, focusItem) {
+        if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) return;
+        panelMenuClose(false);
+        popover.setAttribute("data-open", "1");
+        trigger.setAttribute("aria-expanded", "true");
+        panelMenuPosition(trigger, popover);
+        var state = { trigger: trigger, popover: popover, raf: 0, lastRect: "" };
+        state.onOutside = function(e) {
+            if (popover.contains(e.target) || trigger.contains(e.target)) return;
+            panelMenuClose(false);
+        };
+        state.onKey = function(e) {
+            var items = panelMenuItems(popover);
+            var idx = items.indexOf(document.activeElement);
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                panelMenuClose(true);
+            } else if (e.key === "Tab") {
+                panelMenuClose(false);
+            } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (idx !== -1 || document.activeElement === trigger)) {
+                if (!items.length) return;
+                e.preventDefault();
+                var next = e.key === "ArrowDown" ? (idx + 1) % items.length : (idx <= 0 ? items.length - 1 : idx - 1);
+                items[next].focus();
+            } else if ((e.key === "Home" || e.key === "End") && idx !== -1 && items.length) {
+                e.preventDefault();
+                items[e.key === "Home" ? 0 : items.length - 1].focus();
+            }
+        };
+        document.addEventListener("mousedown", state.onOutside, true);
+        document.addEventListener("keydown", state.onKey, true);
+        // Track the trigger while open: follow scroll/resize, close if the panel is hidden or re-docked.
+        function follow() {
+            if (PANEL_MENU_OPEN !== state) return;
+            var panel = document.getElementById(PANEL_ID);
+            if (!trigger.isConnected || !panel || panel.style.display === "none" || trigger.offsetParent === null) {
+                panelMenuClose(false);
+                return;
+            }
+            var r = trigger.getBoundingClientRect();
+            var pr = panel.getBoundingClientRect();
+            var key = [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), Math.round(pr.left), Math.round(pr.top), Math.round(pr.width), Math.round(pr.height), window.innerWidth, window.innerHeight].join(",");
+            if (key !== state.lastRect) {
+                state.lastRect = key;
+                panelMenuPosition(trigger, popover);
+            }
+            state.raf = requestAnimationFrame(follow);
+        }
+        PANEL_MENU_OPEN = state;
+        state.raf = requestAnimationFrame(follow);
+        if (focusItem) {
+            var items = panelMenuItems(popover);
+            if (items.length) items[0].focus();
+        }
+    }
+
+    // Builds the dropdown triggers inside btnRow and a body-level popover per group.
+    // buttonMap maps feature-button id -> the existing button element for this environment.
+    function panelMenuMount(btnRow, buttonMap) {
+        panelMenuMigrateOnce();
+        panelMenuEnsureStyles();
+        panelMenuCloseAll();
+        var staleCaret = document.getElementById("aps-menu-caret");
+        if (staleCaret && staleCaret.parentNode) staleCaret.parentNode.removeChild(staleCaret);
+        var stale = document.querySelectorAll(".aps-menu-popover");
+        for (var s = 0; s < stale.length; s++) stale[s].parentNode.removeChild(stale[s]);
+        while (btnRow.firstChild) btnRow.removeChild(btnRow.firstChild);
+        btnRow.setAttribute("data-aps-panel-menu", "1");
+        btnRow.setAttribute("role", "menubar");
+        btnRow.setAttribute("aria-label", "ClinSpark Automator menus");
+        var cfg = panelMenuGetConfig();
+        var visibility = panelMenuVisibilityMap();
+        var glass = isGlassTheme();
+        var groupById = {};
+        for (var gi = 0; gi < PANEL_MENU_GROUPS.length; gi++) groupById[PANEL_MENU_GROUPS[gi].id] = PANEL_MENU_GROUPS[gi];
+        for (var oi = 0; oi < cfg.groupOrder.length; oi++) {
+            (function(group) {
+                var ids = (cfg.itemOrder[group.id] || []).filter(function(id) { return !!buttonMap[id]; });
+                var shown = ids.filter(function(id) { return visibility[id] !== false; });
+                var trigger = document.createElement("button");
+                trigger.type = "button";
+                trigger.className = "aps-menu-trigger";
+                trigger.setAttribute("data-aps-menu-trigger", group.id);
+                trigger.setAttribute("aria-haspopup", "menu");
+                trigger.setAttribute("aria-expanded", "false");
+                trigger.title = group.label + " (" + shown.length + (shown.length === 1 ? " button" : " buttons") + ")";
+                var label = document.createElement("span");
+                label.className = "aps-menu-trigger-label";
+                label.textContent = group.label;
+                if (!shown.length) trigger.setAttribute("data-empty", "1");
+                trigger.appendChild(label);
+                trigger.appendChild(panelMenuChevron());
+                if (!glass) panelMenuPaint(trigger, cfg.groupColors[group.id]);
+
+                var popover = document.createElement("div");
+                popover.className = "aps-menu-popover";
+                popover.id = "aps-menu-" + group.id;
+                popover.setAttribute("role", "menu");
+                popover.setAttribute("aria-label", group.label);
+                popover.setAttribute("data-open", "0");
+                trigger.setAttribute("aria-controls", popover.id);
+                var caption = document.createElement("div");
+                caption.className = "aps-menu-caption";
+                caption.textContent = group.label + (shown.length ? " \u00B7 " + shown.length : "");
+                popover.appendChild(caption);
+                for (var i = 0; i < shown.length; i++) {
+                    var el = buttonMap[shown[i]];
+                    el.type = "button";
+                    el.classList.add("aps-menu-item");
+                    el.setAttribute("role", "menuitem");
+                    el.setAttribute("data-feature-button", shown[i]);
+                    if (!PANEL_MENU_DYNAMIC_LABEL_IDS[shown[i]]) el.textContent = panelMenuLabel(shown[i]);
+                    popover.appendChild(el);
+                }
+                if (!shown.length) {
+                    var empty = document.createElement("div");
+                    empty.className = "aps-menu-empty";
+                    empty.setAttribute("role", "menuitem");
+                    empty.setAttribute("aria-disabled", "true");
+                    empty.textContent = ids.length ? "All buttons in this menu are hidden. Turn them back on in Settings." : "No buttons are available in this menu for this environment.";
+                    popover.appendChild(empty);
+                }
+                // Selecting an item runs its own handler first, then the menu closes.
+                popover.addEventListener("click", function(e) {
+                    var item = e.target && e.target.closest ? e.target.closest("button.aps-menu-item") : null;
+                    if (!item || !popover.contains(item)) return;
+                    setTimeout(function() {
+                        if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.popover === popover) panelMenuClose(false);
+                    }, 0);
+                });
+                trigger.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) panelMenuClose(false);
+                    else panelMenuOpen(trigger, popover, e.detail === 0);
+                });
+                trigger.addEventListener("keydown", function(e) {
+                    if (e.key === "ArrowDown" && !(PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger)) {
+                        e.preventDefault();
+                        panelMenuOpen(trigger, popover, true);
+                    }
+                });
+                btnRow.appendChild(trigger);
+                document.body.appendChild(popover);
+            })(groupById[cfg.groupOrder[oi]]);
+        }
+    }
+
+
     function getButtonVisibility() {
         try {
             var raw = localStorage.getItem(STORAGE_BUTTON_VISIBILITY);
@@ -24569,199 +25118,302 @@
         return true;
     }
 
+    var PANEL_MENU_HELP = {
+        "Run Study Setup": "Runs the full study setup pipeline in order and reports the result of each configured setup stage.",
+        "Add New Subject": "Maps activity plans to the selected epoch cohorts, then adds and activates a new subject for each mapped cohort.",
+        "Run ICF Consent": "Automates the informed consent workflow for a subject, including navigation, barcode scanning, and the required consent steps.",
+        "Pull Barcode": "Reads the subject barcode from the current collection context and fills the required barcode field automatically.",
+        "Pull Lab Barcode": "Scans the barcode icons on the current data collection page and fills each available lab barcode field one by one.",
+        "PLAP Builder": "Builds procedure log activity plan rows in a full-screen, drag-and-drop workspace. Supports editing existing forms, Existing-visibility filtering, auto-population, reference activities, time offsets, example-time recalculation, and Apply Time Calculation.",
+        "Activity Plan Removal": "Selects scheduled activity forms to remove from an Activity Plan. Filtered Select All only affects visible rows, archived rows are marked and cannot be selected, and forms that cannot be deleted can be archived instead with a reason for change.",
+        "Archive/Update Forms": "Batch archives or renames forms in the study library, across multiple studies if needed. Useful when replacing forms, standardizing names, or retiring old versions.",
+        "Copy Activity Forms": "Copies scheduled activity forms from one study or Activity Plan context to another, preserving structure and settings where possible.",
+        "Copy A-Plan": "Copies forms, segment placement, study-event mappings, and scheduled-activity configuration from one Activity Plan into an editable destination Activity Plan, using an isolated full-screen workspace.",
+        "Set Visibility Condition": "Sets show/hide conditions on scheduled activity forms using auto-populated visibility references, with refresh handling for slow visibility loads.",
+        "Import I/E": "Maps inclusion/exclusion check items to the correct Activity Plan forms and items. Shows the expected eligibility default next to each empty dropdown and supports selective mapping cleanup.",
+        "Copy Mapping": "Copies eligibility mappings. Existing mappings load into a full-screen staging workspace where you can change the Activity Plan, Cohort Type, and Cohort for one row or in bulk, then each copy is created through ClinSpark's own Copy form. When the Activity Plan changes, the most similar Scheduled Activity, Check Item, and Lab Test in the new plan are picked automatically; if nothing similar exists, it pauses so you can choose, then carries on. Each saved copy is checked afterwards so the Cohort Type matches.",
+        "Clear Mapping": "Scans the eligibility mappings on the page, lists them for selection (with Select All / Deselect All), and removes only the mappings you confirm.",
+        "Import from Library": "Imports forms from another study library. Supports cached scans, duplicate import copies of the same source form, per-copy form names, item group and item renames, item inclusion settings, lock-on-save, confirmation warnings, progress tracking, and cancel/resume cleanup.",
+        "Import From Library": "Imports forms from another study library. Supports cached scans, duplicate import copies of the same source form, per-copy form names, item group and item renames, item inclusion settings, lock-on-save, confirmation warnings, progress tracking, and cancel/resume cleanup.",
+        "Edit Study Events List": "Manages the study event list in the library: add events, rename existing ones, reorder entries, and save all changes in one batch.",
+        "Edit Item Reference": "On an Item Group page, collects the item references and opens an editor so their names and referenced values can be corrected in one place.",
+        "Edit Forms": "Batch edits form-library configuration: form name, description, usage flags, barcode verification, ICF requirement, lock state, and form usage. Includes full-screen mode, resizable panels, reset controls, and safe edit/lock sequencing.",
+        "Lab Panels Builder": "Scans lab configure panels, builds new lab panels, copies lab tests, edits reference ranges, and applies add/remove/update changes with panel-scoped safety checks.",
+        "Run Form": "Fills and submits a data collection form with configured in-range or out-of-range values, for testing and setup verification.",
+        "Collect All": "Processes the eligible data collection forms on the current page in sequence, pulling barcodes first when needed.",
+        "Search Methods": "Opens the method library that contains coded methods and edit checks.",
+        "Formal Expression Editor": "Collects methods from the Method List page and opens a full-screen, code-editor style view for formal expressions. Saves drafts by method ID, compares edited and collected expressions, and batch-saves updated methods with one reason for change.",
+        "Item Method Forms": "Finds the forms that contain a specific calculation method item and navigates to the relevant data pages for review.",
+        "Parse Study Event": "Collects study event information from the study library for review, comparison, or copying.",
+        "Parse Forms": "Parses form-library content so builders can inspect or copy form metadata, item groups, and item details quickly.",
+        "Form Preview": "Scans the Study Library form list, or the forms scheduled on an Activity Plan, and shows the selected forms as read-only collection-style previews so you can review item group layout, prompts, data types, code lists, and help text before locking or mapping.",
+        "Download DTS Report": "Generates and downloads Clinical Data Text reports for the selected studies, handling the navigation and download steps.",
+        "Find Form & Events": "Jumps directly to a form or study event data page using form/event keywords and an optional subject identifier.",
+        "Parse Deviation": "Navigates to subject data and deviation forms, extracts deviation details, and prepares them for review or copying.",
+        "Auto-Resaver": "Reopens eligible collected data and saves it again to refresh validation, calculations, or downstream ClinSpark state.",
+        "Subject Eligibility": "Runs eligibility checks for one subject and reports the result for each criterion.",
+        "Cohort Eligibility": "Runs eligibility checks for every subject in a cohort and shows a pass/fail summary.",
+        "Print Barcodes": "Finds form and item barcode targets, selects the matching forms and items, and prepares barcode labels for printing.",
+        "Hide Logs": "Shows or hides the activity log under the status line to save space. The button reads Show Logs while the log is hidden.",
+        "Clear Logs": "Clears every entry from the activity log for a fresh view.",
+        "Pause": "Stops any automation that is currently running. The button then reads Resume; click it to allow automations to run again."
+    };
+
+    // Labels the buttons showed before the menu redesign, where they differ from the feature id.
+    var PANEL_MENU_PREVIOUS_LABELS = { "Run ICF Consent": "Run ICF Barcode", "Formal Expression Editor": "Method Editor" };
+
     function openHelpPopup() {
         if (HELP_MODAL_OPEN) return null;
         HELP_MODAL_OPEN = true;
+        panelMenuCloseAll();
 
-        var helpSections = [
-            {
-                title: "Data Collection",
-                features: [
-                    { label: "Pull Barcode", desc: "Reads the subject barcode from the current collection context and fills the required barcode field automatically." },
-                    { label: "Pull Lab Barcode", desc: "Scans barcode icons on the current data collection page and fills each available lab barcode field one by one." },
-                    { label: "Print Barcodes", desc: "Finds form and item barcode targets, selects matching forms/items, and prepares barcode labels for printing." },
-                    { label: "Auto-Resaver", desc: "Reopens eligible collected data and saves it again to refresh validation, calculations, or downstream ClinSpark state." }
-                ]
-            },
-            {
-                title: "CRF Design & Library",
-                features: [
-                    { label: "PLAP Builder", desc: "Builds procedure log activity plan rows with a full-screen, drag-and-drop workspace. Supports existing-form editing, clearer Existing visibility filtering, auto-population, reference activities, time offsets, example-time recalculation, and Apply Time Calculation." },
-                    { label: "Lab Panels Builder", desc: "Scans lab configure panels, builds new lab panels, copies lab tests, edits reference ranges, and applies add/remove/update changes with panel-scoped safety checks." },
-                    { label: "Activity Plan Removal", desc: "Selects scheduled activities for removal. Filtered Select All only affects visible rows, already archived rows are shown with an archive indicator and cannot be selected, and unavailable deletes can fall back to archive with a reason for change." },
-                    { label: "Import From Library", desc: "Imports forms from another study library. Supports cached scans, duplicate import copies for the same source form, per-copy form names, item group/item renames, item inclusion settings, lock-on-save, double-click row selection, confirmation warnings, progress tracking, and cancel/resume cleanup." },
-                    { label: "Archive/Update Forms", desc: "Batch archives or renames forms in the study library across multiple studies. Useful when replacing forms, standardizing names, or retiring old versions." },
-                    { label: "Edit Forms", desc: "Batch edits production form-library configuration, including form name, description, usage flags, barcode verification, ICF requirement, lock state, and form usage. Includes full-screen mode, resizable panels, reset controls, and safe edit/lock sequencing." },
-                    { label: "Copy Activity Forms", desc: "Copies scheduled activity forms from one study or activity plan context to another while preserving structure and settings where possible." },
-                    { label: "Copy A-Plan", desc: "Copies forms, segment placement, study-event mappings, and scheduled-activity configuration from one Activity Plan into an editable destination Activity Plan through an isolated full-screen workspace." },
-                    { label: "Search Methods", desc: "Opens the method library that contains coded methods and edit checks." },
-                    { label: "Method Editor", desc: "Collects methods from the Method List page, opens a full-screen VS Code-style editor for formal expressions, saves drafts by method ID, compares edited and collected expressions, and batch-saves updated methods with one reason for change." },
-                    { label: "Parse Deviation", desc: "Navigates to subject data and deviation forms, extracts deviation details, and prepares the information for review or copying." },
-                    { label: "Import I/E", desc: "Maps inclusion/exclusion check items to the correct Activity Plan forms and items. Shows expected eligibility defaults next to empty dropboxes and supports flexible eligibility mapping cleanup." },
-                    { label: "Clear Mapping", desc: "Scans eligibility mappings on the page, displays selectable eligibility items, supports Select All/Deselect All, and removes only the mappings the user confirms." },
-                    { label: "Copy Mapping", desc: "Copies existing eligibility mappings into an editable full-screen staging workspace, supports bulk activity-plan and cohort changes, then creates new mappings from each source row's Copy action." },
-                    { label: "Set Visibility Condition", desc: "Sets show/hide conditions on scheduled activity forms using auto-populated visibility references. Includes refresh handling and animated loading states for slow visibility loads." },
-                    { label: "Item Method Forms", desc: "Locates forms that contain a specific calculation method item and navigates to the relevant data pages for review." },
-                    { label: "Parse Study Event", desc: "Collects study event information from the study library for review, comparison, or export-style copying." },
-                    { label: "Parse Forms", desc: "Parses form-library content so builders can inspect or copy form metadata, item groups, and item details more quickly." },
-                    { label: "Form Preview", desc: "Scans Study Library forms and renders selected forms as read-only collection-style modals so builders can review item group layout, prompts, data types, codelists, and help text before locking or mapping the form." },
-                    { label: "Edit Study Events List", desc: "Manages the study event list in the library. Add events, rename existing events, reorder entries, and save changes in one batch." },
-                    { label: "Edit Item Reference", desc: "Helps update item references in form-library configuration when item names or referenced values need to be corrected." }
-                ]
-            },
-            {
-                title: "Navigation",
-                features: [
-                    { label: "Find Form & Events", desc: "Navigates directly to a form or study event data page using form/event keywords and an optional subject identifier." }
-                ]
-            },
-            {
-                title: "Eligibility",
-                features: [
-                    { label: "Cohort Eligibility", desc: "Runs eligibility checks for all subjects in a cohort and displays a pass/fail summary." },
-                    { label: "Subject Eligibility", desc: "Runs eligibility checks for one subject and reports the result for each criterion." }
-                ]
-            },
-            {
-                title: "Reports",
-                features: [
-                    { label: "Download DTS Report", desc: "Generates and downloads Clinical Data Text reports for selected studies while handling navigation and download steps." }
-                ]
-            },
-            {
-                title: "Panel Controls",
-                features: [
-                    { label: "Settings", desc: "Customize which buttons are visible, reorder the panel layout, and configure the panel hotkey." },
-                    { label: "Help Guide", desc: "Opens this searchable guide for quick reminders about each available feature." },
-                    { label: "Pause", desc: "Pauses any automation that is currently running. Click again to resume when supported by that workflow." },
-                    { label: "Clear Logs", desc: "Clears all entries from the activity log panel for a fresh view." },
-                    { label: "Hide Logs", desc: "Toggles the activity log panel on or off to manage screen space." }
-                ]
-            }
-        ].map(function(section) {
-            return {
-                title: section.title,
-                features: section.features.filter(function(feature) {
-                    return !isHiddenFeatureButton(feature.label);
-                })
-            };
-        }).filter(function(section) {
-            return section.features.length > 0;
-        });
+        var hotkey = getPanelHotkey() || "F2";
+        var version = "";
+        try { version = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getManifest) ? chrome.runtime.getManifest().version : ""; } catch (e) { version = ""; }
+        var envName = /cenexeltest\./i.test(location.hostname) ? "Test" : (/cenexel-val\./i.test(location.hostname) ? "Validation" : "Production");
+        var visibility = panelMenuVisibilityMap();
+        var cfg = panelMenuGetConfig();
+
+        // Each section: { id, title, intro?, kind: "cards" | "keys", items }
+        var sections = [];
+        sections.push({ id: "start", title: "Getting Started", kind: "cards", items: [
+            { label: "Menus", desc: "Features are grouped into dropdown menus on the panel. Click a menu to open it, then click a button to run that feature. The menu closes by itself; Esc or a click elsewhere also closes it. If a menu has nothing to show, it says why when opened." },
+            { label: "Show or hide the panel", desc: "Press " + hotkey + " or click the round lightning button to hide or show the panel. The \u2715 in the panel header also hides it. The lightning button always sits just outside the panel." },
+            { label: "Dock and resize", desc: "The \u2194 / \u2195 button in the panel header switches between the right-side dock and the bottom dock. Drag the panel's inner edge to resize it; the size is remembered." },
+            { label: "Customize (\u2699 Settings)", desc: "Reorder the menus, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
+            { label: "Status and logs", desc: "The status line shows what the automator is doing right now, and the log below it records each step. Use Hide Logs and Clear Logs in the Misc. menu to manage it." },
+            { label: "Stopping a run", desc: "Use Pause in the Misc. menu to stop a running automation. Many workflows also have their own Cancel button in their progress window." }
+        ] });
+        sections.push({ id: "keys", title: "Keyboard Shortcuts", kind: "keys", items: [
+            { keys: [hotkey], desc: "Show or hide the panel (change it in Settings)." },
+            { keys: ["Alt", "S"], desc: "Smart Navigation: jump to a ClinSpark page by keyword, e.g. AP for Activity Plans List. Manage keywords in Settings." },
+            { keys: ["Alt", "A"], desc: "Open the study switcher in the top bar." },
+            { keys: ["\u2193", "\u2191", "Enter", "Esc"], desc: "Inside a panel menu: move between buttons, run one, or close the menu." },
+            { keys: ["Alt", "\u2191 / \u2193"], desc: "In Settings: move the focused menu or button up or down. Space shows or hides a focused button." }
+        ] });
+        sections.push({ id: "new", title: "What's New" + (version ? " in " + version : ""), kind: "cards", items: [
+            { label: "Dropdown menus", desc: "Buttons are now organized into menus (Study Setup, Barcodes, Activity Plan, Eligibility, Library, Lab Panel, Tester/Coder, Misc.). Your hidden-button choices carried over." },
+            { label: "Renamed buttons", desc: "Some buttons have clearer names, for example Form Remover (was Activity Plan Removal), Forms Duplicator (was Copy Activity Forms), Copy Plan-to-Plan (was Copy A-Plan), and Add Mapping (was Import I/E). Search this guide by the old name to find them." },
+            { label: "Smarter Copy Mapping", desc: "Cohort Type now copies correctly, and changing the Activity Plan re-selects the most similar Scheduled Activity, Check Item, and Lab Test, pausing for you only when nothing similar exists." },
+            { label: "New Settings layout", desc: "Separate sections for menus and buttons, pastel colors, one-click Randomize per menu, search and filters, and Reset layout." }
+        ] });
+        for (var gi = 0; gi < cfg.groupOrder.length; gi++) {
+            var gid = cfg.groupOrder[gi];
+            var group = null;
+            for (var k = 0; k < PANEL_MENU_GROUPS.length; k++) if (PANEL_MENU_GROUPS[k].id === gid) group = PANEL_MENU_GROUPS[k];
+            if (!group) continue;
+            var ids = cfg.itemOrder[gid] || [];
+            var items = ids.map(function(id) {
+                var label = panelMenuLabel(id);
+                var oldName = PANEL_MENU_PREVIOUS_LABELS[id] || id;
+                for (var di = 0; di < PANEL_BUTTON_DEFS.length && !PANEL_MENU_PREVIOUS_LABELS[id]; di++) {
+                    if (PANEL_BUTTON_DEFS[di].id === id) oldName = PANEL_BUTTON_DEFS[di].label || id;
+                }
+                if (oldName.toLowerCase() === label.toLowerCase()) oldName = "";
+                return { label: label, oldName: oldName, hidden: visibility[id] === false, desc: PANEL_MENU_HELP[id] || ("Runs the " + label + " workflow.") };
+            });
+            sections.push({ id: "menu-" + gid, title: group.label, intro: ids.length ? "" : "No buttons in this menu are available in the " + envName + " environment.", kind: "cards", items: items, isMenu: true });
+        }
 
         var overlay = document.createElement("div");
-        overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:30000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
-
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:" + (PANEL_Z_INDEX + 10) + ";display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
         var modal = document.createElement("div");
         modal.setAttribute("role", "dialog");
         modal.setAttribute("aria-modal", "true");
-        modal.style.cssText = "background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);border-radius:16px;box-shadow:0 25px 60px rgba(0,0,0,0.5);width:90vw;max-width:720px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;border:1px solid rgba(102,126,234,0.4);";
+        modal.setAttribute("aria-labelledby", "aps-help-title");
+        modal.style.cssText = "background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);border-radius:16px;box-shadow:0 25px 60px rgba(0,0,0,0.5);width:92vw;max-width:860px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;border:1px solid rgba(102,126,234,0.4);";
 
         function doClose() {
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
             HELP_MODAL_OPEN = false;
-            document.removeEventListener("keydown", handleHelpKey);
+            document.removeEventListener("keydown", handleHelpKey, true);
         }
-
         overlay.addEventListener("click", function(e) { if (e.target === overlay) doClose(); });
 
-        var mHeader = document.createElement("div");
-        mHeader.style.cssText = "padding:20px 24px;background:rgba(102,126,234,0.15);border-bottom:1px solid rgba(102,126,234,0.3);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;";
-
-        var mTitle = document.createElement("div");
-        mTitle.innerHTML = "<span style='font-size:20px;font-weight:700;color:white;'>ClinSpark Automator</span><span style='font-size:14px;color:rgba(255,255,255,0.6);margin-left:10px;'>Help Guide</span>";
-
+        var head = document.createElement("div");
+        head.style.cssText = "padding:18px 24px;background:rgba(102,126,234,0.15);border-bottom:1px solid rgba(102,126,234,0.3);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;";
+        var titleWrap = document.createElement("div");
+        var t1 = document.createElement("span");
+        t1.id = "aps-help-title";
+        t1.textContent = "ClinSpark Automator";
+        t1.style.cssText = "font-size:20px;font-weight:700;color:#fff;";
+        var t2 = document.createElement("span");
+        t2.textContent = "Help Guide";
+        t2.style.cssText = "font-size:14px;color:rgba(255,255,255,0.65);margin-left:10px;";
+        var t3 = document.createElement("div");
+        t3.textContent = envName + " environment" + (version ? " \u00B7 version " + version : "");
+        t3.style.cssText = "font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;";
+        titleWrap.appendChild(t1);
+        titleWrap.appendChild(t2);
+        titleWrap.appendChild(t3);
         var closeX = document.createElement("button");
-        closeX.innerHTML = "\u2715";
-        closeX.setAttribute("type", "button");
-        closeX.style.cssText = "background:rgba(255,255,255,0.1);border:none;color:white;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px;flex-shrink:0;transition:background 0.2s;";
+        closeX.type = "button";
+        closeX.textContent = "\u2715";
+        closeX.setAttribute("aria-label", "Close help");
+        closeX.style.cssText = "background:rgba(255,255,255,0.1);border:none;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px;flex-shrink:0;transition:background .2s;";
         closeX.onmouseover = function() { closeX.style.background = "rgba(255,67,54,0.7)"; };
         closeX.onmouseout = function() { closeX.style.background = "rgba(255,255,255,0.1)"; };
         closeX.addEventListener("click", doClose);
-        mHeader.appendChild(mTitle);
-        mHeader.appendChild(closeX);
+        head.appendChild(titleWrap);
+        head.appendChild(closeX);
 
-        var searchWrap = document.createElement("div");
-        searchWrap.style.cssText = "padding:16px 24px;background:rgba(0,0,0,0.2);border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;";
-
+        var toolbar = document.createElement("div");
+        toolbar.style.cssText = "padding:14px 24px 10px;background:rgba(0,0,0,0.2);border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;";
         var searchInput = document.createElement("input");
-        searchInput.type = "text";
-        searchInput.setAttribute("placeholder", "Search features\u2026");
-        searchInput.style.cssText = "width:100%;box-sizing:border-box;background:rgba(255,255,255,0.08);border:1px solid rgba(102,126,234,0.4);color:white;border-radius:8px;padding:10px 14px;font-size:14px;outline:none;";
-        searchWrap.appendChild(searchInput);
+        searchInput.type = "search";
+        searchInput.setAttribute("placeholder", "Search features, old button names, or shortcuts\u2026");
+        searchInput.setAttribute("aria-label", "Search the help guide");
+        searchInput.style.cssText = "width:100%;box-sizing:border-box;background:rgba(255,255,255,0.08);border:1px solid rgba(102,126,234,0.4);color:#fff;border-radius:8px;padding:10px 14px;font-size:14px;outline:none;";
+        var chips = document.createElement("div");
+        chips.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;";
+        toolbar.appendChild(searchInput);
+        toolbar.appendChild(chips);
 
-        var modalBody = document.createElement("div");
-        modalBody.style.cssText = "overflow-y:auto;padding:20px 24px;flex:1;";
+        var body = document.createElement("div");
+        body.style.cssText = "overflow-y:auto;padding:18px 24px 8px;flex:1;scroll-behavior:smooth;";
 
-        function renderHelpSections(filterText) {
-            modalBody.innerHTML = "";
-            var fl = (filterText || "").trim().toLowerCase();
-            var hasAny = false;
-            for (var si = 0; si < helpSections.length; si++) {
-                var sec = helpSections[si];
-                var vis = [];
-                for (var fi = 0; fi < sec.features.length; fi++) {
-                    var f = sec.features[fi];
-                    if (!fl || f.label.toLowerCase().indexOf(fl) !== -1 || f.desc.toLowerCase().indexOf(fl) !== -1) vis.push(f);
-                }
-                if (vis.length === 0) continue;
-                hasAny = true;
+        function kbd(text) {
+            var k = document.createElement("kbd");
+            k.textContent = text;
+            k.style.cssText = "display:inline-block;padding:2px 7px;margin-right:4px;border:1px solid rgba(255,255,255,0.35);border-bottom-width:2px;border-radius:5px;background:rgba(0,0,0,0.3);font:600 11.5px/1.5 Consolas,monospace;color:#fff;";
+            return k;
+        }
+        function tag(text, bg, fg) {
+            var s = document.createElement("span");
+            s.textContent = text;
+            s.style.cssText = "display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;font-size:10.5px;font-weight:600;vertical-align:middle;background:" + bg + ";color:" + fg + ";";
+            return s;
+        }
+        function matches(q, parts) {
+            if (!q) return true;
+            return parts.join(" ").toLowerCase().indexOf(q) !== -1;
+        }
+        function render(filterText) {
+            body.innerHTML = "";
+            chips.innerHTML = "";
+            var q = (filterText || "").trim().toLowerCase();
+            var any = false;
+            sections.forEach(function(sec) {
+                var vis = sec.items.filter(function(it) {
+                    return matches(q, [sec.title, it.label || "", it.oldName || "", it.desc || "", (it.keys || []).join(" ")]);
+                });
+                if (q && !vis.length) return;
+                if (!q && !vis.length && !sec.intro) return;
+                any = true;
+                var anchorId = "aps-help-" + sec.id;
+                var chip = document.createElement("button");
+                chip.type = "button";
+                chip.textContent = sec.title;
+                chip.style.cssText = "padding:4px 10px;border-radius:14px;border:1px solid rgba(102,126,234,0.45);background:" + (sec.isMenu ? "rgba(255,255,255,0.06)" : "rgba(102,126,234,0.2)") + ";color:#dfe3ff;font-size:11.5px;cursor:pointer;";
+                chip.onclick = function() {
+                    var target = body.querySelector("#" + anchorId);
+                    if (target) body.scrollTop = target.offsetTop - body.offsetTop - 6;
+                };
+                chips.appendChild(chip);
+
                 var secTitle = document.createElement("div");
+                secTitle.id = anchorId;
                 secTitle.textContent = sec.title;
-                secTitle.style.cssText = "color:rgba(120,140,255,1);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px;";
-                modalBody.appendChild(secTitle);
-                var grid = document.createElement("div");
-                grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:24px;";
-                for (var vi = 0; vi < vis.length; vi++) {
-                    (function(feat) {
-                        var card = document.createElement("div");
-                        card.style.cssText = "background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:14px 16px;transition:border-color 0.2s;";
-                        card.onmouseover = function() { card.style.borderColor = "rgba(102,126,234,0.6)"; };
-                        card.onmouseout = function() { card.style.borderColor = "rgba(255,255,255,0.12)"; };
-                        var lbl = document.createElement("div");
-                        lbl.textContent = feat.label;
-                        lbl.style.cssText = "color:white;font-size:14px;font-weight:600;margin-bottom:6px;";
-                        var descEl = document.createElement("div");
-                        descEl.textContent = feat.desc;
-                        descEl.style.cssText = "color:rgba(255,255,255,0.65);font-size:12px;line-height:1.5;";
-                        card.appendChild(lbl);
-                        card.appendChild(descEl);
-                        grid.appendChild(card);
-                    })(vis[vi]);
+                secTitle.style.cssText = "color:rgba(140,158,255,1);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px;";
+                body.appendChild(secTitle);
+                if (sec.intro) {
+                    var intro = document.createElement("div");
+                    intro.textContent = sec.intro;
+                    intro.style.cssText = "color:rgba(255,255,255,0.55);font-size:12.5px;font-style:italic;margin:-4px 0 18px;";
+                    body.appendChild(intro);
                 }
-                modalBody.appendChild(grid);
-            }
-            if (!hasAny) {
-                var noRes = document.createElement("div");
-                noRes.textContent = "No features match your search.";
-                noRes.style.cssText = "color:rgba(255,255,255,0.5);text-align:center;padding:40px;";
-                modalBody.appendChild(noRes);
+                if (!vis.length) return;
+                if (sec.kind === "keys") {
+                    var list = document.createElement("div");
+                    list.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-bottom:24px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:12px 16px;";
+                    vis.forEach(function(it) {
+                        var row = document.createElement("div");
+                        row.style.cssText = "display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;";
+                        var keys = document.createElement("span");
+                        keys.style.cssText = "flex:0 0 190px;";
+                        it.keys.forEach(function(key) { keys.appendChild(kbd(key)); });
+                        var d = document.createElement("span");
+                        d.textContent = it.desc;
+                        d.style.cssText = "flex:1 1 300px;color:rgba(255,255,255,0.75);font-size:12.5px;line-height:1.5;";
+                        row.appendChild(keys);
+                        row.appendChild(d);
+                        list.appendChild(row);
+                    });
+                    body.appendChild(list);
+                    return;
+                }
+                var grid = document.createElement("div");
+                grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-bottom:24px;";
+                vis.forEach(function(it) {
+                    var card = document.createElement("div");
+                    card.style.cssText = "background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:13px 15px;transition:border-color .2s;" + (it.hidden ? "opacity:.75;" : "");
+                    card.onmouseover = function() { card.style.borderColor = "rgba(102,126,234,0.6)"; };
+                    card.onmouseout = function() { card.style.borderColor = "rgba(255,255,255,0.12)"; };
+                    var lbl = document.createElement("div");
+                    lbl.style.cssText = "color:#fff;font-size:14px;font-weight:600;margin-bottom:6px;";
+                    lbl.appendChild(document.createTextNode(it.label));
+                    if (it.hidden) lbl.appendChild(tag("Hidden", "rgba(255,120,120,0.2)", "#ffb3b3"));
+                    card.appendChild(lbl);
+                    if (it.oldName) {
+                        var was = document.createElement("div");
+                        was.textContent = "Formerly \u201C" + it.oldName + "\u201D";
+                        was.style.cssText = "color:rgba(180,190,255,0.8);font-size:11px;margin:-3px 0 6px;";
+                        card.appendChild(was);
+                    }
+                    var d = document.createElement("div");
+                    d.textContent = it.desc;
+                    d.style.cssText = "color:rgba(255,255,255,0.68);font-size:12px;line-height:1.5;";
+                    card.appendChild(d);
+                    if (it.hidden) {
+                        var hint = document.createElement("div");
+                        hint.textContent = "Hidden from the panel. Turn it on in Settings \u2192 Buttons.";
+                        hint.style.cssText = "color:#ffb3b3;font-size:11px;margin-top:6px;";
+                        card.appendChild(hint);
+                    }
+                    grid.appendChild(card);
+                });
+                body.appendChild(grid);
+            });
+            if (!any) {
+                var none = document.createElement("div");
+                none.textContent = "Nothing matches \u201C" + filterText.trim() + "\u201D. Try a feature name, an old button name, or a key such as Alt.";
+                none.style.cssText = "color:rgba(255,255,255,0.55);text-align:center;padding:40px;";
+                body.appendChild(none);
             }
         }
+        searchInput.addEventListener("input", function() { render(this.value); body.scrollTop = 0; });
 
-        searchInput.addEventListener("input", function() { renderHelpSections(this.value); });
+        var foot = document.createElement("div");
+        foot.style.cssText = "padding:12px 24px;background:rgba(0,0,0,0.2);border-top:1px solid rgba(255,255,255,0.08);flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        var settingsLink = document.createElement("button");
+        settingsLink.type = "button";
+        settingsLink.textContent = "Open Settings";
+        settingsLink.style.cssText = "background:transparent;border:1px solid rgba(255,255,255,0.3);color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;";
+        settingsLink.addEventListener("click", function() { doClose(); openSettingsPopup(); });
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.textContent = "Close";
+        closeBtn.style.cssText = "background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border:none;color:#fff;padding:9px 28px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;";
+        closeBtn.addEventListener("click", doClose);
+        foot.appendChild(settingsLink);
+        foot.appendChild(closeBtn);
 
-        var modalFooter = document.createElement("div");
-        modalFooter.style.cssText = "padding:14px 24px;background:rgba(0,0,0,0.2);border-top:1px solid rgba(255,255,255,0.08);flex-shrink:0;display:flex;justify-content:flex-end;";
-
-        var footerCloseBtn = document.createElement("button");
-        footerCloseBtn.textContent = "Close";
-        footerCloseBtn.style.cssText = "background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border:none;color:white;padding:10px 28px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;";
-        footerCloseBtn.addEventListener("click", doClose);
-        modalFooter.appendChild(footerCloseBtn);
-
-        modal.appendChild(mHeader);
-        modal.appendChild(searchWrap);
-        modal.appendChild(modalBody);
-        modal.appendChild(modalFooter);
+        modal.appendChild(head);
+        modal.appendChild(toolbar);
+        modal.appendChild(body);
+        modal.appendChild(foot);
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
-
-        renderHelpSections("");
+        render("");
         setTimeout(function() { searchInput.focus(); }, 50);
 
-        function handleHelpKey(e) { if (e.key === "Escape") doClose(); }
-        document.addEventListener("keydown", handleHelpKey);
+        function handleHelpKey(e) {
+            if (e.key !== "Escape") return;
+            e.stopPropagation();
+            if (searchInput.value && document.activeElement === searchInput) { searchInput.value = ""; render(""); return; }
+            doClose();
+        }
+        document.addEventListener("keydown", handleHelpKey, true);
     }
 
     var SMART_NAV_STORAGE = "activityPlanState.smartNavigation";
@@ -24818,18 +25470,69 @@
             return { item: item, score: score, index: index };
         }).filter(function (r) { return r.score > 0; }).sort(function (a, b) { return b.score - a.score || a.index - b.index; });
     }
+    function smartNavGuide(compact) {
+        var box = document.createElement("div");
+        box.style.cssText = "box-sizing:border-box;background:rgba(123,99,220,.12);border:1px solid rgba(155,130,255,.35);border-radius:8px;padding:" + (compact ? "10px 12px" : "12px 14px") + ";margin:0 0 12px;color:#e3def5;font:12.5px/1.55 Arial,sans-serif";
+        function line(parent, keys, text) {
+            var row = document.createElement("div");
+            row.style.cssText = "display:flex;gap:10px;align-items:baseline;margin:3px 0";
+            var k = document.createElement("span");
+            k.style.cssText = "flex:0 0 auto;min-width:118px;color:#fff;font-weight:700;white-space:nowrap";
+            keys.forEach(function(key, i) {
+                if (i) k.appendChild(document.createTextNode(" "));
+                var kbd = document.createElement("kbd");
+                kbd.textContent = key;
+                kbd.style.cssText = "display:inline-block;padding:1px 6px;border:1px solid rgba(255,255,255,.35);border-bottom-width:2px;border-radius:4px;background:#26262e;font:600 11px/1.5 Consolas,monospace;color:#fff";
+                k.appendChild(kbd);
+            });
+            var t = document.createElement("span");
+            t.textContent = text;
+            row.appendChild(k);
+            row.appendChild(t);
+            parent.appendChild(row);
+        }
+        var title = document.createElement("div");
+        title.textContent = "What is Smart Navigation?";
+        title.style.cssText = "font-weight:700;color:#fff;margin-bottom:4px";
+        box.appendChild(title);
+        var what = document.createElement("div");
+        what.textContent = "A keyboard shortcut that jumps straight to common ClinSpark pages (Forms List, Activity Plans, Study Eligibility, Lab Orders, and more) from anywhere on the site, without clicking through menus.";
+        what.style.cssText = "margin-bottom:8px;color:#d4cfe8";
+        box.appendChild(what);
+        line(box, ["Alt", "S"], "Open the page finder from any ClinSpark page.");
+        line(box, ["Type"], "A keyword or part of a page name, e.g. AP for Activity Plans List or E for Study Eligibility.");
+        line(box, ["\u2191", "\u2193", "Enter"], "Pick a match and go. You can also click a result.");
+        line(box, ["Esc"], "Close the finder without navigating.");
+        line(box, ["Alt", "A"], "Open the study switcher dropdown in the top bar.");
+        if (!compact) {
+            var edit = document.createElement("div");
+            edit.style.cssText = "margin-top:8px;color:#d4cfe8";
+            edit.textContent = "Customize the list below: rename a page, change its keywords (comma-separated, each keyword can only be used once), or use Add Navigation to add your own page by pasting a link from this ClinSpark site. Default pages can be edited but not removed; Reset Defaults restores them. Changes apply after Save.";
+            box.appendChild(edit);
+        }
+        return box;
+    }
     function smartNavOpenSettings() {
         var config = smartNavConfig(), draft = smartNavCloneRows(config.defaults.map(function (r) { return [r.name, r.keywords, r.path]; }));
         config.custom.forEach(function (r) { draft.push({ name: r.name, keywords: r.keywords.slice(), path: r.path, custom: true }); });
         var panel = document.createElement("div"), list = document.createElement("div"), status = document.createElement("div");
         panel.style.cssText = "box-sizing:border-box;width:100%;color:#e8e8ee;font:13px Arial,sans-serif;max-height:65vh;overflow:auto;padding:2px 14px 4px 2px";
-        var intro = document.createElement("p"); intro.textContent = "Edit page names, unique keywords, and same-site paths. Changes apply after Save."; intro.style.cssText = "color:#b9b9c6;margin:0 0 12px;line-height:1.45"; panel.appendChild(intro); panel.appendChild(list);
-        function draw() { list.innerHTML = ""; draft.forEach(function (row, i) { var line = document.createElement("div"); line.style.cssText = "display:grid;grid-template-columns:minmax(150px,1.2fr) minmax(120px,1fr) minmax(220px,1.7fr) 76px;gap:9px;margin:8px 0;align-items:center;min-width:0"; [row.name, row.keywords.join(", "), row.path].forEach(function (value, col) { var input = document.createElement("input"); input.value = value; input.placeholder = col === 0 ? "Name" : col === 1 ? "Keywords" : "Path or link"; input.style.cssText = "box-sizing:border-box;min-width:0;width:100%;padding:9px 10px;border:1px solid #555;border-radius:5px;background:#202124;color:#fff;outline:2px solid transparent;outline-offset:1px"; input.onfocus = function () { input.style.borderColor = "#9b82ff"; input.style.outlineColor = "rgba(155,130,255,.45)"; }; input.onblur = function () { input.style.borderColor = "#555"; input.style.outlineColor = "transparent"; }; input.oninput = function () { if (col === 0) row.name = input.value; else if (col === 1) row.keywords = input.value.split(",").map(function (v) { return v.trim().toUpperCase(); }).filter(Boolean); else row.path = input.value; }; line.appendChild(input); }); if (row.custom) { var remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove"; remove.style.cssText = "box-sizing:border-box;width:76px;padding:8px 6px;border:1px solid rgba(255,110,110,.55);border-radius:5px;background:rgba(125,30,40,.72);color:#fff;font-weight:600;cursor:pointer"; remove.onmouseenter = function () { remove.style.background = "rgba(170,45,55,.9)"; }; remove.onmouseleave = function () { remove.style.background = "rgba(125,30,40,.72)"; }; remove.onclick = function () { draft.splice(i, 1); draw(); }; line.appendChild(remove); } else { var badge = document.createElement("span"); badge.textContent = "Default"; badge.style.cssText = "display:block;color:#c9bbff;font-size:12px;font-weight:600;text-align:center;white-space:nowrap"; line.appendChild(badge); } list.appendChild(line); }); }
+        panel.appendChild(smartNavGuide(false));
+        var cols = "minmax(150px,1.2fr) minmax(120px,1fr) minmax(220px,1.7fr) 76px";
+        var header = document.createElement("div");
+        header.style.cssText = "display:grid;grid-template-columns:" + cols + ";gap:9px;margin:4px 0 0;color:#a9a9ba;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase";
+        ["Page name", "Keywords", "Path or link", ""].forEach(function (label) { var h = document.createElement("span"); h.textContent = label; header.appendChild(h); });
+        panel.appendChild(header);
+        panel.appendChild(list);
+        function draw() { list.innerHTML = ""; draft.forEach(function (row, i) { var line = document.createElement("div"); line.style.cssText = "display:grid;grid-template-columns:" + cols + ";gap:9px;margin:8px 0;align-items:center;min-width:0"; [row.name, row.keywords.join(", "), row.path].forEach(function (value, col) { var input = document.createElement("input"); input.value = value; input.placeholder = col === 0 ? "e.g. Forms List" : col === 1 ? "e.g. F, FORMS" : "/secure/... or paste a link"; input.setAttribute("aria-label", (col === 0 ? "Page name" : col === 1 ? "Keywords" : "Path or link") + " for row " + (i + 1)); input.style.cssText = "box-sizing:border-box;min-width:0;width:100%;padding:9px 10px;border:1px solid #555;border-radius:5px;background:#202124;color:#fff;outline:2px solid transparent;outline-offset:1px"; input.onfocus = function () { input.style.borderColor = "#9b82ff"; input.style.outlineColor = "rgba(155,130,255,.45)"; }; input.onblur = function () { input.style.borderColor = "#555"; input.style.outlineColor = "transparent"; }; input.oninput = function () { if (col === 0) row.name = input.value; else if (col === 1) row.keywords = input.value.split(",").map(function (v) { return v.trim().toUpperCase(); }).filter(Boolean); else row.path = input.value; }; line.appendChild(input); }); if (row.custom) { var remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove"; remove.style.cssText = "box-sizing:border-box;width:76px;padding:8px 6px;border:1px solid rgba(255,110,110,.55);border-radius:5px;background:rgba(125,30,40,.72);color:#fff;font-weight:600;cursor:pointer"; remove.onmouseenter = function () { remove.style.background = "rgba(170,45,55,.9)"; }; remove.onmouseleave = function () { remove.style.background = "rgba(125,30,40,.72)"; }; remove.onclick = function () { draft.splice(i, 1); draw(); }; line.appendChild(remove); } else { var badge = document.createElement("span"); badge.textContent = "Default"; badge.title = "Built-in page: can be edited, not removed"; badge.style.cssText = "display:block;color:#c9bbff;font-size:12px;font-weight:600;text-align:center;white-space:nowrap"; line.appendChild(badge); } list.appendChild(line); }); }
         var actions = document.createElement("div"); actions.style.cssText = "display:flex;gap:9px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.1);justify-content:flex-end;flex-wrap:wrap";
-        var add = document.createElement("button"); add.textContent = "Add Navigation"; add.onclick = function () { draft.push({ name: "", keywords: [], path: "/secure/", custom: true }); draw(); };
-        var reset = document.createElement("button"); reset.textContent = "Reset Defaults"; reset.onclick = function () { draft = smartNavCloneRows(SMART_NAV_DEFAULTS); draft = draft.concat(config.custom.map(function (r) { return { name:r.name, keywords:r.keywords.slice(), path:r.path, custom:true }; })); status.textContent = "Default pages restored. Save to keep this change."; draw(); };
+        var add = document.createElement("button"); add.textContent = "Add Navigation"; add.title = "Add your own page; paste a link from this ClinSpark site into Path or link"; add.onclick = function () { draft.push({ name: "", keywords: [], path: "/secure/", custom: true }); draw(); var inputs = list.querySelectorAll("input"); if (inputs.length >= 3) inputs[inputs.length - 3].focus(); };
+        var reset = document.createElement("button"); reset.textContent = "Reset Defaults"; reset.title = "Restore the built-in pages; your added pages are kept"; reset.onclick = function () { draft = smartNavCloneRows(SMART_NAV_DEFAULTS); draft = draft.concat(config.custom.map(function (r) { return { name:r.name, keywords:r.keywords.slice(), path:r.path, custom:true }; })); status.textContent = "Default pages restored. Save to keep this change."; status.style.color = "#b9b9c6"; draw(); };
         var save = document.createElement("button"); save.textContent = "Save"; save.onclick = function () { var seen = {}; try { draft.forEach(function (r) { if (!r.name.trim() || !r.keywords.length) throw new Error("Every page needs a name and at least one keyword."); r.path = smartNavPath(r.path); r.keywords.forEach(function (k) { var n = smartNavNormalize(k); if (!n || seen[n]) throw new Error("Keywords must be unique: " + k); seen[n] = true; }); }); var defaults = draft.filter(function (r) { return !r.custom; }).map(function (r) { return { name:r.name.trim(), keywords:r.keywords, path:r.path }; }); var custom = draft.filter(function (r) { return r.custom; }).map(function (r) { return { name:r.name.trim(), keywords:r.keywords, path:r.path }; }); localStorage.setItem(SMART_NAV_STORAGE, JSON.stringify({ defaults:defaults, custom:custom })); popup.close(); } catch (err) { status.textContent = err.message; status.style.color = "#ff9a9a"; } };
-        [add, reset, save].forEach(function (b) { b.style.cssText = "padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer"; actions.appendChild(b); }); panel.appendChild(status); panel.appendChild(actions); draw(); var popup = createPopup({ title: "Smart Navigation", content: panel, width: "900px", height: "auto" });
+        [add, reset, save].forEach(function (b) { b.type = "button"; b.style.cssText = "padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer"; actions.appendChild(b); });
+        status.setAttribute("role", "status");
+        status.style.cssText = "margin-top:8px;font-size:12px;color:#b9b9c6";
+        panel.appendChild(status); panel.appendChild(actions); draw(); var popup = createPopup({ title: "Smart Navigation", content: panel, width: "900px", height: "auto" });
     }
     function initSmartPageLocator() {
         if (window.__CLINSPARK_SMART_NAV_BOUND) return; window.__CLINSPARK_SMART_NAV_BOUND = true;
@@ -24859,90 +25562,151 @@
     function openSettingsPopup() {
         if (SETTINGS_MODAL_OPEN) return null;
         SETTINGS_MODAL_OPEN = true;
+        panelMenuCloseAll();
 
-        var pendingLayout = JSON.parse(JSON.stringify(getEffectiveButtonLayout()));
-        var originalLayout = JSON.parse(JSON.stringify(pendingLayout));
-        var pendingColors = JSON.parse(JSON.stringify(getButtonColors()));
-        var originalColors = JSON.parse(JSON.stringify(pendingColors));
+        function clone(v) { return JSON.parse(JSON.stringify(v)); }
+        function cleanColors(map) {
+            var out = {};
+            for (var k in map) {
+                if (Object.prototype.hasOwnProperty.call(map, k) && panelMenuIsHexColor(map[k])) out[k] = map[k];
+            }
+            return out;
+        }
+        var defMap = buildPanelDefMap();
+        var pendingVis = panelMenuVisibilityMap(getEffectiveButtonLayout());
+        var pendingMenu = panelMenuGetConfig();
+        var pendingColors = cleanColors(getButtonColors());
         var pendingTheme = getThemeMode();
         var originalTheme = pendingTheme;
         var pendingHotkey = getPanelHotkey();
         var originalHotkey = pendingHotkey;
-        var cfgHasDirty = false;
+        function snapshot() {
+            return JSON.stringify({ vis: pendingVis, menu: pendingMenu, colors: cleanColors(pendingColors), theme: pendingTheme, hotkey: pendingHotkey });
+        }
+        var originalSnapshot = snapshot();
+        var buttonFilter = "all";
+        var buttonSearch = "";
 
-        // --- Theme-aware color palette ---
         var _g = (getThemeMode() === THEME_MODE_GLASS);
         var tc = {
-            containerBg: _g ? "linear-gradient(135deg,#667eea 0%,#764ba2 100%)" : "#1a1a1a",
-            headerBg: _g ? "rgba(255,255,255,0.1)" : "#222",
-            headerBorder: _g ? "rgba(255,255,255,0.2)" : "#333",
-            sectionBorder: _g ? "rgba(255,255,255,0.15)" : "#2a2a2a",
-            closeBg: _g ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.1)",
-            textSec: _g ? "rgba(255,255,255,0.9)" : "#ccc",
-            textMuted: _g ? "rgba(255,255,255,0.5)" : "#777",
-            textHint: _g ? "rgba(255,255,255,0.45)" : "#666",
-            inputBg: _g ? "rgba(15,10,40,0.7)" : "#2a2a2a",
-            inputBorder: _g ? "rgba(255,255,255,0.3)" : "#444",
+            containerBg: _g ? "linear-gradient(135deg,#667eea 0%,#764ba2 100%)" : "#1a1a1f",
+            headerBg: _g ? "rgba(255,255,255,0.1)" : "#202027",
+            headerBorder: _g ? "rgba(255,255,255,0.2)" : "#30303a",
+            sectionBorder: _g ? "rgba(255,255,255,0.15)" : "#2c2c35",
+            closeBg: _g ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.08)",
+            textSec: _g ? "rgba(255,255,255,0.92)" : "#d4d4de",
+            textMuted: _g ? "rgba(255,255,255,0.6)" : "#8d8d9c",
+            inputBg: _g ? "rgba(15,10,40,0.7)" : "#26262e",
+            inputBorder: _g ? "rgba(255,255,255,0.3)" : "#40404c",
             inputText: _g ? "#e0e0ff" : "#fff",
-            inputFocus: _g ? "rgba(255,255,255,0.6)" : "#5b43c7",
-            gridBg: _g ? "rgba(0,0,0,0.15)" : "rgba(0,0,0,0.3)",
-            cellBg: _g ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.04)",
-            cellHover: _g ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.08)",
-            cellDrag: _g ? "rgba(118,75,162,0.45)" : "rgba(91,67,199,0.3)",
-            cellDragBorder: _g ? "rgba(180,140,255,0.5)" : "rgba(91,67,199,0.5)",
-            cellFaded: _g ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.02)",
+            inputFocus: _g ? "rgba(255,255,255,0.6)" : "#7a68e0",
+            cardBg: _g ? "rgba(0,0,0,0.16)" : "#202027",
+            rowBg: _g ? "rgba(255,255,255,0.07)" : "#26262e",
+            rowHover: _g ? "rgba(255,255,255,0.14)" : "#2d2d37",
+            accent: _g ? "rgba(255,255,255,0.85)" : "#7a68e0",
             tBtnActiveBg: _g ? "rgba(255,255,255,0.25)" : "#5b43c7",
-            tBtnActiveBorder: _g ? "rgba(255,255,255,0.5)" : "rgba(91,67,199,0.8)",
-            tBtnInactiveBg: _g ? "rgba(0,0,0,0.15)" : "#333",
-            tBtnInactiveBorder: _g ? "rgba(255,255,255,0.2)" : "#444",
-            tBtnHover: _g ? "rgba(0,0,0,0.25)" : "#444",
-            cancelBg: _g ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.1)",
-            cancelBorder: _g ? "rgba(255,255,255,0.3)" : "#444",
-            cancelHover: _g ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.15)"
+            tBtnActiveBorder: _g ? "rgba(255,255,255,0.5)" : "rgba(122,104,224,0.9)",
+            tBtnInactiveBg: _g ? "rgba(0,0,0,0.15)" : "#2b2b34",
+            tBtnInactiveBorder: _g ? "rgba(255,255,255,0.2)" : "#40404c",
+            tBtnHover: _g ? "rgba(0,0,0,0.25)" : "#383844",
+            cancelBg: _g ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
+            cancelBorder: _g ? "rgba(255,255,255,0.3)" : "#44444f",
+            cancelHover: _g ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.14)"
         };
 
-        // --- Overlay ---
         var overlay = document.createElement("div");
-        overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:30000;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
+        overlay.id = "clinspark-settings-modal";
+        overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:" + (PANEL_Z_INDEX + 10) + ";display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;";
+        var css = document.createElement("style");
+        css.textContent = [
+            "#clinspark-settings-modal .aps-set-row { display:flex; align-items:center; gap:8px; min-height:36px; padding:5px 8px; border-radius:7px; background:" + tc.rowBg + "; border:1px solid transparent; box-sizing:border-box; user-select:none; transition:background .12s ease, opacity .12s ease, border-color .12s ease; }",
+            "#clinspark-settings-modal .aps-set-row:hover { background:" + tc.rowHover + "; }",
+            "#clinspark-settings-modal .aps-set-row:focus-visible { outline:2px solid " + tc.accent + "; outline-offset:1px; }",
+            "#clinspark-settings-modal .aps-set-row[data-hidden='1'] .aps-set-name { opacity:.55; text-decoration:line-through; text-decoration-color:rgba(255,255,255,.35); }",
+            "#clinspark-settings-modal .aps-set-row.aps-dragging { opacity:.35; }",
+            "#clinspark-settings-modal .aps-set-row.aps-drop-before { box-shadow:inset 0 2px 0 " + tc.accent + "; }",
+            "#clinspark-settings-modal .aps-set-row.aps-drop-after { box-shadow:inset 0 -2px 0 " + tc.accent + "; }",
+            "#clinspark-settings-modal .aps-set-grip { flex:0 0 auto; width:12px; color:" + tc.textMuted + "; cursor:grab; font-size:13px; line-height:1; text-align:center; }",
+            "#clinspark-settings-modal .aps-set-name { flex:1 1 auto; min-width:0; color:#fff; font-size:12.5px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }",
+            "#clinspark-settings-modal .aps-set-meta { flex:0 0 auto; color:" + tc.textMuted + "; font-size:11px; white-space:nowrap; }",
+            "#clinspark-settings-modal .aps-set-icon-btn { flex:0 0 auto; width:24px; height:24px; padding:0; display:flex; align-items:center; justify-content:center; background:transparent; color:" + tc.textSec + "; border:1px solid " + tc.inputBorder + "; border-radius:5px; cursor:pointer; font-size:11px; line-height:1; }",
+            "#clinspark-settings-modal .aps-set-icon-btn:hover:not(:disabled) { background:" + tc.tBtnHover + "; }",
+            "#clinspark-settings-modal .aps-set-icon-btn:disabled { opacity:.3; cursor:default; }",
+            "#clinspark-settings-modal .aps-swatch { flex:0 0 auto; width:24px; height:24px; padding:0; border-radius:6px; border:1px solid rgba(255,255,255,.35); cursor:pointer; box-sizing:border-box; }",
+            "#clinspark-settings-modal .aps-swatch:disabled { cursor:not-allowed; opacity:.4; }",
+            "#clinspark-settings-modal .aps-swatch[data-default='1'] { background:repeating-linear-gradient(45deg,#3a3a44 0 4px,#2a2a32 4px 8px) !important; }",
+            "#clinspark-settings-modal .aps-switch { flex:0 0 auto; position:relative; width:34px; height:19px; padding:0; border-radius:10px; border:1px solid " + tc.inputBorder + "; background:#3a3a44; cursor:pointer; transition:background .15s ease, border-color .15s ease; }",
+            "#clinspark-settings-modal .aps-switch::after { content:''; position:absolute; top:2px; left:2px; width:13px; height:13px; border-radius:50%; background:#cfcfd8; transition:transform .15s ease, background .15s ease; }",
+            "#clinspark-settings-modal .aps-switch[aria-checked='true'] { background:#3f9d63; border-color:#4cb574; }",
+            "#clinspark-settings-modal .aps-switch[aria-checked='true']::after { transform:translateX(15px); background:#fff; }",
+            "#clinspark-settings-modal .aps-switch:focus-visible { outline:2px solid " + tc.accent + "; outline-offset:2px; }",
+            "#clinspark-settings-modal .aps-palette { position:fixed; z-index:30002; padding:10px; background:#1d1d24; border:1px solid #44444f; border-radius:10px; box-shadow:0 14px 34px rgba(0,0,0,.55); width:236px; box-sizing:border-box; }",
+            "#clinspark-settings-modal .aps-palette-title { color:#b8b8c6; font-size:10.5px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; margin:2px 0 6px; }",
+            "#clinspark-settings-modal .aps-palette-grid { display:grid; grid-template-columns:repeat(7, 24px); gap:6px; margin-bottom:8px; }",
+            "#clinspark-settings-modal .aps-palette-chip { width:24px; height:24px; padding:0; border-radius:6px; border:1px solid rgba(255,255,255,.25); cursor:pointer; }",
+            "#clinspark-settings-modal .aps-palette-chip[aria-checked='true'] { outline:2px solid #fff; outline-offset:1px; }",
+            "#clinspark-settings-modal .aps-palette-default { width:100%; padding:6px; background:#2b2b34; color:#e6e6ee; border:1px solid #44444f; border-radius:6px; cursor:pointer; font-size:11.5px; }",
+            "#clinspark-settings-modal .aps-set-input { box-sizing:border-box; padding:7px 10px; background:" + tc.inputBg + "; border:1px solid " + tc.inputBorder + "; border-radius:7px; color:" + tc.inputText + "; font-size:12px; outline:none; }",
+            "#clinspark-settings-modal .aps-set-input:focus { border-color:" + tc.inputFocus + "; }",
+            "#clinspark-settings-modal .aps-chip-btn { padding:6px 10px; background:" + tc.tBtnInactiveBg + "; border:1px solid " + tc.tBtnInactiveBorder + "; border-radius:7px; color:#fff; font-size:11.5px; cursor:pointer; white-space:nowrap; }",
+            "#clinspark-settings-modal .aps-chip-btn:hover { background:" + tc.tBtnHover + "; }",
+            "#clinspark-settings-modal .aps-chip-btn:disabled { opacity:.45; cursor:not-allowed; }",
+            "#clinspark-settings-modal .aps-chip-btn[aria-pressed='true'] { background:" + tc.tBtnActiveBg + "; border-color:" + tc.tBtnActiveBorder + "; }",
+            "#clinspark-settings-modal .aps-group-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; align-items:start; }",
+            "#clinspark-settings-modal .aps-group-card { background:" + tc.cardBg + "; border:1px solid " + tc.sectionBorder + "; border-radius:9px; padding:8px; min-width:0; }",
+            "#clinspark-settings-modal .aps-group-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 4px 8px; }",
+            "#clinspark-settings-modal .aps-group-title { color:#fff; font-size:12.5px; font-weight:700; }",
+            "#clinspark-settings-modal .aps-group-list { display:flex; flex-direction:column; gap:4px; }",
+            "#clinspark-settings-modal .aps-empty-note { color:" + tc.textMuted + "; font-size:11.5px; font-style:italic; padding:8px 6px; }"
+        ].join("\n");
+        overlay.appendChild(css);
 
-        // --- Container ---
         var container = document.createElement("div");
         container.setAttribute("role", "dialog");
         container.setAttribute("aria-modal", "true");
         container.setAttribute("aria-labelledby", "cfg-modal-title");
-        container.style.cssText = "background:" + tc.containerBg + ";border-radius:12px;padding:0;width:760px;max-width:96vw;box-shadow:0 15px 35px rgba(0,0,0,0.4);position:relative;display:flex;flex-direction:column;max-height:94vh;min-width:0;";
+        container.style.cssText = "background:" + tc.containerBg + ";border-radius:12px;padding:0;width:820px;max-width:96vw;box-shadow:0 15px 35px rgba(0,0,0,0.4);position:relative;display:flex;flex-direction:column;max-height:94vh;min-width:0;border:1px solid " + tc.headerBorder + ";";
 
-        // --- Header ---
         var modalHeader = document.createElement("div");
-        modalHeader.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid " + tc.headerBorder + ";background:" + tc.headerBg + ";border-radius:12px 12px 0 0;flex-shrink:0;";
-
+        modalHeader.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid " + tc.headerBorder + ";background:" + tc.headerBg + ";border-radius:12px 12px 0 0;flex-shrink:0;";
         var modalTitle = document.createElement("h3");
         modalTitle.id = "cfg-modal-title";
         modalTitle.textContent = "Settings";
         modalTitle.style.cssText = "margin:0;color:white;font-size:16px;font-weight:600;";
-
         var modalClose = document.createElement("button");
-        modalClose.innerHTML = "\u2715";
+        modalClose.textContent = "\u2715";
         modalClose.setAttribute("aria-label", "Close settings");
-        modalClose.setAttribute("type", "button");
-        modalClose.style.cssText = "background:" + tc.closeBg + ";border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.3s ease;";
+        modalClose.type = "button";
+        modalClose.style.cssText = "background:" + tc.closeBg + ";border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background .2s ease;";
         modalClose.onmouseover = function() { modalClose.style.background = "rgba(255,67,54,0.8)"; };
         modalClose.onmouseout = function() { modalClose.style.background = tc.closeBg; };
-
         modalHeader.appendChild(modalTitle);
         modalHeader.appendChild(modalClose);
 
-        // --- Body (scrollable) ---
         var modalBody = document.createElement("div");
-        modalBody.style.cssText = "padding:20px;overflow-y:auto;overflow-x:hidden;flex:1;min-width:0;";
+        modalBody.style.cssText = "padding:18px 20px;overflow-y:auto;overflow-x:hidden;flex:1;min-width:0;";
 
-        // === HOTKEY SECTION ===
-        var hotkeySection = document.createElement("div");
-        var hotkeyTitle = document.createElement("div");
-        hotkeyTitle.textContent = "Panel Toggle Hotkey";
-        hotkeyTitle.style.cssText = "color:" + tc.textSec + ";font-size:13px;font-weight:600;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;";
-        hotkeySection.appendChild(hotkeyTitle);
+        function sectionTitle(parent, text, hint) {
+            var t = document.createElement("div");
+            t.textContent = text;
+            t.style.cssText = "color:" + tc.textSec + ";font-size:13px;font-weight:600;margin-bottom:" + (hint ? "3px" : "10px") + ";text-transform:uppercase;letter-spacing:0.5px;";
+            parent.appendChild(t);
+            if (hint) {
+                var h = document.createElement("div");
+                h.textContent = hint;
+                h.style.cssText = "font-size:11.5px;color:" + tc.textMuted + ";margin-bottom:10px;";
+                parent.appendChild(h);
+            }
+        }
+        function section(first) {
+            var s = document.createElement("div");
+            if (!first) s.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid " + tc.sectionBorder + ";";
+            return s;
+        }
 
+        // === HOTKEY ===
+        var hotkeySection = section(true);
+        sectionTitle(hotkeySection, "Panel Toggle Hotkey");
         var hotkeyInput = document.createElement("input");
         hotkeyInput.type = "text";
         hotkeyInput.readOnly = true;
@@ -24957,9 +25721,7 @@
         };
         hotkeyInput.onblur = function() {
             hotkeyInput.style.borderColor = tc.inputBorder;
-            if (!pendingHotkey || pendingHotkey === originalHotkey) {
-                hotkeyInput.value = pendingHotkey || originalHotkey;
-            }
+            if (!hotkeyInput.value) hotkeyInput.value = pendingHotkey || originalHotkey;
         };
         hotkeyInput.addEventListener("keydown", function(e) {
             e.preventDefault();
@@ -24967,625 +25729,756 @@
             var key = e.key;
             var code = e.code;
             var displayKey = key;
-            if (key.length === 1 && key.match(/[a-z]/i)) {
-                displayKey = key.toUpperCase();
-            } else if (code && code.startsWith("Key")) {
-                displayKey = code.substring(3);
-            } else if (code && code.startsWith("Digit")) {
-                displayKey = code.substring(5);
-            } else if (key === " ") {
-                displayKey = "Space";
-            } else if (key.startsWith("F") && key.length <= 3) {
-                displayKey = key.toUpperCase();
-            } else if (key === "Escape") {
-                displayKey = "Escape";
-            } else if (key === "Enter") {
-                displayKey = "Enter";
-            } else if (key === "Tab") {
-                displayKey = "Tab";
-            } else if (key === "Backspace") {
-                displayKey = "Backspace";
-            } else if (code) {
-                displayKey = code;
-            }
+            if (key.length === 1 && key.match(/[a-z]/i)) displayKey = key.toUpperCase();
+            else if (code && code.startsWith("Key")) displayKey = code.substring(3);
+            else if (code && code.startsWith("Digit")) displayKey = code.substring(5);
+            else if (key === " ") displayKey = "Space";
+            else if (key.startsWith("F") && key.length <= 3) displayKey = key.toUpperCase();
+            else if (key === "Escape" || key === "Enter" || key === "Tab" || key === "Backspace") displayKey = key;
+            else if (code) displayKey = code;
             hotkeyInput.value = displayKey;
             pendingHotkey = displayKey;
             checkDirty();
         });
         hotkeySection.appendChild(hotkeyInput);
 
-        // === DISPLAY SECTION ===
-        var displaySection = document.createElement("div");
-        displaySection.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid " + tc.sectionBorder + ";";
-        var displayTitle = document.createElement("div");
-        displayTitle.textContent = "Display";
-        displayTitle.style.cssText = "color:" + tc.textSec + ";font-size:13px;font-weight:600;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;";
-        displaySection.appendChild(displayTitle);
+        // === SMART NAVIGATION ===
+        var smartNavSection = section(false);
+        sectionTitle(smartNavSection, "Smart Navigation", "Press Alt+S on any ClinSpark page, type a keyword (for example AP or E), then press Enter to jump straight to that page. Alt+A opens the study switcher. Use Manage to see every keyword and add your own pages.");
+        var smartNavButton = document.createElement("button");
+        smartNavButton.type = "button";
+        smartNavButton.className = "aps-chip-btn";
+        smartNavButton.textContent = "Manage Smart Navigation";
+        smartNavButton.onclick = function() { smartNavOpenSettings(); };
+        smartNavSection.appendChild(smartNavButton);
 
-        // Theme row
+        // === DISPLAY ===
+        var displaySection = section(false);
+        sectionTitle(displaySection, "Display");
         var themeRow = document.createElement("div");
-        themeRow.style.cssText = "display:flex;gap:8px;margin-bottom:10px;";
-        var themes = [
-            { value: THEME_MODE_BLACK, label: "Black" },
-            { value: THEME_MODE_GLASS, label: "Glassmorphism" }
-        ];
-        for (var ti = 0; ti < themes.length; ti++) {
-            (function(themeOpt) {
-                var themeBtn = document.createElement("button");
-                themeBtn.textContent = themeOpt.label;
-                themeBtn.setAttribute("type", "button");
-                themeBtn.dataset.themeValue = themeOpt.value;
-                var isActive = (pendingTheme === themeOpt.value);
-                themeBtn.style.cssText = "flex:1;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:" + (isActive ? "600" : "400") + ";border:1px solid " + (isActive ? tc.tBtnActiveBorder : tc.tBtnInactiveBorder) + ";background:" + (isActive ? tc.tBtnActiveBg : tc.tBtnInactiveBg) + ";color:white;transition:all 0.2s ease;";
-                themeBtn.onclick = function() {
-                    pendingTheme = themeOpt.value;
-                    var siblings = themeRow.querySelectorAll("button");
-                    for (var si = 0; si < siblings.length; si++) {
-                        var isA = siblings[si].dataset.themeValue === pendingTheme;
-                        siblings[si].style.fontWeight = isA ? "600" : "400";
-                        siblings[si].style.border = "1px solid " + (isA ? tc.tBtnActiveBorder : tc.tBtnInactiveBorder);
-                        siblings[si].style.background = isA ? tc.tBtnActiveBg : tc.tBtnInactiveBg;
-                    }
-                    if (btnGrid) {
-                        var colorPickers = btnGrid.querySelectorAll("select");
-                        for (var csi = 0; csi < colorPickers.length; csi++) colorPickers[csi].disabled = pendingTheme === THEME_MODE_GLASS;
-                    }
-                    checkDirty();
-                };
-                themeBtn.onmouseover = function() { if (pendingTheme !== themeOpt.value) themeBtn.style.background = tc.tBtnHover; };
-                themeBtn.onmouseout = function() { if (pendingTheme !== themeOpt.value) themeBtn.style.background = tc.tBtnInactiveBg; };
-                themeRow.appendChild(themeBtn);
-            })(themes[ti]);
-        }
+        themeRow.style.cssText = "display:flex;gap:8px;margin-bottom:8px;";
+        [{ value: THEME_MODE_BLACK, label: "Black" }, { value: THEME_MODE_GLASS, label: "Glassmorphism" }].forEach(function(opt) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.className = "aps-chip-btn";
+            b.style.flex = "1";
+            b.textContent = opt.label;
+            b.setAttribute("aria-pressed", pendingTheme === opt.value ? "true" : "false");
+            b.onclick = function() {
+                pendingTheme = opt.value;
+                var sibs = themeRow.querySelectorAll("button");
+                for (var i = 0; i < sibs.length; i++) sibs[i].setAttribute("aria-pressed", sibs[i] === b ? "true" : "false");
+                renderMenus();
+                renderButtons();
+                checkDirty();
+            };
+            themeRow.appendChild(b);
+        });
         displaySection.appendChild(themeRow);
-
         var themeHint = document.createElement("div");
-        themeHint.textContent = "Theme change will apply after Save & Refresh";
-        themeHint.style.cssText = "font-size:11px;color:" + tc.textMuted + ";font-style:italic;margin-bottom:6px;";
+        themeHint.textContent = "Theme changes apply after Save & Refresh. Menu and button colors apply to the Black theme.";
+        themeHint.style.cssText = "font-size:11px;color:" + tc.textMuted + ";font-style:italic;";
         displaySection.appendChild(themeHint);
 
-        // === FEATURE BUTTONS SECTION (2-column grid) ===
-        var btnSection = document.createElement("div");
-        btnSection.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid " + tc.sectionBorder + ";";
-        var btnSectionTitle = document.createElement("div");
-        btnSectionTitle.textContent = "Feature Buttons";
-        btnSectionTitle.style.cssText = "color:" + tc.textSec + ";font-size:13px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;";
-        btnSection.appendChild(btnSectionTitle);
-        var btnSectionHint = document.createElement("div");
-        btnSectionHint.textContent = "Drag to reorder, use the checkmark to show or hide, and choose a Black-theme color. Save named loadouts for quick reuse.";
-        btnSectionHint.style.cssText = "font-size:11px;color:" + tc.textHint + ";margin-bottom:10px;font-style:italic;";
-        btnSection.appendChild(btnSectionHint);
+        // === COLOR PICKER ===
+        var openPalette = null;
+        function closePalette() {
+            if (openPalette) {
+                if (openPalette.parentNode) openPalette.parentNode.removeChild(openPalette);
+                openPalette = null;
+            }
+        }
+        function paintSwatch(swatch, color) {
+            if (panelMenuIsHexColor(color)) {
+                swatch.style.background = color;
+                swatch.removeAttribute("data-default");
+                swatch.title = "Color: " + panelMenuColorName(color) + " (Black theme)";
+            } else {
+                swatch.style.background = "";
+                swatch.setAttribute("data-default", "1");
+                swatch.title = "Color: Default (Black theme)";
+            }
+        }
+        function makeSwatch(label, getColor, setColor) {
+            var swatch = document.createElement("button");
+            swatch.type = "button";
+            swatch.className = "aps-swatch";
+            swatch.setAttribute("aria-label", "Choose color for " + label);
+            swatch.disabled = pendingTheme === THEME_MODE_GLASS;
+            paintSwatch(swatch, getColor());
+            swatch.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+            swatch.onclick = function(e) {
+                e.stopPropagation();
+                if (openPalette && openPalette.__owner === swatch) { closePalette(); return; }
+                closePalette();
+                var pal = document.createElement("div");
+                pal.className = "aps-palette";
+                pal.__owner = swatch;
+                pal.setAttribute("role", "dialog");
+                pal.setAttribute("aria-label", "Colors for " + label);
+                pal.addEventListener("mousedown", function(ev) { ev.stopPropagation(); });
+                var current = getColor();
+                BUTTON_COLOR_PRESETS.forEach(function(group) {
+                    if (!group.colors) return;
+                    var title = document.createElement("div");
+                    title.className = "aps-palette-title";
+                    title.textContent = group.label;
+                    pal.appendChild(title);
+                    var grid = document.createElement("div");
+                    grid.className = "aps-palette-grid";
+                    grid.setAttribute("role", "radiogroup");
+                    group.colors.forEach(function(c) {
+                        var chip = document.createElement("button");
+                        chip.type = "button";
+                        chip.className = "aps-palette-chip";
+                        chip.style.background = c.value;
+                        chip.title = c.label;
+                        chip.setAttribute("role", "radio");
+                        chip.setAttribute("aria-label", c.label);
+                        chip.setAttribute("aria-checked", current === c.value ? "true" : "false");
+                        chip.onclick = function() {
+                            setColor(c.value);
+                            paintSwatch(swatch, c.value);
+                            closePalette();
+                            swatch.focus();
+                        };
+                        grid.appendChild(chip);
+                    });
+                    pal.appendChild(grid);
+                });
+                var def = document.createElement("button");
+                def.type = "button";
+                def.className = "aps-palette-default";
+                def.textContent = "Use default color";
+                def.onclick = function() {
+                    setColor("");
+                    paintSwatch(swatch, "");
+                    closePalette();
+                    swatch.focus();
+                };
+                pal.appendChild(def);
+                overlay.appendChild(pal);
+                var r = swatch.getBoundingClientRect();
+                var vw = window.innerWidth, vh = window.innerHeight;
+                var pw = pal.offsetWidth, ph = pal.offsetHeight;
+                var left = Math.min(Math.max(8, r.right - pw), vw - pw - 8);
+                var top = r.bottom + 6 + ph > vh - 8 ? r.top - ph - 6 : r.bottom + 6;
+                pal.style.left = left + "px";
+                pal.style.top = Math.max(8, top) + "px";
+                openPalette = pal;
+                var firstChip = pal.querySelector("[aria-checked='true']") || pal.querySelector(".aps-palette-chip");
+                if (firstChip) firstChip.focus();
+            };
+            return swatch;
+        }
+        function previewTrigger(groupId) {
+            var t = document.querySelector("#" + PANEL_ID + " [data-aps-menu-trigger='" + groupId + "']");
+            if (t && pendingTheme === THEME_MODE_BLACK && !isGlassTheme()) panelMenuPaint(t, pendingMenu.groupColors[groupId] || "");
+        }
+        function previewItem(id) {
+            var items = document.querySelectorAll(".aps-menu-popover [data-feature-button]");
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].getAttribute("data-feature-button") === id && pendingTheme === THEME_MODE_BLACK && !isGlassTheme()) panelMenuPaint(items[i], pendingColors[id] || "");
+            }
+        }
+
+        // === SORTABLE LISTS ===
+        var drag = { list: null, id: null };
+        function makeSortable(listEl, getIds, setIds) {
+            function rowOf(target) {
+                var row = target && target.closest ? target.closest(".aps-set-row") : null;
+                return row && listEl.contains(row) ? row : null;
+            }
+            function clearMarks() {
+                var rows = listEl.querySelectorAll(".aps-set-row");
+                for (var i = 0; i < rows.length; i++) rows[i].classList.remove("aps-drop-before", "aps-drop-after");
+            }
+            listEl.addEventListener("dragstart", function(e) {
+                var row = rowOf(e.target);
+                if (!row) return;
+                drag.list = listEl;
+                drag.id = row.getAttribute("data-id");
+                e.dataTransfer.effectAllowed = "move";
+                try { e.dataTransfer.setData("text/plain", drag.id); } catch (err) {}
+                setTimeout(function() { row.classList.add("aps-dragging"); }, 0);
+            });
+            listEl.addEventListener("dragover", function(e) {
+                if (drag.list !== listEl) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                clearMarks();
+                var row = rowOf(e.target);
+                if (!row || row.getAttribute("data-id") === drag.id) return;
+                var r = row.getBoundingClientRect();
+                row.classList.add(e.clientY < r.top + r.height / 2 ? "aps-drop-before" : "aps-drop-after");
+            });
+            listEl.addEventListener("drop", function(e) {
+                if (drag.list !== listEl) return;
+                e.preventDefault();
+                var row = rowOf(e.target);
+                var ids = getIds().slice();
+                var from = ids.indexOf(drag.id);
+                if (row && from !== -1 && row.getAttribute("data-id") !== drag.id) {
+                    var r = row.getBoundingClientRect();
+                    var after = e.clientY >= r.top + r.height / 2;
+                    ids.splice(from, 1);
+                    var to = ids.indexOf(row.getAttribute("data-id")) + (after ? 1 : 0);
+                    ids.splice(to, 0, drag.id);
+                    setIds(ids);
+                }
+                clearMarks();
+            });
+            listEl.addEventListener("dragend", function() {
+                clearMarks();
+                var rows = listEl.querySelectorAll(".aps-set-row");
+                for (var i = 0; i < rows.length; i++) rows[i].classList.remove("aps-dragging");
+                drag.list = null;
+                drag.id = null;
+                stopAutoScroll();
+            });
+        }
+        var autoScrollRAF = null;
+        var autoScrollSpeed = 0;
+        function stopAutoScroll() {
+            if (autoScrollRAF) cancelAnimationFrame(autoScrollRAF);
+            autoScrollRAF = null;
+            autoScrollSpeed = 0;
+        }
+        modalBody.addEventListener("dragover", function(e) {
+            if (!drag.list) return;
+            var rect = modalBody.getBoundingClientRect();
+            var zone = 48;
+            if (e.clientY - rect.top < zone) autoScrollSpeed = -Math.max(3, Math.round((zone - (e.clientY - rect.top)) / 4));
+            else if (rect.bottom - e.clientY < zone) autoScrollSpeed = Math.max(3, Math.round((zone - (rect.bottom - e.clientY)) / 4));
+            else autoScrollSpeed = 0;
+            if (autoScrollSpeed && !autoScrollRAF) {
+                (function tick() {
+                    if (!autoScrollSpeed) { autoScrollRAF = null; return; }
+                    modalBody.scrollTop += autoScrollSpeed;
+                    autoScrollRAF = requestAnimationFrame(tick);
+                })();
+            }
+        });
+        // Alt+Arrow keys move a focused row; the new position is re-focused after re-render.
+        function keyboardReorder(e, ids, id, setIds, focusSelector) {
+            if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return false;
+            e.preventDefault();
+            var list = ids.slice();
+            var idx = list.indexOf(id);
+            var to = e.key === "ArrowUp" ? idx - 1 : idx + 1;
+            if (idx === -1 || to < 0 || to >= list.length) return true;
+            list.splice(idx, 1);
+            list.splice(to, 0, id);
+            setIds(list);
+            var again = modalBody.querySelector(focusSelector);
+            if (again) again.focus();
+            return true;
+        }
+
+        // === DROPDOWN MENUS ===
+        var menuSection = section(false);
+        sectionTitle(menuSection, "Dropdown Menus", "Drag, or use the arrows, to set the order of the menus on the panel. Menus are always shown; a menu with no buttons shows a note when opened.");
+        var menuList = document.createElement("div");
+        menuList.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;";
+        menuList.setAttribute("aria-label", "Dropdown menu order");
+        menuSection.appendChild(menuList);
+        function groupLabel(gid) {
+            for (var i = 0; i < PANEL_MENU_GROUPS.length; i++) if (PANEL_MENU_GROUPS[i].id === gid) return PANEL_MENU_GROUPS[i].label;
+            return gid;
+        }
+        function setGroupOrder(ids) {
+            pendingMenu.groupOrder = ids;
+            renderMenus();
+            checkDirty();
+        }
+        function renderMenus() {
+            menuList.innerHTML = "";
+            pendingMenu.groupOrder.forEach(function(gid, idx) {
+                var ids = pendingMenu.itemOrder[gid] || [];
+                var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
+                var row = document.createElement("div");
+                row.className = "aps-set-row";
+                row.setAttribute("data-id", gid);
+                row.setAttribute("draggable", "true");
+                row.setAttribute("tabindex", "0");
+                row.setAttribute("aria-label", groupLabel(gid) + ", position " + (idx + 1) + ". Alt plus arrow keys to move.");
+                var grip = document.createElement("span");
+                grip.className = "aps-set-grip";
+                grip.textContent = "\u2807";
+                grip.setAttribute("aria-hidden", "true");
+                var pos = document.createElement("span");
+                pos.className = "aps-set-meta";
+                pos.style.minWidth = "14px";
+                pos.textContent = String(idx + 1);
+                var name = document.createElement("span");
+                name.className = "aps-set-name";
+                name.textContent = groupLabel(gid);
+                var meta = document.createElement("span");
+                meta.className = "aps-set-meta";
+                meta.textContent = ids.length ? (shown + " of " + ids.length + " shown") : "No buttons here";
+                var up = document.createElement("button");
+                up.type = "button";
+                up.className = "aps-set-icon-btn";
+                up.textContent = "\u25B2";
+                up.setAttribute("aria-label", "Move " + groupLabel(gid) + " up");
+                up.disabled = idx === 0;
+                up.onclick = function() { var l = pendingMenu.groupOrder.slice(); l.splice(idx, 1); l.splice(idx - 1, 0, gid); setGroupOrder(l); };
+                var down = document.createElement("button");
+                down.type = "button";
+                down.className = "aps-set-icon-btn";
+                down.textContent = "\u25BC";
+                down.setAttribute("aria-label", "Move " + groupLabel(gid) + " down");
+                down.disabled = idx === pendingMenu.groupOrder.length - 1;
+                down.onclick = function() { var l = pendingMenu.groupOrder.slice(); l.splice(idx, 1); l.splice(idx + 1, 0, gid); setGroupOrder(l); };
+                var swatch = makeSwatch(groupLabel(gid) + " menu", function() { return pendingMenu.groupColors[gid] || ""; }, function(c) {
+                    if (c) pendingMenu.groupColors[gid] = c; else delete pendingMenu.groupColors[gid];
+                    previewTrigger(gid);
+                    checkDirty();
+                });
+                row.addEventListener("keydown", function(e) {
+                    if (e.target !== row) return;
+                    keyboardReorder(e, pendingMenu.groupOrder, gid, setGroupOrder, ".aps-set-row[data-id='" + gid + "']");
+                });
+                row.appendChild(grip);
+                row.appendChild(pos);
+                row.appendChild(name);
+                row.appendChild(meta);
+                row.appendChild(swatch);
+                row.appendChild(up);
+                row.appendChild(down);
+                menuList.appendChild(row);
+            });
+        }
+        makeSortable(menuList, function() { return pendingMenu.groupOrder; }, setGroupOrder);
+
+        // === BUTTONS ===
+        var btnSection = section(false);
+        sectionTitle(btnSection, "Buttons", "Show or hide buttons, drag them to reorder within their menu, and choose a color. Hidden buttons stay available here.");
 
         var loadoutBar = document.createElement("div");
-        loadoutBar.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-bottom:10px;";
-        var loadoutSelectRow = document.createElement("div");
-        loadoutSelectRow.style.cssText = "display:flex;gap:6px;align-items:center;min-width:0;";
+        loadoutBar.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px;";
         var loadoutSelect = document.createElement("select");
-        loadoutSelect.style.cssText = "flex:1;min-width:130px;padding:6px 8px;background:" + tc.inputBg + ";border:1px solid " + tc.inputBorder + ";border-radius:6px;color:" + tc.inputText + ";font-size:11px;";
-        var loadoutManageRow = document.createElement("div");
-        loadoutManageRow.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-width:0;";
+        loadoutSelect.className = "aps-set-input";
+        loadoutSelect.style.cssText += "flex:1 1 180px;min-width:160px;";
+        loadoutSelect.setAttribute("aria-label", "Saved loadouts");
         var loadoutName = document.createElement("input");
         loadoutName.type = "text";
-        loadoutName.placeholder = "Loadout name";
-        loadoutName.style.cssText = "width:112px;padding:6px 8px;background:" + tc.inputBg + ";border:1px solid " + tc.inputBorder + ";border-radius:6px;color:" + tc.inputText + ";font-size:11px;box-sizing:border-box;";
+        loadoutName.className = "aps-set-input";
+        loadoutName.placeholder = "New loadout name";
+        loadoutName.style.cssText += "flex:1 1 150px;min-width:130px;";
+        function chip(label, title) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.className = "aps-chip-btn";
+            b.textContent = label;
+            if (title) b.title = title;
+            return b;
+        }
+        var applyLoadoutBtn = chip("Apply", "Apply the selected loadout and refresh");
+        var updateLoadoutBtn = chip("Update", "Overwrite the selected loadout with the current setup");
+        var deleteLoadoutBtn = chip("Delete", "Delete the selected loadout");
+        var saveLoadoutBtn = chip("Save As", "Save the current setup as a new loadout");
+        loadoutBar.appendChild(loadoutSelect);
+        loadoutBar.appendChild(applyLoadoutBtn);
+        loadoutBar.appendChild(updateLoadoutBtn);
+        loadoutBar.appendChild(deleteLoadoutBtn);
+        loadoutBar.appendChild(loadoutName);
+        loadoutBar.appendChild(saveLoadoutBtn);
+        btnSection.appendChild(loadoutBar);
+        var loadoutFeedback = document.createElement("div");
+        loadoutFeedback.setAttribute("role", "status");
+        loadoutFeedback.style.cssText = "min-height:16px;font-size:11px;color:" + tc.textMuted + ";opacity:0;transition:opacity .2s;margin-bottom:6px;";
+        btnSection.appendChild(loadoutFeedback);
+
+        var toolbar = document.createElement("div");
+        toolbar.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px;";
+        var searchInput = document.createElement("input");
+        searchInput.type = "search";
+        searchInput.className = "aps-set-input";
+        searchInput.placeholder = "Search buttons\u2026";
+        searchInput.setAttribute("aria-label", "Search buttons");
+        searchInput.style.cssText += "flex:1 1 200px;min-width:160px;";
+        searchInput.oninput = function() { buttonSearch = searchInput.value.trim().toLowerCase(); renderButtons(); };
+        toolbar.appendChild(searchInput);
+        var filterBtns = [];
+        [{ v: "all", l: "All" }, { v: "enabled", l: "Shown" }, { v: "disabled", l: "Hidden" }].forEach(function(f) {
+            var b = chip(f.l);
+            b.setAttribute("aria-pressed", f.v === buttonFilter ? "true" : "false");
+            b.onclick = function() {
+                buttonFilter = f.v;
+                filterBtns.forEach(function(x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+                renderButtons();
+            };
+            filterBtns.push(b);
+            toolbar.appendChild(b);
+        });
+        var showAllBtn = chip("Show all", "Show every button");
+        var hideAllBtn = chip("Hide all", "Hide every button");
+        showAllBtn.style.marginLeft = "auto";
+        showAllBtn.onclick = function() { for (var k in pendingVis) pendingVis[k] = true; renderMenus(); renderButtons(); checkDirty(); };
+        hideAllBtn.onclick = function() { for (var k in pendingVis) pendingVis[k] = false; renderMenus(); renderButtons(); checkDirty(); };
+        toolbar.appendChild(showAllBtn);
+        toolbar.appendChild(hideAllBtn);
+        btnSection.appendChild(toolbar);
+
+        var groupGrid = document.createElement("div");
+        groupGrid.className = "aps-group-grid";
+        btnSection.appendChild(groupGrid);
+
+        // Assigns each button in a menu a distinct random pastel (repeats only if a menu has more
+        // buttons than pastels), and avoids handing back the exact same assignment.
+        function randomizeGroupColors(gid) {
+            var ids = pendingMenu.itemOrder[gid] || [];
+            var pastels = [];
+            BUTTON_COLOR_PRESETS.forEach(function(g) { if (g.label === "Pastels") pastels = g.colors.map(function(c) { return c.value; }); });
+            if (!ids.length || !pastels.length) return;
+            function shuffled(list) {
+                var a = list.slice();
+                for (var i = a.length - 1; i > 0; i--) {
+                    var j = Math.floor(Math.random() * (i + 1));
+                    var t = a[i]; a[i] = a[j]; a[j] = t;
+                }
+                return a;
+            }
+            var current = ids.map(function(id) { return pendingColors[id] || ""; });
+            var pick = [];
+            for (var attempt = 0; attempt < 8; attempt++) {
+                var pool = [];
+                pick = ids.map(function() {
+                    if (!pool.length) pool = shuffled(pastels);
+                    return pool.pop();
+                });
+                if (pick.some(function(c, i) { return c !== current[i]; })) break;
+            }
+            ids.forEach(function(id, i) {
+                pendingColors[id] = pick[i];
+                previewItem(id);
+            });
+            renderButtons();
+            checkDirty();
+            var again = groupGrid.querySelector("[data-shuffle-group='" + gid + "']");
+            if (again) again.focus();
+        }
+        function renderButtons() {
+            groupGrid.innerHTML = "";
+            var anyShown = false;
+            pendingMenu.groupOrder.forEach(function(gid) {
+                var ids = pendingMenu.itemOrder[gid] || [];
+                var filtered = ids.filter(function(id) {
+                    var vis = pendingVis[id] !== false;
+                    if (buttonFilter === "enabled" && !vis) return false;
+                    if (buttonFilter === "disabled" && vis) return false;
+                    if (buttonSearch) {
+                        var hay = (panelMenuLabel(id) + " " + id + " " + groupLabel(gid)).toLowerCase();
+                        if (hay.indexOf(buttonSearch) === -1) return false;
+                    }
+                    return true;
+                });
+                var filtering = buttonFilter !== "all" || !!buttonSearch;
+                if (filtering && !filtered.length) return;
+                anyShown = true;
+                var card = document.createElement("div");
+                card.className = "aps-group-card";
+                var head = document.createElement("div");
+                head.className = "aps-group-head";
+                var title = document.createElement("span");
+                title.className = "aps-group-title";
+                title.textContent = groupLabel(gid);
+                var count = document.createElement("span");
+                count.className = "aps-set-meta";
+                var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
+                count.textContent = ids.length ? (shown + " / " + ids.length + " shown") : "";
+                var headRight = document.createElement("span");
+                headRight.style.cssText = "display:flex;align-items:center;gap:8px;";
+                var shuffleBtn = document.createElement("button");
+                shuffleBtn.type = "button";
+                shuffleBtn.className = "aps-chip-btn";
+                shuffleBtn.setAttribute("data-shuffle-group", gid);
+                shuffleBtn.textContent = "\u2684 Randomize";
+                shuffleBtn.title = pendingTheme === THEME_MODE_GLASS ? "Colors apply to the Black theme only" : "Give every button in " + groupLabel(gid) + " a different random pastel color";
+                shuffleBtn.setAttribute("aria-label", "Randomize pastel colors for " + groupLabel(gid) + " buttons");
+                shuffleBtn.style.cssText = "padding:3px 8px;font-size:11px;";
+                shuffleBtn.disabled = pendingTheme === THEME_MODE_GLASS || !ids.length;
+                shuffleBtn.onclick = function() { randomizeGroupColors(gid); };
+                headRight.appendChild(count);
+                headRight.appendChild(shuffleBtn);
+                head.appendChild(title);
+                head.appendChild(headRight);
+                card.appendChild(head);
+                var list = document.createElement("div");
+                list.className = "aps-group-list";
+                list.setAttribute("aria-label", groupLabel(gid) + " buttons");
+                if (!ids.length) {
+                    var note = document.createElement("div");
+                    note.className = "aps-empty-note";
+                    note.textContent = "No buttons are available in this menu for this environment.";
+                    list.appendChild(note);
+                }
+                function setItems(newIds) {
+                    pendingMenu.itemOrder[gid] = newIds;
+                    renderButtons();
+                    checkDirty();
+                }
+                filtered.forEach(function(id) {
+                    var vis = pendingVis[id] !== false;
+                    var label = panelMenuLabel(id);
+                    var row = document.createElement("div");
+                    row.className = "aps-set-row";
+                    row.setAttribute("data-id", id);
+                    row.setAttribute("data-hidden", vis ? "0" : "1");
+                    row.setAttribute("tabindex", "0");
+                    row.setAttribute("aria-label", label + (vis ? ", shown" : ", hidden") + (filtering ? "" : ". Alt plus arrow keys to move, Space to show or hide."));
+                    if (!filtering) row.setAttribute("draggable", "true");
+                    var grip = document.createElement("span");
+                    grip.className = "aps-set-grip";
+                    grip.textContent = filtering ? "" : "\u2807";
+                    grip.setAttribute("aria-hidden", "true");
+                    var name = document.createElement("span");
+                    name.className = "aps-set-name";
+                    name.textContent = label;
+                    name.title = label + (defMap[id] && defMap[id].label !== label ? " (formerly " + defMap[id].label + ")" : "");
+                    var swatch = makeSwatch(label, function() { return pendingColors[id] || ""; }, function(c) {
+                        if (c) pendingColors[id] = c; else delete pendingColors[id];
+                        previewItem(id);
+                        checkDirty();
+                    });
+                    var toggle = document.createElement("button");
+                    toggle.type = "button";
+                    toggle.className = "aps-switch";
+                    toggle.setAttribute("role", "switch");
+                    toggle.setAttribute("aria-checked", vis ? "true" : "false");
+                    toggle.setAttribute("aria-label", (vis ? "Hide " : "Show ") + label);
+                    toggle.title = vis ? "Shown - click to hide" : "Hidden - click to show";
+                    function flip() {
+                        pendingVis[id] = !(pendingVis[id] !== false);
+                        renderMenus();
+                        renderButtons();
+                        checkDirty();
+                        var again = groupGrid.querySelector(".aps-set-row[data-id='" + id.replace(/'/g, "\\'") + "']");
+                        if (again) again.focus();
+                    }
+                    toggle.onclick = function(e) { e.stopPropagation(); flip(); };
+                    row.addEventListener("keydown", function(e) {
+                        if (e.target !== row) return;
+                        if (e.key === " " || e.key === "Enter") { e.preventDefault(); flip(); return; }
+                        if (!filtering) keyboardReorder(e, pendingMenu.itemOrder[gid], id, setItems, ".aps-set-row[data-id='" + id.replace(/'/g, "\\'") + "']");
+                    });
+                    row.appendChild(grip);
+                    row.appendChild(name);
+                    row.appendChild(swatch);
+                    row.appendChild(toggle);
+                    list.appendChild(row);
+                });
+                if (!filtering) makeSortable(list, function() { return pendingMenu.itemOrder[gid]; }, setItems);
+                card.appendChild(list);
+                groupGrid.appendChild(card);
+            });
+            if (!anyShown) {
+                var none = document.createElement("div");
+                none.className = "aps-empty-note";
+                none.textContent = "No buttons match the current search or filter.";
+                groupGrid.appendChild(none);
+            }
+        }
+
+        // === LOADOUTS ===
         function refreshLoadoutSelect() {
             loadoutSelect.innerHTML = "";
             var loadouts = getButtonLoadouts();
             var names = Object.keys(loadouts).sort();
             var blank = document.createElement("option");
             blank.value = "";
-            blank.textContent = names.length ? "Select loadout..." : "No saved loadouts";
+            blank.textContent = names.length ? "Select a loadout\u2026" : "No saved loadouts";
             loadoutSelect.appendChild(blank);
             var active = getActiveButtonLoadout();
-            for (var ldi = 0; ldi < names.length; ldi++) {
+            names.forEach(function(n) {
                 var opt = document.createElement("option");
-                opt.value = names[ldi];
-                opt.textContent = names[ldi];
-                opt.selected = names[ldi] === active;
+                opt.value = n;
+                opt.textContent = n + (loadouts[n] && loadouts[n].version === 2 ? "" : " (older format)");
+                opt.selected = n === active;
                 loadoutSelect.appendChild(opt);
-            }
+            });
         }
-        function smallLoadoutButton(label, title) {
-            var b = document.createElement("button");
-            b.type = "button";
-            b.textContent = label;
-            b.title = title;
-            b.style.cssText = "padding:6px 8px;background:" + tc.tBtnInactiveBg + ";border:1px solid " + tc.tBtnInactiveBorder + ";border-radius:6px;color:white;font-size:11px;cursor:pointer;white-space:nowrap;";
-            b.onmouseover = function() { b.style.background = tc.tBtnHover; };
-            b.onmouseout = function() { b.style.background = tc.tBtnInactiveBg; };
-            return b;
-        }
-        var applyLoadoutBtn = smallLoadoutButton("Apply", "Apply selected loadout");
-        var saveLoadoutBtn = smallLoadoutButton("Save As", "Save the current button setup as a new loadout");
-        var updateLoadoutBtn = smallLoadoutButton("Update", "Update the selected loadout");
-        var deleteLoadoutBtn = smallLoadoutButton("Delete", "Delete the selected loadout");
-        loadoutSelectRow.appendChild(loadoutSelect);
-        loadoutSelectRow.appendChild(applyLoadoutBtn);
-        loadoutManageRow.appendChild(loadoutName);
-        loadoutManageRow.appendChild(saveLoadoutBtn);
-        loadoutManageRow.appendChild(updateLoadoutBtn);
-        loadoutManageRow.appendChild(deleteLoadoutBtn);
-        loadoutBar.appendChild(loadoutSelectRow);
-        loadoutBar.appendChild(loadoutManageRow);
-        var loadoutFeedback = document.createElement("div");
-        loadoutFeedback.style.cssText = "min-height:16px;font-size:11px;color:" + tc.textMuted + ";opacity:0;transition:opacity .2s;";
-        loadoutBar.appendChild(loadoutFeedback);
-        btnSection.appendChild(loadoutBar);
-
-        var selectionBar = document.createElement("div");
-        selectionBar.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
-        var selectAllBtn = smallLoadoutButton("Select All", "Show all feature buttons");
-        var deselectAllBtn = smallLoadoutButton("Deselect All", "Hide all feature buttons");
-        selectionBar.appendChild(selectAllBtn);
-        selectionBar.appendChild(deselectAllBtn);
-        btnSection.appendChild(selectionBar);
-
-        var featureButtonFilter = "all";
-        var featureFilterBar = document.createElement("div");
-        featureFilterBar.style.cssText = "display:flex;align-items:center;gap:5px;margin-bottom:8px;";
-        var featureFilterLabel = document.createElement("span");
-        featureFilterLabel.textContent = "Show:";
-        featureFilterLabel.style.cssText = "font-size:11px;color:" + tc.textHint + ";margin-right:2px;";
-        featureFilterBar.appendChild(featureFilterLabel);
-        var featureFilterButtons = [];
-        function updateFeatureFilterButtons() {
-            for (var fbi = 0; fbi < featureFilterButtons.length; fbi++) {
-                var active = featureFilterButtons[fbi].dataset.filter === featureButtonFilter;
-                featureFilterButtons[fbi].style.background = active ? tc.tBtnHover : tc.tBtnInactiveBg;
-                featureFilterButtons[fbi].style.borderColor = active ? tc.tBtnActiveBorder : tc.tBtnInactiveBorder;
-                featureFilterButtons[fbi].style.color = active ? "#fff" : tc.textSec;
-            }
-        }
-        [{ value: "enabled", label: "Enabled" }, { value: "disabled", label: "Disabled" }, { value: "all", label: "All" }].forEach(function(option) {
-            var filterBtn = document.createElement("button"); filterBtn.type = "button"; filterBtn.textContent = option.label; filterBtn.dataset.filter = option.value;
-            filterBtn.style.cssText = "padding:5px 9px;background:" + tc.tBtnInactiveBg + ";border:1px solid " + tc.tBtnInactiveBorder + ";border-radius:5px;color:" + tc.textSec + ";font-size:11px;cursor:pointer;";
-            filterBtn.onclick = function() { featureButtonFilter = this.dataset.filter; updateFeatureFilterButtons(); renderBtnGrid(); };
-            featureFilterButtons.push(filterBtn); featureFilterBar.appendChild(filterBtn);
-        });
-        updateFeatureFilterButtons(); btnSection.appendChild(featureFilterBar);
-
-        var btnGridContainer = document.createElement("div");
-        btnGridContainer.style.cssText = "max-height:60vh;min-height:280px;overflow-y:auto;overflow-x:hidden;border-radius:6px;background:" + tc.gridBg + ";padding:8px;box-sizing:border-box;";
-        btnGridContainer.setAttribute("role", "grid");
-        btnGridContainer.setAttribute("aria-label", "Feature button order and visibility");
-        var defMap = buildPanelDefMap();
-        var dragSrcPos = null;
-
-        // --- Auto-scroll during drag ---
-        var autoScrollRAF = null;
-        var autoScrollSpeed = 0;
-        function startAutoScroll() {
-            if (autoScrollRAF) return;
-            function tick() {
-                if (autoScrollSpeed !== 0) {
-                    btnGridContainer.scrollTop += autoScrollSpeed;
-                }
-                autoScrollRAF = requestAnimationFrame(tick);
-            }
-            autoScrollRAF = requestAnimationFrame(tick);
-        }
-        function stopAutoScroll() {
-            if (autoScrollRAF) {
-                cancelAnimationFrame(autoScrollRAF);
-                autoScrollRAF = null;
-            }
-            autoScrollSpeed = 0;
-        }
-        btnGridContainer.addEventListener("dragover", function(e) {
-            e.preventDefault();
-            var rect = btnGridContainer.getBoundingClientRect();
-            var y = e.clientY;
-            var edgeZone = 40;
-            if (y - rect.top < edgeZone) {
-                autoScrollSpeed = -Math.max(2, Math.round((edgeZone - (y - rect.top)) / 4));
-                startAutoScroll();
-            } else if (rect.bottom - y < edgeZone) {
-                autoScrollSpeed = Math.max(2, Math.round((edgeZone - (rect.bottom - y)) / 4));
-                startAutoScroll();
-            } else {
-                autoScrollSpeed = 0;
-            }
-        });
-        btnGridContainer.addEventListener("dragleave", function(e) {
-            var rect = btnGridContainer.getBoundingClientRect();
-            if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
-                stopAutoScroll();
-            }
-        });
-        btnGridContainer.addEventListener("drop", function() { stopAutoScroll(); });
-        btnGridContainer.addEventListener("dragend", function() { stopAutoScroll(); });
-
-        var btnGrid = document.createElement("div");
-        btnGrid.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-width:0;";
-
-        // --- Insert-and-shift logic ---
-        function moveButtonToPosition(fromPos, toPos) {
-            if (fromPos === toPos) return;
-            var sorted = pendingLayout.slice().sort(function(a, b) { return a.position - b.position; });
-            var movedItem = null;
-            var movedIdx = -1;
-            for (var mi = 0; mi < sorted.length; mi++) {
-                if (sorted[mi].position === fromPos) { movedItem = sorted[mi]; movedIdx = mi; break; }
-            }
-            if (!movedItem) return;
-            sorted.splice(movedIdx, 1);
-            var insertIdx = 0;
-            for (var ii = 0; ii < sorted.length; ii++) {
-                if (sorted[ii].position < toPos) insertIdx = ii + 1;
-                else if (sorted[ii].position === toPos) { insertIdx = ii; break; }
-            }
-            if (toPos > fromPos && insertIdx > sorted.length) insertIdx = sorted.length;
-            sorted.splice(insertIdx, 0, movedItem);
-            for (var ri = 0; ri < sorted.length; ri++) {
-                for (var pi = 0; pi < pendingLayout.length; pi++) {
-                    if (pendingLayout[pi].id === sorted[ri].id) {
-                        pendingLayout[pi].position = ri;
-                        break;
-                    }
-                }
-            }
-        }
-
-        function renderBtnGrid() {
-            btnGrid.innerHTML = "";
-            var sorted = pendingLayout.slice().sort(function(a, b) { return a.position - b.position; });
-            for (var si = 0; si < sorted.length; si++) {
-                (function(siLocal) {
-                    var entry = sorted[siLocal];
-                    var def = defMap[entry.id];
-                    if (!def) return;
-                    if (featureButtonFilter === "enabled" && !entry.visible) return;
-                    if (featureButtonFilter === "disabled" && entry.visible) return;
-
-                    var cell = document.createElement("div");
-                    cell.setAttribute("role", "gridcell");
-                    cell.setAttribute("aria-label", def.label + (entry.visible ? "" : " (hidden)"));
-                    cell.setAttribute("draggable", "true");
-                    cell.setAttribute("tabindex", "0");
-                    cell.dataset.pos = String(entry.position);
-                    cell.style.cssText = "display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:5px;cursor:grab;transition:background 0.15s ease,opacity 0.15s ease,box-shadow 0.15s ease;background:" + tc.cellBg + ";opacity:" + (entry.visible ? "1" : "0.68") + ";border:1px solid transparent;min-height:40px;min-width:0;user-select:none;";
-                    cell.onmouseover = function() { if (dragSrcPos === null) cell.style.background = tc.cellHover; };
-                    cell.onmouseout = function() { if (dragSrcPos === null) cell.style.background = tc.cellBg; };
-
-                    var posLabel = document.createElement("span");
-                    posLabel.textContent = String(entry.position + 1);
-                    posLabel.style.cssText = "color:rgba(255,255,255,0.35);font-size:10px;min-width:16px;text-align:center;flex-shrink:0;font-weight:600;";
-
-                    var nameLabel = document.createElement("span");
-                    nameLabel.textContent = def.label;
-                    nameLabel.style.cssText = "color:white;font-size:11px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:3px;padding:2px 4px;" + (pendingColors[entry.id] && pendingTheme === THEME_MODE_BLACK ? "background:" + pendingColors[entry.id] + ";" : "") + (entry.visible ? "" : "color:rgba(255,255,255,0.78);");
-
-                    var colorSelect = document.createElement("select");
-                    colorSelect.title = "Button color (Black theme only)";
-                    colorSelect.disabled = pendingTheme === THEME_MODE_GLASS;
-                    colorSelect.style.cssText = "width:86px;padding:3px;background:" + (pendingTheme === THEME_MODE_BLACK && pendingColors[entry.id] ? pendingColors[entry.id] : tc.inputBg) + ";border:1px solid " + tc.inputBorder + ";border-radius:4px;color:" + tc.inputText + ";font-size:10px;flex-shrink:0;";
-                    for (var cpi = 0; cpi < BUTTON_COLOR_PRESETS.length; cpi++) {
-                        var colorOpt = document.createElement("option");
-                        colorOpt.value = BUTTON_COLOR_PRESETS[cpi].value;
-                        colorOpt.textContent = BUTTON_COLOR_PRESETS[cpi].label;
-                        colorOpt.selected = (pendingColors[entry.id] || "") === colorOpt.value;
-                        colorSelect.appendChild(colorOpt);
-                    }
-                    colorSelect.onchange = function() {
-                        pendingColors[entry.id] = this.value;
-                        this.style.background = this.value || tc.inputBg;
-                        nameLabel.style.background = this.value && pendingTheme === THEME_MODE_BLACK ? this.value : "transparent";
-                        var liveButton = document.querySelector("#" + PANEL_ID + " [data-feature-button='" + entry.id.replace(/'/g, "\\'") + "']");
-                        if (liveButton && pendingTheme === THEME_MODE_BLACK) {
-                            var previewColor = this.value || "#34343d";
-                            liveButton.setAttribute("data-clinspark-button-color", previewColor);
-                            liveButton.style.setProperty("background", previewColor, "important");
-                        }
-                        checkDirty();
-                    };
-
-                    var toggleBtn = document.createElement("button");
-                    toggleBtn.textContent = entry.visible ? "\u2713" : "\u2715";
-                    toggleBtn.setAttribute("aria-label", (entry.visible ? "Hide " : "Show ") + def.label);
-                    toggleBtn.setAttribute("type", "button");
-                    toggleBtn.title = entry.visible ? "Hide" : "Show";
-                    var toggleBg = entry.visible ? "rgba(107,207,127,0.35)" : "rgba(255,100,100,0.3)";
-                    var toggleBorder = entry.visible ? "rgba(107,207,127,0.5)" : "rgba(255,100,100,0.5)";
-                    var toggleColor = entry.visible ? "#6bcf7f" : "#ff8a8a";
-                    toggleBtn.style.cssText = "background:" + toggleBg + ";border:1px solid " + toggleBorder + ";color:" + toggleColor + ";width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0;transition:all 0.2s ease;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;";
-                    toggleBtn.onclick = function(e) {
-                        e.stopPropagation();
-                        for (var ti = 0; ti < pendingLayout.length; ti++) {
-                            if (pendingLayout[ti].id === entry.id) {
-                                pendingLayout[ti].visible = !pendingLayout[ti].visible;
-                                break;
-                            }
-                        }
-                        renderBtnGrid();
-                        checkDirty();
-                    };
-
-                    // Drag events
-                    cell.addEventListener("dragstart", function(e) {
-                        dragSrcPos = entry.position;
-                        e.dataTransfer.effectAllowed = "move";
-                        e.dataTransfer.setData("text/plain", String(entry.position));
-                        setTimeout(function() { cell.style.opacity = "0.25"; cell.style.background = tc.cellFaded; }, 0);
-                    });
-                    cell.addEventListener("dragend", function() {
-                        cell.style.opacity = entry.visible ? "1" : "0.4";
-                        cell.style.background = tc.cellBg;
-                        cell.style.border = "1px solid transparent";
-                        dragSrcPos = null;
-                        stopAutoScroll();
-                    });
-                    cell.addEventListener("dragover", function(e) {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                        if (dragSrcPos !== null && dragSrcPos !== entry.position) {
-                            cell.style.background = tc.cellDrag;
-                            cell.style.border = "1px solid " + tc.cellDragBorder;
-                        }
-                    });
-                    cell.addEventListener("dragleave", function() {
-                        cell.style.background = tc.cellBg;
-                        cell.style.border = "1px solid transparent";
-                    });
-                    cell.addEventListener("drop", function(e) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        cell.style.background = tc.cellBg;
-                        cell.style.border = "1px solid transparent";
-                        var fromPos = parseInt(e.dataTransfer.getData("text/plain"), 10);
-                        if (isNaN(fromPos) || fromPos === entry.position) return;
-                        moveButtonToPosition(fromPos, entry.position);
-                        renderBtnGrid();
-                        checkDirty();
-                    });
-
-                    // Keyboard navigation (arrows: left/right/up/down in 2-col grid)
-                    cell.addEventListener("keydown", function(e) {
-                        var sorted2 = pendingLayout.slice().sort(function(a, b) { return a.position - b.position; });
-                        var curIdx = -1;
-                        for (var ci = 0; ci < sorted2.length; ci++) { if (sorted2[ci].id === entry.id) { curIdx = ci; break; } }
-                        var targetIdx = -1;
-                        if (e.key === "ArrowLeft" && curIdx > 0) { targetIdx = curIdx - 1; }
-                        else if (e.key === "ArrowRight" && curIdx < sorted2.length - 1) { targetIdx = curIdx + 1; }
-                        else if (e.key === "ArrowUp" && curIdx >= 2) { targetIdx = curIdx - 2; }
-                        else if (e.key === "ArrowDown" && curIdx + 2 < sorted2.length) { targetIdx = curIdx + 2; }
-                        if (targetIdx >= 0) {
-                            e.preventDefault();
-                            var swapEntry = sorted2[targetIdx];
-                            var curEntry = sorted2[curIdx];
-                            for (var sk = 0; sk < pendingLayout.length; sk++) {
-                                if (pendingLayout[sk].id === swapEntry.id) {
-                                    var tmpP = pendingLayout[sk].position;
-                                    pendingLayout[sk].position = curEntry.position;
-                                    for (var sk2 = 0; sk2 < pendingLayout.length; sk2++) {
-                                        if (pendingLayout[sk2].id === curEntry.id) { pendingLayout[sk2].position = tmpP; }
-                                    }
-                                    break;
-                                }
-                            }
-                            renderBtnGrid();
-                            checkDirty();
-                            var cells = btnGrid.querySelectorAll("[role='gridcell']");
-                            if (cells[targetIdx]) cells[targetIdx].focus();
-                        }
-                    });
-
-                    cell.appendChild(posLabel);
-                    cell.appendChild(nameLabel);
-                    cell.appendChild(colorSelect);
-                    cell.appendChild(toggleBtn);
-                    btnGrid.appendChild(cell);
-                })(si);
-            }
-        }
-        refreshLoadoutSelect();
         var loadoutFeedbackTimer = null;
         function showLoadoutFeedback(message, tone) {
             loadoutFeedback.textContent = message;
             loadoutFeedback.style.color = tone === "error" ? "#ff9b9b" : (tone === "success" ? "#8ee6a3" : tc.textMuted);
             loadoutFeedback.style.opacity = "1";
             if (loadoutFeedbackTimer) clearTimeout(loadoutFeedbackTimer);
-            loadoutFeedbackTimer = setTimeout(function() { loadoutFeedback.style.opacity = "0"; }, 2600);
+            loadoutFeedbackTimer = setTimeout(function() { loadoutFeedback.style.opacity = "0"; }, 3200);
         }
-        loadoutSelect.onchange = function() {
-            if (loadoutSelect.value) showLoadoutFeedback("Selected loadout: " + loadoutSelect.value, "info");
-        };
-        selectAllBtn.onclick = function() { for (var sai = 0; sai < pendingLayout.length; sai++) pendingLayout[sai].visible = true; renderBtnGrid(); checkDirty(); };
-        deselectAllBtn.onclick = function() { for (var dsi = 0; dsi < pendingLayout.length; dsi++) pendingLayout[dsi].visible = false; renderBtnGrid(); checkDirty(); };
+        function currentLoadout() {
+            return { version: 2, visibility: clone(pendingVis), menu: clone(pendingMenu), colors: cleanColors(pendingColors), updatedAt: new Date().toISOString() };
+        }
+        // Older loadouts stored a flat layout; only their visibility carries into the menu layout.
+        function persistAll(vis, menu, colors) {
+            var visMap = {};
+            for (var id in defMap) if (Object.prototype.hasOwnProperty.call(defMap, id)) visMap[id] = vis[id] !== false;
+            panelMenuSaveConfig(menu);
+            saveButtonLayout(panelMenuLayoutFromConfig(panelMenuNormalizeConfig(menu), visMap));
+            setButtonVisibility(visMap);
+            setButtonColors(cleanColors(colors));
+        }
         applyLoadoutBtn.onclick = function() {
-            var selected = loadoutSelect.value;
+            var name = loadoutSelect.value;
             var loadouts = getButtonLoadouts();
-            if (!selected || !loadouts[selected]) { showLoadoutFeedback("Select a saved loadout first.", "error"); return; }
-            pendingLayout = JSON.parse(JSON.stringify(loadouts[selected].layout || pendingLayout));
-            pendingColors = JSON.parse(JSON.stringify(loadouts[selected].colors || {}));
-            setActiveButtonLoadout(selected);
-            saveButtonLayout(pendingLayout);
-            setButtonColors(pendingColors);
-            showLoadoutFeedback("Applying loadout: " + selected + "...", "info");
-            setTimeout(function() { location.reload(); }, 250);
+            var lo = loadouts[name];
+            if (!name || !lo) { showLoadoutFeedback("Select a saved loadout first.", "error"); return; }
+            var vis = clone(pendingVis);
+            var menu, colors;
+            if (lo.version === 2) {
+                var saved = lo.visibility && typeof lo.visibility === "object" ? lo.visibility : {};
+                for (var k in vis) if (Object.prototype.hasOwnProperty.call(saved, k)) vis[k] = saved[k] !== false;
+                menu = panelMenuNormalizeConfig(lo.menu);
+                colors = lo.colors || {};
+            } else {
+                var layout = Array.isArray(lo.layout) ? lo.layout : [];
+                for (var li = 0; li < layout.length; li++) {
+                    if (layout[li] && Object.prototype.hasOwnProperty.call(vis, layout[li].id)) vis[layout[li].id] = layout[li].visible !== false;
+                }
+                menu = panelMenuNormalizeConfig(null);
+                colors = {};
+            }
+            persistAll(vis, menu, colors);
+            setActiveButtonLoadout(name);
+            showLoadoutFeedback(lo.version === 2 ? "Applying loadout: " + name + "\u2026" : "Applying older loadout (visibility only; order and colors use defaults)\u2026", "info");
+            setTimeout(function() { location.reload(); }, 350);
         };
         saveLoadoutBtn.onclick = function() {
             var name = (loadoutName.value || "").trim();
             if (!name) { showLoadoutFeedback("Enter a loadout name first.", "error"); loadoutName.focus(); return; }
             var loadouts = getButtonLoadouts();
             if (loadouts[name] && !window.confirm("A loadout named '" + name + "' already exists. Replace it?")) { showLoadoutFeedback("Save canceled.", "info"); return; }
-            loadouts[name] = { layout: JSON.parse(JSON.stringify(pendingLayout)), colors: JSON.parse(JSON.stringify(pendingColors)), updatedAt: new Date().toISOString() };
-            setButtonLoadouts(loadouts); setActiveButtonLoadout(name); refreshLoadoutSelect(); loadoutSelect.value = name; loadoutName.value = "";
+            loadouts[name] = currentLoadout();
+            setButtonLoadouts(loadouts);
+            setActiveButtonLoadout(name);
+            refreshLoadoutSelect();
+            loadoutSelect.value = name;
+            loadoutName.value = "";
             showLoadoutFeedback("Saved loadout: " + name, "success");
         };
         updateLoadoutBtn.onclick = function() {
             var name = loadoutSelect.value;
             if (!name) { showLoadoutFeedback("Select a saved loadout to update.", "error"); return; }
             var loadouts = getButtonLoadouts();
-            loadouts[name] = { layout: JSON.parse(JSON.stringify(pendingLayout)), colors: JSON.parse(JSON.stringify(pendingColors)), updatedAt: new Date().toISOString() };
-            setButtonLoadouts(loadouts); setActiveButtonLoadout(name); refreshLoadoutSelect();
+            loadouts[name] = currentLoadout();
+            setButtonLoadouts(loadouts);
+            setActiveButtonLoadout(name);
+            refreshLoadoutSelect();
             showLoadoutFeedback("Updated loadout: " + name, "success");
         };
         deleteLoadoutBtn.onclick = function() {
             var name = loadoutSelect.value;
             if (!name) { showLoadoutFeedback("Select a saved loadout to delete.", "error"); return; }
             if (!window.confirm("Delete the loadout '" + name + "'? This cannot be undone.")) { showLoadoutFeedback("Delete canceled.", "info"); return; }
-            var loadouts = getButtonLoadouts(); delete loadouts[name]; setButtonLoadouts(loadouts);
+            var loadouts = getButtonLoadouts();
+            delete loadouts[name];
+            setButtonLoadouts(loadouts);
             if (getActiveButtonLoadout() === name) setActiveButtonLoadout("");
             refreshLoadoutSelect();
             showLoadoutFeedback("Deleted loadout: " + name, "success");
         };
-        renderBtnGrid();
-        btnGridContainer.appendChild(btnGrid);
-        btnSection.appendChild(btnGridContainer);
 
         // === FOOTER ===
         var modalFooter = document.createElement("div");
-        modalFooter.style.cssText = "padding:12px 16px;display:flex;gap:8px;justify-content:flex-end;border-top:1px solid " + tc.sectionBorder + ";flex-shrink:0;";
-
+        modalFooter.style.cssText = "padding:12px 18px;display:flex;gap:8px;align-items:center;justify-content:flex-end;border-top:1px solid " + tc.sectionBorder + ";flex-shrink:0;";
+        var resetBtn = document.createElement("button");
+        resetBtn.type = "button";
+        resetBtn.textContent = "Reset layout";
+        resetBtn.title = "Restore the default menu order, button order, and colors. Button visibility is not changed.";
+        resetBtn.className = "aps-chip-btn";
+        resetBtn.style.marginRight = "auto";
+        resetBtn.onclick = function() {
+            pendingMenu = panelMenuNormalizeConfig(null);
+            pendingColors = {};
+            renderMenus();
+            renderButtons();
+            checkDirty();
+        };
         var cancelBtn = document.createElement("button");
         cancelBtn.textContent = "Cancel";
-        cancelBtn.setAttribute("type", "button");
-        cancelBtn.style.cssText = "background:" + tc.cancelBg + ";border:1px solid " + tc.cancelBorder + ";color:white;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:all 0.3s ease;";
+        cancelBtn.type = "button";
+        cancelBtn.style.cssText = "background:" + tc.cancelBg + ";border:1px solid " + tc.cancelBorder + ";color:white;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;";
         cancelBtn.onmouseover = function() { cancelBtn.style.background = tc.cancelHover; };
         cancelBtn.onmouseout = function() { cancelBtn.style.background = tc.cancelBg; };
-
         var saveBtn = document.createElement("button");
         saveBtn.textContent = "Save & Refresh";
-        saveBtn.setAttribute("type", "button");
+        saveBtn.type = "button";
         saveBtn.disabled = true;
-        saveBtn.style.cssText = "background:rgba(40,167,69,0.6);border:1px solid rgba(40,167,69,0.8);color:white;padding:8px 18px;border-radius:8px;cursor:not-allowed;font-size:13px;font-weight:600;transition:all 0.3s ease;opacity:0.5;";
-
-        function updateSaveBtnState(enabled) {
-            saveBtn.disabled = !enabled;
-            if (enabled) {
-                saveBtn.style.cursor = "pointer";
-                saveBtn.style.opacity = "1";
-                saveBtn.style.background = "rgba(40,167,69,0.8)";
-            } else {
-                saveBtn.style.cursor = "not-allowed";
-                saveBtn.style.opacity = "0.5";
-                saveBtn.style.background = "rgba(40,167,69,0.6)";
-            }
-        }
-
-        saveBtn.onmouseover = function() {
-            if (!saveBtn.disabled) saveBtn.style.background = "rgba(40,167,69,1)";
-        };
-        saveBtn.onmouseout = function() {
-            if (!saveBtn.disabled) saveBtn.style.background = "rgba(40,167,69,0.8)";
-            else saveBtn.style.background = "rgba(40,167,69,0.6)";
-        };
-
+        saveBtn.style.cssText = "background:rgba(40,167,69,0.6);border:1px solid rgba(40,167,69,0.8);color:white;padding:8px 18px;border-radius:8px;cursor:not-allowed;font-size:13px;font-weight:600;opacity:0.5;";
         function checkDirty() {
-            cfgHasDirty = false;
-            if (pendingHotkey !== originalHotkey) cfgHasDirty = true;
-            if (pendingTheme !== originalTheme) cfgHasDirty = true;
-            if (JSON.stringify(pendingLayout) !== JSON.stringify(originalLayout)) cfgHasDirty = true;
-            if (JSON.stringify(pendingColors) !== JSON.stringify(originalColors)) cfgHasDirty = true;
-            updateSaveBtnState(cfgHasDirty);
+            var dirty = snapshot() !== originalSnapshot;
+            saveBtn.disabled = !dirty;
+            saveBtn.style.cursor = dirty ? "pointer" : "not-allowed";
+            saveBtn.style.opacity = dirty ? "1" : "0.5";
+            saveBtn.style.background = dirty ? "rgba(40,167,69,0.85)" : "rgba(40,167,69,0.6)";
         }
-
-        function closeModal() {
+        // Undo live color previews on the panel when closing without saving.
+        function revertPreview() {
+            if (!isGlassTheme()) applyPanelButtonColors(document.getElementById(PANEL_ID));
+        }
+        var escHandler = function(e) {
+            if (e.key !== "Escape" || !SETTINGS_MODAL_OPEN) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (openPalette) { var owner = openPalette.__owner; closePalette(); if (owner) owner.focus(); return; }
+            if (document.activeElement === hotkeyInput) { hotkeyInput.blur(); return; }
+            log("Settings: modal closed via Escape");
+            closeModal(true);
+        };
+        function closeModal(revert) {
             SETTINGS_MODAL_OPEN = false;
-            if (escHandler) {
-                document.removeEventListener("keydown", escHandler, true);
-            }
-            var modal = document.getElementById("clinspark-settings-modal");
-            if (modal && modal.parentNode) {
-                modal.parentNode.removeChild(modal);
-            }
+            closePalette();
+            stopAutoScroll();
+            document.removeEventListener("keydown", escHandler, true);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            if (revert) revertPreview();
         }
-
-        modalClose.onclick = function() {
-            log("Settings: modal closed via X");
-            closeModal();
-        };
-
-        cancelBtn.onclick = function() {
-            log("Settings: modal cancelled");
-            closeModal();
-        };
-
+        modalClose.onclick = function() { log("Settings: modal closed via X"); closeModal(true); };
+        cancelBtn.onclick = function() { log("Settings: modal cancelled"); closeModal(true); };
         saveBtn.onclick = function() {
             if (saveBtn.disabled) return;
-            var hotkeyChanged = pendingHotkey !== originalHotkey;
-            var themeChanged = pendingTheme !== originalTheme;
-            var layoutChanged = JSON.stringify(pendingLayout) !== JSON.stringify(originalLayout);
-            var colorsChanged = JSON.stringify(pendingColors) !== JSON.stringify(originalColors);
-            closeModal();
-            if (hotkeyChanged) {
+            closeModal(false);
+            if (pendingHotkey !== originalHotkey) {
                 setPanelHotkey(pendingHotkey);
                 log("Settings: Hotkey saved as " + pendingHotkey);
             }
-            if (themeChanged) {
-                try { localStorage.setItem(STORAGE_THEME_MODE, pendingTheme); } catch(e) {}
+            if (pendingTheme !== originalTheme) {
+                try { localStorage.setItem(STORAGE_THEME_MODE, pendingTheme); } catch (e) {}
                 log("Settings: Theme saved as " + pendingTheme);
             }
-            if (layoutChanged) {
-                saveButtonLayout(pendingLayout);
-                // Also sync old visibility map for backward compat
-                var newVis = {};
-                for (var vi = 0; vi < pendingLayout.length; vi++) {
-                    newVis[pendingLayout[vi].id] = pendingLayout[vi].visible;
-                }
-                setButtonVisibility(newVis);
-                log("Settings: Button layout saved");
-            }
-            if (colorsChanged) {
-                setButtonColors(pendingColors);
-                log("Settings: Button colors saved");
-            }
+            persistAll(pendingVis, pendingMenu, pendingColors);
             log("Settings: Saved, refreshing");
             location.reload();
         };
-
-        var escHandler = function(e) {
-            if (e.key === "Escape" && SETTINGS_MODAL_OPEN) {
-                if (document.activeElement === hotkeyInput) {
-                    hotkeyInput.blur();
-                    e.preventDefault();
-                    e.stopPropagation();
-                    return;
-                }
-                e.preventDefault();
-                e.stopPropagation();
-                log("Settings: modal closed via Escape");
-                closeModal();
-            }
-        };
         document.addEventListener("keydown", escHandler, true);
-
+        overlay.addEventListener("mousedown", function(e) {
+            if (openPalette && !openPalette.contains(e.target)) closePalette();
+        });
         overlay.onclick = function(e) {
             if (e.target === overlay) {
                 log("Settings: modal closed via overlay click");
-                closeModal();
+                closeModal(true);
             }
         };
+        modalBody.addEventListener("scroll", closePalette);
 
-        // Assemble
-        var smartNavSection = document.createElement("div");
-        smartNavSection.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,.12)";
-        var smartNavTitle = document.createElement("div");
-        smartNavTitle.textContent = "Smart Navigation";
-        smartNavTitle.style.cssText = "font-weight:700;color:#f0edf8;font-size:13px;margin-bottom:7px";
-        var smartNavButton = document.createElement("button");
-        smartNavButton.type = "button";
-        smartNavButton.textContent = "Manage Smart Navigation";
-        smartNavButton.style.cssText = "padding:8px 12px;border:1px solid #666;border-radius:4px;background:#4f35a8;color:#fff;cursor:pointer";
-        smartNavButton.onclick = function () { smartNavOpenSettings(); };
-        smartNavSection.appendChild(smartNavTitle);
-        smartNavSection.appendChild(smartNavButton);
+        refreshLoadoutSelect();
+        renderMenus();
+        renderButtons();
         modalBody.appendChild(hotkeySection);
         modalBody.appendChild(smartNavSection);
         modalBody.appendChild(displaySection);
+        modalBody.appendChild(menuSection);
         modalBody.appendChild(btnSection);
-
+        modalFooter.appendChild(resetBtn);
         modalFooter.appendChild(cancelBtn);
         modalFooter.appendChild(saveBtn);
-
         container.appendChild(modalHeader);
         container.appendChild(modalBody);
         container.appendChild(modalFooter);
-
-        overlay.id = "clinspark-settings-modal";
         overlay.appendChild(container);
         document.body.appendChild(overlay);
-
         log("Settings: modal opened");
         return null;
     }
@@ -26526,14 +27419,42 @@
     }
 
     var BUTTON_COLOR_PRESETS = [
-        { value: "", label: "Default" },
-        { value: "#3f3a5a", label: "Indigo" },
-        { value: "#3d4b5c", label: "Steel" },
-        { value: "#3e5148", label: "Forest" },
-        { value: "#5a4437", label: "Copper" },
-        { value: "#553c4b", label: "Plum" },
-        { value: "#4a4a31", label: "Olive" }
+        { label: "Deep tones", colors: [
+            { value: "#3f3a5a", label: "Indigo" },
+            { value: "#3d4b5c", label: "Steel" },
+            { value: "#2f4f5a", label: "Teal" },
+            { value: "#3e5148", label: "Forest" },
+            { value: "#4a4a31", label: "Olive" },
+            { value: "#5a4437", label: "Copper" },
+            { value: "#553c4b", label: "Plum" }
+        ] },
+        { label: "Pastels", colors: [
+            { value: "#cbbcff", label: "Lavender" },
+            { value: "#b3c4ff", label: "Periwinkle" },
+            { value: "#a9d6f5", label: "Sky" },
+            { value: "#a6e3dd", label: "Aqua" },
+            { value: "#b3e8c8", label: "Mint" },
+            { value: "#cadbb3", label: "Sage" },
+            { value: "#f3e8a6", label: "Lemon" },
+            { value: "#ffd0ad", label: "Peach" },
+            { value: "#fbbf9d", label: "Apricot" },
+            { value: "#f5aaa4", label: "Coral" },
+            { value: "#f6bfd2", label: "Blush" },
+            { value: "#dcc5ee", label: "Lilac" },
+            { value: "#e5d6bd", label: "Sand" },
+            { value: "#d5dbe5", label: "Cloud" }
+        ] }
     ];
+
+    function panelMenuColorName(hex) {
+        for (var gi = 0; gi < BUTTON_COLOR_PRESETS.length; gi++) {
+            var colors = BUTTON_COLOR_PRESETS[gi].colors || [];
+            for (var ci = 0; ci < colors.length; ci++) {
+                if (colors[ci].value.toLowerCase() === String(hex || "").toLowerCase()) return colors[ci].label;
+            }
+        }
+        return hex || "Default";
+    }
 
     function getButtonColors() {
         try {
@@ -26567,25 +27488,20 @@
         try { localStorage.setItem(STORAGE_ACTIVE_BUTTON_LOADOUT, name || ""); } catch (e) {}
     }
 
+    // Paints menu triggers and menu items from saved colors (Black theme only; Glass uses its gradient).
     function applyPanelButtonColors(panel) {
-        if (!panel || isGlassTheme()) return;
-        var colors = getButtonColors();
-        var buttons = panel.querySelectorAll("[data-aps-panel-body] button[data-feature-button]");
-        for (var i = 0; i < buttons.length; i++) {
-            var button = buttons[i];
-            var color = colors[button.getAttribute("data-feature-button")] || "#34343d";
-            button.setAttribute("data-clinspark-button-color", color);
-            button.style.setProperty("background", color, "important");
-            if (!button.getAttribute("data-clinspark-hover-bound")) {
-                button.addEventListener("mouseenter", function() {
-                    var base = this.getAttribute("data-clinspark-button-color") || "#34343d";
-                    this.style.setProperty("background", shiftPanelButtonColor(base, 18), "important");
-                });
-                button.addEventListener("mouseleave", function() {
-                    this.style.setProperty("background", this.getAttribute("data-clinspark-button-color") || "#34343d", "important");
-                });
-                button.setAttribute("data-clinspark-hover-bound", "1");
-            }
+        var glass = isGlassTheme();
+        var colors = glass ? {} : getButtonColors();
+        var items = document.querySelectorAll(".aps-menu-popover button[data-feature-button]");
+        for (var i = 0; i < items.length; i++) {
+            panelMenuPaint(items[i], glass ? "" : (colors[items[i].getAttribute("data-feature-button")] || ""));
+        }
+        var root = panel || document.getElementById(PANEL_ID);
+        if (!root) return;
+        var cfg = glass ? null : panelMenuGetConfig();
+        var triggers = root.querySelectorAll("[data-aps-menu-trigger]");
+        for (var t = 0; t < triggers.length; t++) {
+            panelMenuPaint(triggers[t], cfg ? (cfg.groupColors[triggers[t].getAttribute("data-aps-menu-trigger")] || "") : "");
         }
     }
 
@@ -38969,7 +39885,7 @@
         options.eligibility = copyMappingCollectSelectOptions("select#eligibilityItemRef");
         options.activityPlans = copyMappingCollectSelectOptions("select#activityPlan");
         options.cohorts = copyMappingCollectSelectOptions("select#cohorts, select#cohort");
-        options.cohortTypes = copyMappingCollectSelectOptions("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']");
+        options.cohortTypes = copyMappingCollectSelectOptions("#ajaxModal select#subjectNumberAction");
         options.sex = copyMappingCollectSelectOptions("select#sexOption");
         await closeCurrentModal();
         copyMappingLog("modal options collected eligibility=" + options.eligibility.length + " plans=" + options.activityPlans.length);
@@ -39793,12 +40709,301 @@
         if (!sel || !text) return true;
         return await copyMappingSetSelectByText("select#cohorts, select#cohort", text, 0.68);
     }
+    var COPY_MAPPING_SAVE_URL_DEFAULT = "/secure/crfdesign/studylibrary/eligibility/save";
+    var COPY_MAPPING_LIST_AJAX_URL = "/secure/crfdesign/studylibrary/eligibility/listAjax";
+    var COPY_MAPPING_SAVE_TIMEOUT_MS = 30000;
+    function copyMappingModalRoot() {
+        return document.getElementById("ajaxModal");
+    }
+    // The list page has its own multi-select filter named "cohortType". Every Cohort Type lookup
+    // must stay inside #ajaxModal, otherwise the list filter is changed instead of the modal field.
+    function copyMappingGetCohortTypeSelect() {
+        var root = copyMappingModalRoot();
+        return root ? root.querySelector("select#subjectNumberAction, select[name='subjectNumberAction']") : null;
+    }
+    function copyMappingModalScriptText() {
+        var root = copyMappingModalRoot();
+        if (!root) return "";
+        var scripts = root.querySelectorAll("script");
+        var parts = [];
+        for (var i = 0; i < scripts.length; i++) parts.push(scripts[i].textContent || "");
+        return parts.join("\n");
+    }
+    function copyMappingGetPlanCohortTypeMap() {
+        var m = copyMappingModalScriptText().match(/activityPlanSubjectNumberActions\s*=\s*(\{[^;{}]*\})\s*;/);
+        if (!m) return null;
+        try { return JSON.parse(m[1]); } catch (e) { return null; }
+    }
+    function copyMappingGetSaveUrl() {
+        var m = copyMappingModalScriptText().match(/['"]url['"]\s*:\s*['"]([^'"]*\/eligibility\/save)['"]/);
+        return m ? m[1] : COPY_MAPPING_SAVE_URL_DEFAULT;
+    }
+    function copyMappingLogCohortTypeState(stage, item, expectedValue) {
+        var root = copyMappingModalRoot();
+        var sel = copyMappingGetCohortTypeSelect();
+        var planSel = root ? root.querySelector("select#activityPlan") : null;
+        var planVal = planSel ? planSel.value : "";
+        var map = copyMappingGetPlanCohortTypeMap();
+        var mapped = map ? (Object.prototype.hasOwnProperty.call(map, planVal) ? map[planVal] : "(none)") : "(map unavailable)";
+        copyMappingLog("cohort type [" + stage + "] staged='" + (item && item.cohortType ? item.cohortType : "") + "'" +
+            " expected=" + (expectedValue || "(blank)") +
+            " activityPlan=" + (planVal || "(blank)") +
+            " planDefault=" + mapped +
+            " hidden=" + (sel ? (sel.value || "(blank)") : "(field missing)") +
+            " visible='" + (sel ? copyMappingGetSelect2VisibleText(sel) : "") + "'");
+    }
+    function copyMappingResolveCohortTypeOption(sel, text) {
+        var wanted = copyMappingCohortTypeKey(text);
+        var opts = sel.querySelectorAll("option");
+        for (var i = 0; i < opts.length; i++) {
+            if (!wanted) {
+                if (!opts[i].value) return opts[i];
+                continue;
+            }
+            if (copyMappingCohortTypeKey(opts[i].value) === wanted || copyMappingCohortTypeKey(opts[i].textContent) === wanted) return opts[i];
+        }
+        return null;
+    }
+    function copyMappingCohortTypeMatches(sel, option) {
+        if (!sel || !option) return false;
+        if (sel.value !== option.value) return false;
+        var visible = copyMappingGetSelect2VisibleText(sel);
+        if (!document.getElementById("s2id_" + sel.id)) return true;
+        return copyMappingCohortTypeKey(visible) === copyMappingCohortTypeKey(option.value ? option.textContent : "");
+    }
+    // Returns { ok, value, detail }. value is the exact option value ("SCREENING", "LEAD_IN" or "")
+    // that must be submitted. Blank staged values clear the field so the copy matches the source.
     async function copyMappingSetCohortType(text) {
-        var sel = document.querySelector("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']");
-        if (!sel || !text) return true;
-        var ok = await copyMappingSetSelectByText("select#subjectNumberAction, select#cohortType, select#cohortTypeId, select[name*='cohortType']", text, 0.68);
-        if (!ok) copyMappingLog("cohort type option not found: " + text);
-        return ok;
+        var sel = copyMappingGetCohortTypeSelect();
+        if (!sel) sel = await waitForElement("#ajaxModal select#subjectNumberAction", 5000);
+        var wantedKey = copyMappingCohortTypeKey(text);
+        if (!sel) {
+            if (!wantedKey) return { ok: true, value: "", detail: "Cohort Type field not present" };
+            copyMappingLog("cohort type field #subjectNumberAction not found in Copy modal");
+            return { ok: false, value: null, detail: "Cohort Type field not found in Copy modal" };
+        }
+        var option = copyMappingResolveCohortTypeOption(sel, text);
+        if (!option) {
+            copyMappingLog("cohort type option not found in modal: '" + text + "'");
+            return { ok: false, value: null, detail: "Cohort Type option not found: " + text };
+        }
+        for (var attempt = 1; attempt <= 3; attempt++) {
+            copyMappingCommitSelectOption(sel, option);
+            // Select2 v3 listens for the native change event on the original select and redraws its label.
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+            await sleep(250);
+            if (copyMappingCohortTypeMatches(sel, option)) {
+                copyMappingLog("cohort type set to '" + (option.textContent || "(blank)").trim() + "' (" + (option.value || "blank") + ") on attempt " + attempt);
+                return { ok: true, value: option.value, detail: "" };
+            }
+            copyMappingLog("cohort type retry " + attempt + " expected=" + (option.value || "(blank)") + " hidden=" + (sel.value || "(blank)") + " visible='" + copyMappingGetSelect2VisibleText(sel) + "'");
+        }
+        return { ok: false, value: null, detail: "Cohort Type not updated: " + text };
+    }
+    function copyMappingCommitSelectOption(sel, option) {
+        if (!sel || !option) return;
+        for (var i = 0; i < sel.options.length; i++) {
+            var opt = sel.options[i];
+            var selected = opt === option;
+            opt.selected = selected;
+            opt.defaultSelected = selected;
+            if (selected) opt.setAttribute("selected", "selected");
+            else opt.removeAttribute("selected");
+        }
+        sel.value = option.value;
+        sel.setAttribute("value", option.value);
+    }
+    async function copyMappingFetchListRows() {
+        try {
+            var resp = await fetch(location.origin + COPY_MAPPING_LIST_AJAX_URL, {
+                method: "POST",
+                body: "",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            });
+            if (!resp.ok) {
+                copyMappingLog("list refresh for verification failed HTTP " + resp.status);
+                return null;
+            }
+            var html = await resp.text();
+            var doc = new DOMParser().parseFromString("<table><tbody>" + html + "</tbody></table>", "text/html");
+            var links = doc.querySelectorAll("a[href*='/eligibility/copy/']");
+            var rows = {};
+            for (var i = 0; i < links.length; i++) {
+                var href = links[i].getAttribute("href") || "";
+                var id = href.split("/").pop();
+                var tr = links[i].closest("tr");
+                var tds = tr ? tr.querySelectorAll("td") : [];
+                rows[id] = {
+                    id: id,
+                    itemName: tds[0] ? copyMappingNormalize(tds[0].textContent) : "",
+                    cohortType: tds[3] ? copyMappingNormalize(tds[3].textContent) : ""
+                };
+            }
+            return rows;
+        } catch (err) {
+            copyMappingLog("list refresh for verification error: " + String(err));
+            return null;
+        }
+    }
+    function copyMappingFormPayload(form) {
+        var data = new URLSearchParams();
+        new FormData(form).forEach(function(value, key) {
+            if (typeof value === "string") data.append(key, value);
+        });
+        return data;
+    }
+    function copyMappingIsModalClosed(modal) {
+        if (!modal || !document.body.contains(modal)) return true;
+        if (modal.classList.contains("in") || modal.classList.contains("show")) return false;
+        return window.getComputedStyle(modal).display === "none";
+    }
+    function copyMappingReadModalError(modal) {
+        if (!modal) return "";
+        var errEl = modal.querySelector(".alert-danger, .errors, .has-error .help-block, .error-message");
+        return errEl ? copyMappingNormalize(errEl.textContent) : "";
+    }
+    function copyMappingFindVisibleBootbox() {
+        var boxes = document.querySelectorAll(".bootbox.modal");
+        for (var i = 0; i < boxes.length; i++) {
+            if (boxes[i].classList.contains("in") || window.getComputedStyle(boxes[i]).display !== "none") return boxes[i];
+        }
+        return null;
+    }
+    // Clicks ClinSpark's own Save button so the page's doSubmitAction() serializes #modalInput and
+    // posts it to /eligibility/save, then waits for the modal to close (success) or re-render (error).
+    async function copyMappingClickSaveAndWait(modal, saveBtn) {
+        saveBtn.click();
+        await sleep(150);
+        if (!saveBtn.disabled) {
+            var confirmBox = copyMappingFindVisibleBootbox();
+            var confirmBtn = confirmBox ? confirmBox.querySelector(".btn-primary") : null;
+            if (confirmBtn) {
+                copyMappingLog("Save requires confirmation; confirming");
+                confirmBtn.click();
+                await sleep(150);
+            }
+        }
+        var sawDisabled = saveBtn.disabled;
+        var deadline = Date.now() + COPY_MAPPING_SAVE_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            if (copyMappingIsModalClosed(modal)) return { ok: true, detail: "Saved" };
+            var alertBox = copyMappingFindVisibleBootbox();
+            if (alertBox && sawDisabled) {
+                var alertText = copyMappingNormalize(alertBox.textContent);
+                var okBtn = alertBox.querySelector(".btn-primary, [data-bb-handler='ok']");
+                if (okBtn) okBtn.click();
+                return { ok: false, detail: "ClinSpark save error: " + (alertText || "operation could not be completed") };
+            }
+            if (saveBtn.disabled) sawDisabled = true;
+            else if (sawDisabled) {
+                return { ok: false, detail: copyMappingReadModalError(modal) || "ClinSpark rejected the save (validation error)" };
+            }
+            await sleep(200);
+        }
+        return { ok: false, detail: "Timed out waiting for ClinSpark to save" };
+    }
+    async function copyMappingDirectSave(form, expectedCohortType) {
+        var data = copyMappingFormPayload(form);
+        if (expectedCohortType !== null && expectedCohortType !== undefined) data.set("subjectNumberAction", expectedCohortType);
+        var url = location.origin + copyMappingGetSaveUrl();
+        copyMappingLog("direct POST " + url + " subjectNumberAction=" + (data.get("subjectNumberAction") || "(blank)") + " activityPlan=" + (data.get("activityPlan") || "(blank)"));
+        var resp = await fetch(url, {
+            method: "POST",
+            body: data,
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest"
+            }
+        });
+        if (!resp.ok) return { ok: false, detail: "Save failed HTTP " + resp.status };
+        var text = await resp.text();
+        if (text.indexOf("successpath:") !== 0) {
+            var doc = new DOMParser().parseFromString(text, "text/html");
+            return { ok: false, detail: copyMappingReadModalError(doc.body) || "ClinSpark rejected the save (validation error)" };
+        }
+        await copyMappingCloseModalAfterSubmit();
+        return { ok: true, detail: "Saved" };
+    }
+    async function copyMappingSubmitModalForm(item, expectedCohortType) {
+        var modal = copyMappingModalRoot();
+        var form = modal ? modal.querySelector("form#modalInput") : null;
+        if (!form) return { ok: false, detail: "Copy form not found" };
+        var cohortSel = copyMappingGetCohortTypeSelect();
+        if (cohortSel && expectedCohortType !== null && expectedCohortType !== undefined && cohortSel.value !== expectedCohortType) {
+            copyMappingLog("cohort type drifted before Save (hidden=" + (cohortSel.value || "(blank)") + "); reapplying");
+            var reapplied = await copyMappingSetCohortType(item.cohortType || "");
+            if (!reapplied.ok || reapplied.value !== expectedCohortType) return { ok: false, detail: "Cohort Type changed before Save and could not be restored" };
+        }
+        copyMappingLogCohortTypeState("before save", item, expectedCohortType);
+        var payload = copyMappingFormPayload(form);
+        var payloadCohortType = payload.get("subjectNumberAction") || "";
+        copyMappingLog("Save payload subjectNumberAction=" + (payloadCohortType || "(blank)") + " activityPlan=" + (payload.get("activityPlan") || "(blank)"));
+        if (cohortSel && expectedCohortType !== null && expectedCohortType !== undefined && payloadCohortType !== expectedCohortType) {
+            return { ok: false, detail: "Refusing to save: form would submit Cohort Type " + (payloadCohortType || "(blank)") + " instead of " + (expectedCohortType || "(blank)") };
+        }
+        var beforeRows = await copyMappingFetchListRows();
+        var saveBtn = modal.querySelector("#actionButton");
+        var result = saveBtn ? await copyMappingClickSaveAndWait(modal, saveBtn) : await copyMappingDirectSave(form, expectedCohortType);
+        copyMappingLog("save result ok=" + result.ok + " detail=" + result.detail);
+        if (!result.ok) return result;
+        return await copyMappingVerifySavedCohortType(item, expectedCohortType, beforeRows);
+    }
+    async function copyMappingVerifySavedCohortType(item, expectedCohortType, beforeRows) {
+        if (!beforeRows || expectedCohortType === null || expectedCohortType === undefined) {
+            copyMappingLog("saved; Cohort Type verification skipped (list snapshot unavailable)");
+            return { ok: true, detail: "Copied (not verified)" };
+        }
+        var afterRows = await copyMappingFetchListRows();
+        if (!afterRows) return { ok: true, detail: "Copied (not verified)" };
+        var newRows = Object.keys(afterRows).filter(function(id) { return !beforeRows[id]; }).map(function(id) { return afterRows[id]; });
+        if (!newRows.length) {
+            copyMappingLog("saved; no new row found in refreshed list to verify Cohort Type");
+            return { ok: true, detail: "Copied (not verified)" };
+        }
+        var wantedKey = copyMappingCohortTypeKey(expectedCohortType);
+        var match = newRows.filter(function(r) { return copyMappingCohortTypeKey(r.cohortType) === wantedKey; })[0];
+        if (match) {
+            copyMappingLog("verified saved mapping id=" + match.id + " Cohort Type='" + (match.cohortType || "(blank)") + "'");
+            return { ok: true, detail: "Copied (Cohort Type verified: " + (match.cohortType || "blank") + ")" };
+        }
+        var got = newRows.map(function(r) { return r.id + "=" + (r.cohortType || "(blank)"); }).join(", ");
+        copyMappingLog("VERIFY FAILED expected Cohort Type " + (expectedCohortType || "(blank)") + " but saved " + got);
+        return { ok: false, detail: "Saved, but Cohort Type is " + got + " (expected " + (item.cohortType || "blank") + ")" };
+    }
+    async function copyMappingCloseModalAfterSubmit() {
+        var modal = document.querySelector("#ajaxModal");
+        if (modal) {
+            if (typeof jQuery !== "undefined" && jQuery && jQuery.fn) {
+                try { jQuery(modal).modal("hide"); } catch (e) { }
+            }
+            modal.classList.remove("in", "show");
+            modal.style.display = "none";
+            modal.setAttribute("aria-hidden", "true");
+            var dialog = modal.querySelector(".modal-dialog");
+            if (dialog) dialog.innerHTML = "";
+        }
+        var backdrops = document.querySelectorAll(".modal-backdrop");
+        for (var i = 0; i < backdrops.length; i++) backdrops[i].remove();
+        document.body.classList.remove("modal-open");
+        await sleep(200);
+    }
+    function copyMappingGetSelect2VisibleText(sel) {
+        if (!sel || !sel.id) return "";
+        var container = document.getElementById("s2id_" + sel.id);
+        var chosen = container ? container.querySelector(".select2-chosen") : null;
+        return copyMappingNormalize(chosen ? chosen.textContent : "");
+    }
+    function copyMappingCohortTypeKey(text) {
+        var s = copyMappingNormalize(text).toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+        if (!s) return "";
+        if (s === "screening" || s === "screen") return "SCREENING";
+        if (s === "lead in" || s === "leadin") return "LEAD_IN";
+        return s.toUpperCase().replace(/\s+/g, "_");
     }
     async function copyMappingSetOutOfRange(text) {
         var val = copyMappingNormalize(text);
@@ -39855,91 +41060,127 @@
         }
         return [];
     }
-    function copyMappingLabRowMatches(row, item) {
-        var cells = row ? row.querySelectorAll("td") : [];
-        var txt = copyMappingNormalize(cells[1] ? cells[1].textContent : row.textContent);
-        if (!txt) return false;
-        var txtKey = copyMappingKeyText(txt);
-        var nameKey = copyMappingKeyText(item.labTestName || "");
-        var codeKey = copyMappingKeyText(item.labTestCode || "");
-        var fullKey = copyMappingKeyText(item.labTestText || "");
-        if (codeKey && txtKey.indexOf(codeKey) !== -1) return true;
-        if (fullKey && txtKey.indexOf(fullKey) !== -1) return true;
-        if (nameKey && txtKey.indexOf(nameKey) !== -1) return true;
-        return copyMappingSimilarity(item.labTestText || item.labTestName, txt) >= 0.72;
+    function copyMappingLabRowInfo(row) {
+        var cb = row.querySelector("input[type='checkbox'][name^='labTest_']");
+        var cells = row.querySelectorAll("td");
+        var name = copyMappingNormalize(cells[1] ? cells[1].textContent : row.textContent);
+        return { row: row, id: cb ? cb.name.replace(/^labTest_/, "") : "", name: name, code: copyMappingLabCode(name) };
     }
-    async function copyMappingConfigureLabTest(item) {
-        if (!item || !item.labTestText) return true;
-        var rows = await copyMappingWaitForLabRows(10000);
-        if (!rows.length) {
-            copyMappingLog("lab test table did not load for " + item.labTestText);
-            return false;
+    // Lab test ids and codes are shared across plans, so prefer them over name similarity.
+    function copyMappingFindLabRow(rows, item, ctx) {
+        var infos = rows.map(copyMappingLabRowInfo);
+        var labId = ctx && ctx.labTestId ? String(ctx.labTestId) : "";
+        if (labId) {
+            var byId = infos.filter(function(i) { return i.id === labId; })[0];
+            if (byId) return { info: byId, how: "same lab test" };
         }
-        var matched = null;
-        for (var i = 0; i < rows.length; i++) {
-            if (copyMappingLabRowMatches(rows[i], item)) {
-                matched = rows[i];
-                break;
-            }
+        var code = String((ctx && ctx.labTestCode) || item.labTestCode || "").toUpperCase();
+        if (code) {
+            var byCode = infos.filter(function(i) { return i.code === code; })[0];
+            if (byCode) return { info: byCode, how: "same lab code " + code };
         }
-        if (!matched) {
-            copyMappingLog("lab test target not found: " + item.labTestText);
-            return false;
-        }
-        var selectAll = document.querySelector("#selectAllLabTestsCheckbox");
+        var names = [ctx && ctx.labTestName, item.labTestName, item.labTestText].filter(Boolean);
+        var best = null, bestScore = 0;
+        infos.forEach(function(info) {
+            names.forEach(function(n) {
+                var score = copyMappingSimilarity(n, info.name);
+                if (score > bestScore) { bestScore = score; best = info; }
+            });
+        });
+        if (best && bestScore >= 0.72) return { info: best, how: "similar name " + Math.round(bestScore * 100) + "%" };
+        return null;
+    }
+    function copyMappingCheckedLabRows() {
+        var tbody = copyMappingModalQuery("#labTestsTbody");
+        if (!tbody) return [];
+        return Array.prototype.slice.call(tbody.querySelectorAll("input[type='checkbox'][name^='labTest_']")).filter(function(cb) { return cb.checked; });
+    }
+    function copyMappingClearLabRows(rows) {
+        var selectAll = copyMappingModalQuery("#selectAllLabTestsCheckbox");
         if (selectAll) copyMappingSetCheckboxChecked(selectAll, false);
         for (var ri = 0; ri < rows.length; ri++) {
             var row = rows[ri];
-            var mainCb = row.querySelector("input[type='checkbox'][name^='labTest_']");
-            copyMappingSetCheckboxChecked(mainCb, false);
+            copyMappingSetCheckboxChecked(row.querySelector("input[type='checkbox'][name^='labTest_']"), false);
             var oorCb = row.querySelector("input[type='checkbox'][name^='labTestOutOfRangeIneligible_']");
             if (oorCb) copyMappingSetCheckboxChecked(oorCb, false);
             var compSel = row.querySelector("select[name^='labTestEligibilityComparator_']");
-            if (compSel) {
+            if (compSel && compSel.value) {
                 compSel.value = "";
-                select2TriggerChange(compSel);
+                compSel.dispatchEvent(new Event("change", { bubbles: true }));
             }
             var valueInput = row.querySelector("input[name^='labTestValue_']");
-            if (valueInput) {
+            if (valueInput && valueInput.value) {
                 valueInput.value = "";
                 valueInput.dispatchEvent(new Event("input", { bubbles: true }));
                 valueInput.dispatchEvent(new Event("change", { bubbles: true }));
             }
         }
+    }
+    // Applies the source Out of Range / Operator / Value to one lab row. With keepUserValues,
+    // fields the user already set are left alone.
+    async function copyMappingFillLabRow(row, item, keepUserValues) {
+        var oor = row.querySelector("input[type='checkbox'][name^='labTestOutOfRangeIneligible_']");
+        if (oor && !(keepUserValues && oor.checked)) copyMappingSetCheckboxChecked(oor, /^yes$/i.test(item.outOfRange || ""));
+        var comp = row.querySelector("select[name^='labTestEligibilityComparator_']");
+        if (comp && item.operator && !(keepUserValues && comp.value)) {
+            var compOk = await copyMappingSetComparatorSelect(comp, item.operator);
+            if (!compOk) return { ok: false, detail: "Lab test operator not available: " + item.operator };
+        }
+        var val = row.querySelector("input[name^='labTestValue_']");
+        if (val && item.value && !(keepUserValues && val.value)) {
+            val.value = item.value;
+            val.dispatchEvent(new Event("input", { bubbles: true }));
+            val.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return { ok: true };
+    }
+    async function copyMappingConfigureLabTest(item, ctx, progress) {
+        if (!item || !item.labTestText) return { ok: true };
+        var rows = await copyMappingWaitForLabRows(10000);
+        if (!rows.length) {
+            copyMappingLog("lab test table did not load for " + item.labTestText);
+            return { ok: false, detail: "Lab test table did not load for " + item.labTestText };
+        }
+        var found = copyMappingFindLabRow(rows, item, ctx);
+        if (!found) {
+            copyMappingLog("lab test target not found: " + item.labTestText);
+            // ClinSpark ticks every lab by default; start from a clean table so the user ticks only what they want.
+            copyMappingClearLabRows(rows);
+            if (progress) progress("Waiting for you to choose the Lab Test");
+            var manual = await copyMappingAwaitManual({
+                title: "Choose the Lab Test",
+                message: "Lab test '" + item.labTestText + "' was not found for the selected Check Item.\n" +
+                    "Tick the lab test(s) to use in the Copy modal, then click Continue. Out of Range (" + (item.outOfRange || "No") + ")" +
+                    (item.operator ? ", Operator '" + item.operator + "'" : "") + (item.value ? " and Value '" + item.value + "'" : "") +
+                    " are filled in from the source for the ticked rows unless you set them yourself.",
+                mode: "continue",
+                validate: function() { return copyMappingCheckedLabRows().length ? "" : "Tick at least one lab test first."; }
+            });
+            if (!manual.ok) return manual;
+            var ticked = copyMappingCheckedLabRows();
+            for (var ti = 0; ti < ticked.length; ti++) {
+                var tickedRow = ticked[ti].closest("tr");
+                var fill = await copyMappingFillLabRow(tickedRow, item, true);
+                if (!fill.ok) return fill;
+            }
+            copyMappingLog("lab test set manually: " + ticked.map(function(cb) { return copyMappingLabRowInfo(cb.closest("tr")).name; }).join("; "));
+            return { ok: true, detail: "lab test set manually" };
+        }
+        var matched = found.info.row;
+        copyMappingClearLabRows(rows);
         await sleep(150);
-        var targetCb = matched.querySelector("input[type='checkbox'][name^='labTest_']");
-        copyMappingSetCheckboxChecked(targetCb, true);
-        var targetOor = matched.querySelector("input[type='checkbox'][name^='labTestOutOfRangeIneligible_']");
-        if (targetOor) copyMappingSetCheckboxChecked(targetOor, /^yes$/i.test(item.outOfRange || ""));
-        var targetComp = matched.querySelector("select[name^='labTestEligibilityComparator_']");
-        if (targetComp && item.operator) {
-            var compOk = await copyMappingSetComparatorSelect(targetComp, item.operator);
-            if (!compOk) return false;
-        }
-        var targetValue = matched.querySelector("input[name^='labTestValue_']");
-        if (targetValue && item.value) {
-            targetValue.value = item.value;
-            targetValue.dispatchEvent(new Event("input", { bubbles: true }));
-            targetValue.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        if (typeof jQuery !== "undefined" && jQuery.uniform && typeof jQuery.uniform.update === "function") {
-            try { jQuery.uniform.update(); } catch (e) { }
-        }
+        copyMappingSetCheckboxChecked(matched.querySelector("input[type='checkbox'][name^='labTest_']"), true);
+        var filled = await copyMappingFillLabRow(matched, item, false);
+        if (!filled.ok) return filled;
         await sleep(250);
-        var checkedRows = rows.filter(function (row) {
-            var cb = row.querySelector("input[type='checkbox'][name^='labTest_']");
-            return cb && cb.checked;
-        });
-        if (checkedRows.length !== 1 || checkedRows[0] !== matched) {
-            var checkedLabels = checkedRows.map(function (row) {
-                var cells = row.querySelectorAll("td");
-                return copyMappingNormalize(cells[1] ? cells[1].textContent : row.textContent);
-            }).join("; ");
+        var checked = copyMappingCheckedLabRows();
+        if (checked.length !== 1 || !matched.contains(checked[0])) {
+            var checkedLabels = checked.map(function(cb) { return copyMappingLabRowInfo(cb.closest("tr")).name; }).join("; ");
             copyMappingLog("lab test verification failed for " + item.labTestText + "; checked=" + (checkedLabels || "none"));
-            return false;
+            return { ok: false, detail: "Lab test verification failed for " + item.labTestText };
         }
-        copyMappingLog("lab test configured: " + item.labTestText + " OOR=" + (item.outOfRange || "No"));
-        return true;
+        copyMappingLog("lab test configured: '" + found.info.name + "' (" + found.how + ") OOR=" + (item.outOfRange || "No"));
+        return { ok: true, detail: "lab: " + found.how };
     }
     async function copyMappingSetSelectElementByText(sel, text, minScore) {
         if (!sel) return false;
@@ -39959,7 +41200,622 @@
         await sleep(150);
         return true;
     }
-    async function copyMappingApplyItem(item) {
+    // ---- Copy Mapping: similarity matching used when the Activity Plan changes ----
+    var COPY_MAPPING_FUZZY_STOPWORDS = { a: 1, an: 1, and: 1, "for": 1, "in": 1, of: 1, on: 1, only: 1, or: 1, the: 1, to: 1, w: 1, "with": 1 };
+    // Tokens keep the signals ClinSpark labels rely on: emojis, "(*)" markers, form category
+    // prefixes (LAB_, VS_, ECG_...) and words. Row numbers, times and "(n)" counters are dropped.
+    function copyMappingFuzzyTokens(text) {
+        var s = String(text || "");
+        try { s = s.normalize("NFKC"); } catch (e) { }
+        s = s.replace(/[\uFE0F\u200D]/g, "")
+            .replace(/^\s*\d+\.\s*/, "")
+            .replace(/\s*\(\d+\)\s*$/, "")
+            .replace(/(^|\s)[-+*]?\d{1,2}:\d{2}:\d{2}(?=\s|$)/g, " ");
+        var tokens = {};
+        var emojis = s.match(/\p{Extended_Pictographic}/gu) || [];
+        for (var i = 0; i < emojis.length; i++) tokens["e:" + emojis[i]] = true;
+        if (s.indexOf("(*)") !== -1) tokens["m:required"] = true;
+        var catRe = /(?:^|[^A-Za-z])([A-Za-z]{2,6})_/g;
+        var m;
+        while ((m = catRe.exec(s))) tokens["c:" + m[1].toLowerCase()] = true;
+        var words = s.toLowerCase().replace(/\p{Extended_Pictographic}/gu, " ").split(/[^\p{L}\p{N}]+/u);
+        for (var wi = 0; wi < words.length; wi++) {
+            var w = words[wi];
+            if (!w || COPY_MAPPING_FUZZY_STOPWORDS[w]) continue;
+            if (w.length > 3 && /s$/.test(w) && !/ss$/.test(w)) w = w.slice(0, -1);
+            tokens["w:" + w] = true;
+        }
+        return Object.keys(tokens);
+    }
+    function copyMappingTrigramDice(a, b) {
+        function grams(text) {
+            var s = " " + String(text || "").toLowerCase()
+                .replace(/^\s*\d+\.\s*/, "")
+                .replace(/(^|\s)[-+*]?\d{1,2}:\d{2}:\d{2}(?=\s|$)/g, " ")
+                .replace(/\s*\(\d+\)\s*$/, "")
+                .replace(/[^\p{L}\p{N}]+/gu, " ").trim() + " ";
+            var out = {};
+            for (var i = 0; i < s.length - 2; i++) out[s.substr(i, 3)] = (out[s.substr(i, 3)] || 0) + 1;
+            return out;
+        }
+        var ga = grams(a), gb = grams(b);
+        var total = 0, shared = 0, k;
+        for (k in ga) total += ga[k];
+        for (k in gb) total += gb[k];
+        for (k in ga) if (gb[k]) shared += Math.min(ga[k], gb[k]);
+        return total ? (2 * shared) / total : 0;
+    }
+    // Ranks candidates against sourceText. Token weights are IDF over the candidate set, so words
+    // every candidate shares (the plan's segment/day name, a common section prefix) count for little.
+    // bonusFn(candidate) may add structural evidence (same form, lab-test overlap, item type).
+    function copyMappingFuzzyRank(sourceText, candidates, getText, bonusFn) {
+        var srcTokens = copyMappingFuzzyTokens(sourceText);
+        var candTokens = candidates.map(function(c) { return copyMappingFuzzyTokens(getText(c)); });
+        var n = candidates.length;
+        var df = {};
+        candTokens.forEach(function(list) { list.forEach(function(t) { df[t] = (df[t] || 0) + 1; }); });
+        function weight(t) { return Math.log(1 + (n + 1) / (1 + (df[t] || 0))); }
+        var srcSet = {};
+        var srcSum = 0;
+        srcTokens.forEach(function(t) { srcSet[t] = true; srcSum += weight(t); });
+        var ranked = candidates.map(function(c, idx) {
+            var shared = 0, candSum = 0;
+            candTokens[idx].forEach(function(t) {
+                var w = weight(t);
+                candSum += w;
+                if (srcSet[t]) shared += w;
+            });
+            var dice = (srcSum + candSum) ? (2 * shared) / (srcSum + candSum) : 0;
+            var base = 0.8 * dice + 0.2 * copyMappingTrigramDice(sourceText, getText(c));
+            var bonus = bonusFn ? (bonusFn(c) || 0) : 0;
+            return { candidate: c, score: Math.round((base + bonus) * 1000) / 1000, base: Math.round(base * 1000) / 1000, bonus: bonus };
+        });
+        ranked.sort(function(x, y) { return y.score - x.score; });
+        return ranked;
+    }
+    function copyMappingIsConfidentMatch(ranked, minScore, minMargin) {
+        if (!ranked || !ranked.length) return false;
+        var best = ranked[0].score;
+        if (best < minScore) return false;
+        if (ranked.length < 2) return true;
+        return (best - ranked[1].score) >= minMargin;
+    }
+    function copyMappingLabCode(name) {
+        var m = String(name || "").match(/\(([A-Z0-9]{2,})(?:[;\s][^)]*)?\)\s*$/i) || String(name || "").match(/\(([A-Z0-9]{3,})[;)]/i);
+        return m ? m[1].toUpperCase() : "";
+    }
+    function copyMappingItemKind(itemJson) {
+        if (!itemJson) return "";
+        if (itemJson.labTests && itemJson.labTests.length) return "lab";
+        if (itemJson.codeListItems && itemJson.codeListItems.length) return "codelist";
+        if (itemJson.valueOptions && itemJson.valueOptions.length) return "valueoption";
+        return "value";
+    }
+    function copyMappingRankScheduledActivities(ctx, destSAs, sourceSAText) {
+        var sourceFormId = ctx && ctx.formId ? String(ctx.formId) : "";
+        return copyMappingFuzzyRank(sourceSAText, destSAs, function(sa) { return sa.value; }, function(sa) {
+            return sourceFormId && String(sa.formId) === sourceFormId ? 1 : 0;
+        });
+    }
+    function copyMappingRankItems(ctx, destItems, fallbackText) {
+        var src = ctx && ctx.sourceItem ? ctx.sourceItem : null;
+        var srcText = src ? src.value : fallbackText;
+        var srcKind = copyMappingItemKind(src) || (ctx && ctx.labTestId ? "lab" : "");
+        var srcLabCodes = {};
+        var srcLabCount = 0;
+        if (src && src.labTests) src.labTests.forEach(function(l) { var c = copyMappingLabCode(l.name); if (c) { srcLabCodes[c] = true; srcLabCount++; } });
+        var targetLabId = ctx && ctx.labTestId ? String(ctx.labTestId) : "";
+        var targetLabCode = ctx && ctx.labTestCode ? ctx.labTestCode : "";
+        return copyMappingFuzzyRank(srcText, destItems, function(it) { return it.value; }, function(it) {
+            if (src && String(it.id) === String(src.id)) return 1;
+            var bonus = 0;
+            var kind = copyMappingItemKind(it);
+            if (srcKind) bonus += kind === srcKind ? 0.1 : -0.3;
+            if (srcKind === "lab" && kind === "lab") {
+                var shared = 0;
+                var hasTarget = false;
+                it.labTests.forEach(function(l) {
+                    var c = copyMappingLabCode(l.name);
+                    if (c && srcLabCodes[c]) shared++;
+                    if ((targetLabId && String(l.id) === targetLabId) || (targetLabCode && c === targetLabCode)) hasTarget = true;
+                });
+                var union = srcLabCount + it.labTests.length - shared;
+                bonus += union ? 0.3 * (shared / union) : 0;
+                bonus += hasTarget ? 0.3 : (targetLabId || targetLabCode ? -0.2 : 0);
+            }
+            return bonus;
+        });
+    }
+    var COPY_MAPPING_AJAX_HELP_URL = "/secure/crfdesign/studylibrary/eligibility/ajaxHelp";
+    var COPY_MAPPING_SA_MIN_SCORE = 0.35;
+    var COPY_MAPPING_SA_MIN_MARGIN = 0.04;
+    var COPY_MAPPING_ITEM_MIN_SCORE = 0.45;
+    var COPY_MAPPING_ITEM_MIN_MARGIN = 0.05;
+    var COPY_MAPPING_MANUAL_TIMEOUT_MS = 15 * 60 * 1000;
+    var COPY_MAPPING_PROMPT_ID = "copyMappingManualPrompt";
+    async function copyMappingAjaxHelp(action, id) {
+        if (!id) return null;
+        try {
+            var body = new URLSearchParams();
+            body.set("ajaxAction", action);
+            body.set("id", String(id));
+            var resp = await fetch(location.origin + COPY_MAPPING_AJAX_HELP_URL, {
+                method: "POST",
+                body: body,
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            });
+            if (!resp.ok) {
+                copyMappingLog("ajaxHelp " + action + " id=" + id + " failed HTTP " + resp.status);
+                return null;
+            }
+            var json = await resp.json();
+            return Array.isArray(json) ? json : null;
+        } catch (err) {
+            copyMappingLog("ajaxHelp " + action + " id=" + id + " error: " + String(err));
+            return null;
+        }
+    }
+    function copyMappingModalQuery(selector) {
+        var root = copyMappingModalRoot();
+        return root ? root.querySelector(selector) : null;
+    }
+    function copyMappingNonEmptyOptionCount(sel) {
+        if (!sel) return 0;
+        var count = 0;
+        for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value) count++;
+        return count;
+    }
+    function copyMappingIsShown(el) {
+        return !!el && el.style.display !== "none" && window.getComputedStyle(el).display !== "none";
+    }
+    // Reads the source mapping's exact ids from the Copy modal's own init script, e.g.
+    // loadScheduledActivities('637079', '3046684', '', '1781', 'GT', '39'). Must run before any field changes.
+    async function copyMappingReadSourceContext(item) {
+        var script = copyMappingModalScriptText();
+        var ctx = {
+            formId: "", saId: "", itemRefId: "", codeListItemId: "", labTestId: "", comparator: "", value: "",
+            planId: "", sourceItem: null, labTestCode: item.labTestCode || "", labTestName: item.labTestName || "", codeListText: ""
+        };
+        var formMatch = script.match(/copyFormVal\s*=\s*'(\d*)'/);
+        if (formMatch) ctx.formId = formMatch[1];
+        var init = script.match(/loadScheduledActivities\(\s*'(\d*)'\s*,\s*'(\d*)'\s*,\s*'(\d*)'\s*,\s*'(\d*)'\s*,\s*'([^']*)'\s*,\s*'((?:[^'\\]|\\.)*)'\s*\)/);
+        if (init) {
+            ctx.saId = init[1];
+            ctx.itemRefId = init[2];
+            ctx.codeListItemId = init[3];
+            ctx.labTestId = init[4];
+            ctx.comparator = init[5];
+            ctx.value = init[6];
+        }
+        var planSel = copyMappingModalQuery("select#activityPlan");
+        ctx.planId = planSel ? planSel.value : "";
+        if (ctx.saId) {
+            var sourceItems = await copyMappingAjaxHelp("items", ctx.saId);
+            if (sourceItems) {
+                ctx.sourceItem = sourceItems.filter(function(it) { return String(it.id) === String(ctx.itemRefId); })[0] || null;
+            }
+        }
+        var src = ctx.sourceItem;
+        if (src && ctx.labTestId && src.labTests) {
+            var lab = src.labTests.filter(function(l) { return String(l.id) === String(ctx.labTestId); })[0];
+            if (lab) {
+                ctx.labTestName = copyMappingNormalize(lab.name);
+                ctx.labTestCode = copyMappingLabCode(lab.name) || ctx.labTestCode;
+            }
+        }
+        if (src && ctx.codeListItemId && src.codeListItems) {
+            var cli = src.codeListItems.filter(function(c) { return String(c.id) === String(ctx.codeListItemId); })[0];
+            if (cli) ctx.codeListText = copyMappingNormalize(cli.value);
+        }
+        copyMappingLog("source context form=" + (ctx.formId || "?") + " sa=" + (ctx.saId || "?") + " itemRef=" + (ctx.itemRefId || "?") +
+            " item='" + (src ? copyMappingShort(src.value, 80) : "(not loaded)") + "' kind=" + (copyMappingItemKind(src) || "?") +
+            " lab=" + (ctx.labTestId ? ctx.labTestId + "/" + (ctx.labTestCode || "?") : "none") +
+            " codeList=" + (ctx.codeListText || "none") + " op=" + (ctx.comparator || "none"));
+        return ctx;
+    }
+    function copyMappingModalSignature() {
+        var parts = ["#scheduledActivity", "#itemRef", "#codeListItem", "#valueOption", "#eligibilityComparator"].map(function(id) {
+            var sel = copyMappingModalQuery("select" + id);
+            return sel ? sel.value + ":" + sel.options.length : "-";
+        });
+        var tbody = copyMappingModalQuery("#labTestsTbody");
+        parts.push(tbody ? String(tbody.querySelectorAll("tr").length) : "-");
+        return parts.join("|");
+    }
+    // ClinSpark reloads dependent selects through async $.post chains the extension cannot observe
+    // directly, so wait until the modal's dependent fields stop changing.
+    async function copyMappingWaitForModalSettle(quietMs, timeoutMs) {
+        var quiet = quietMs || 700;
+        var deadline = Date.now() + (timeoutMs || 8000);
+        var last = copyMappingModalSignature();
+        var stableSince = Date.now();
+        while (Date.now() < deadline) {
+            await sleep(100);
+            var sig = copyMappingModalSignature();
+            if (sig !== last) {
+                last = sig;
+                stableSince = Date.now();
+            } else if (Date.now() - stableSince >= quiet) {
+                return true;
+            }
+        }
+        return false;
+    }
+    async function copyMappingWaitForOptionCount(selector, expected, timeoutMs) {
+        var deadline = Date.now() + (timeoutMs || 12000);
+        while (Date.now() < deadline) {
+            var sel = copyMappingModalQuery(selector);
+            if (sel && copyMappingNonEmptyOptionCount(sel) === expected) return true;
+            await sleep(120);
+        }
+        var finalSel = copyMappingModalQuery(selector);
+        copyMappingLog("timed out waiting for " + selector + " options=" + expected + " (have " + copyMappingNonEmptyOptionCount(finalSel) + ")");
+        return false;
+    }
+    async function copyMappingWaitForLabRowCount(expected, timeoutMs) {
+        var deadline = Date.now() + (timeoutMs || 10000);
+        while (Date.now() < deadline) {
+            var tbody = copyMappingModalQuery("#labTestsTbody");
+            var count = tbody ? tbody.querySelectorAll("input[type='checkbox'][name^='labTest_']").length : 0;
+            if (count === expected) return true;
+            await sleep(120);
+        }
+        return false;
+    }
+    function copyMappingSelectModalValue(selector, value) {
+        var sel = copyMappingModalQuery(selector);
+        if (!sel) return false;
+        var option = null;
+        for (var i = 0; i < sel.options.length; i++) {
+            if (String(sel.options[i].value) === String(value)) { option = sel.options[i]; break; }
+        }
+        if (!option) return false;
+        copyMappingCommitSelectOption(sel, option);
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }
+    function copyMappingSelectedOptionText(selector) {
+        var sel = copyMappingModalQuery(selector);
+        var opt = sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex] : null;
+        return opt ? copyMappingNormalize(opt.textContent) : "";
+    }
+    // Waits for ClinSpark to finish loading items (and the value fields for the selected item).
+    async function copyMappingWaitForItemFields(itemJson) {
+        if (!itemJson) {
+            await copyMappingWaitForModalSettle(700, 6000);
+            return;
+        }
+        var comparators = itemJson.comparators ? itemJson.comparators.length : 0;
+        await copyMappingWaitForOptionCount("select#eligibilityComparator", comparators, 10000);
+        if (itemJson.labTests && itemJson.labTests.length) await copyMappingWaitForLabRowCount(itemJson.labTests.length, 10000);
+        else if (itemJson.codeListItems && itemJson.codeListItems.length) await copyMappingWaitForOptionCount("select#codeListItem", itemJson.codeListItems.length, 10000);
+        else if (itemJson.valueOptions && itemJson.valueOptions.length) await copyMappingWaitForOptionCount("select#valueOption", itemJson.valueOptions.length, 10000);
+        await copyMappingWaitForModalSettle(400, 4000);
+    }
+    function copyMappingRemoveManualPrompt() {
+        var existing = document.getElementById(COPY_MAPPING_PROMPT_ID);
+        if (existing) existing.remove();
+    }
+    function copyMappingBuildManualPrompt(opts, state) {
+        copyMappingRemoveManualPrompt();
+        var panel = document.createElement("div");
+        panel.id = COPY_MAPPING_PROMPT_ID;
+        panel.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:2147483000;width:min(520px,calc(100vw - 36px));max-height:70vh;overflow:auto;background:#1b1408;color:#fff;border:2px solid #f0ad4e;border-radius:10px;box-shadow:0 14px 40px rgba(0,0,0,0.55);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;font-size:13px;padding:12px 14px;";
+        var title = document.createElement("div");
+        title.style.cssText = "font-weight:800;color:#ffcf7a;margin-bottom:6px;";
+        title.textContent = opts.title;
+        var msg = document.createElement("div");
+        msg.style.cssText = "line-height:1.45;color:#f3e6cf;white-space:pre-wrap;";
+        msg.textContent = opts.message;
+        var status = document.createElement("div");
+        status.style.cssText = "margin-top:6px;color:#ff9b9b;font-weight:700;display:none;";
+        panel.appendChild(title);
+        panel.appendChild(msg);
+        panel.appendChild(status);
+        if (opts.suggestions && opts.suggestions.length) {
+            var sugTitle = document.createElement("div");
+            sugTitle.style.cssText = "margin-top:8px;color:#cdd3e1;font-weight:700;";
+            sugTitle.textContent = "Closest matches (click to use):";
+            panel.appendChild(sugTitle);
+            opts.suggestions.forEach(function(s) {
+                var b = document.createElement("button");
+                b.type = "button";
+                b.style.cssText = "display:block;width:100%;text-align:left;margin-top:4px;background:#2a2112;color:#fff;border:1px solid #6b5327;border-radius:6px;padding:6px 8px;font-size:12px;cursor:pointer;";
+                b.textContent = s.label + (typeof s.score === "number" ? "  (" + Math.round(Math.min(s.score, 1) * 100) + "%)" : "");
+                b.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try { s.apply(); } catch (err) { copyMappingLog("suggestion apply failed: " + String(err)); }
+                });
+                panel.appendChild(b);
+            });
+        }
+        var btnRow = document.createElement("div");
+        btnRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:10px;";
+        var skipBtn = document.createElement("button");
+        skipBtn.type = "button";
+        skipBtn.textContent = "Skip this mapping";
+        skipBtn.style.cssText = "background:#3a1f28;color:#fff;border:1px solid #8b3a4a;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;";
+        skipBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); state.skipped = true; });
+        btnRow.appendChild(skipBtn);
+        if (opts.mode === "continue") {
+            var contBtn = document.createElement("button");
+            contBtn.type = "button";
+            contBtn.textContent = "Continue";
+            contBtn.style.cssText = "background:#198754;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;";
+            contBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); state.continueClicked = true; });
+            btnRow.appendChild(contBtn);
+        }
+        panel.appendChild(btnRow);
+        document.body.appendChild(panel);
+        return { setError: function(text) { status.textContent = text; status.style.display = text ? "block" : "none"; } };
+    }
+    // Pauses the copy until the user fixes a field in the Copy modal.
+    // mode "watch": resolves once opts.watch() returns a stable non-empty value.
+    // mode "continue": resolves when the user clicks Continue and opts.validate() returns "" (else shows the error).
+    async function copyMappingAwaitManual(opts) {
+        var state = { skipped: false, continueClicked: false };
+        var ui = copyMappingBuildManualPrompt(opts, state);
+        var modal = copyMappingModalRoot();
+        var deadline = Date.now() + COPY_MAPPING_MANUAL_TIMEOUT_MS;
+        var lastValue = null;
+        var stableSince = 0;
+        copyMappingLog("waiting for manual input: " + opts.title);
+        try {
+            while (Date.now() < deadline) {
+                if (COPY_MAPPING_CANCELLED) return { ok: false, skipped: true, detail: "Cancelled" };
+                if (state.skipped) return { ok: false, skipped: true, detail: "Skipped by user at: " + opts.title };
+                if (copyMappingIsModalClosed(modal)) return { ok: false, detail: "Copy modal was closed during manual step: " + opts.title };
+                if (opts.mode === "watch") {
+                    var v = opts.watch();
+                    if (v && v === lastValue) {
+                        if (Date.now() - stableSince >= 600) {
+                            copyMappingLog("manual input received for " + opts.title + ": " + v);
+                            return { ok: true, value: v };
+                        }
+                    } else {
+                        lastValue = v;
+                        stableSince = Date.now();
+                    }
+                } else if (state.continueClicked) {
+                    state.continueClicked = false;
+                    var problem = opts.validate ? opts.validate() : "";
+                    if (!problem) {
+                        copyMappingLog("manual step confirmed: " + opts.title);
+                        return { ok: true, value: "" };
+                    }
+                    ui.setError(problem);
+                }
+                await sleep(250);
+            }
+            return { ok: false, detail: "Timed out waiting for manual input: " + opts.title };
+        } finally {
+            copyMappingRemoveManualPrompt();
+        }
+    }
+    function copyMappingSuggestionsFrom(ranked, selector, max) {
+        return (ranked || []).filter(function(r) { return r.score > 0.1; }).slice(0, max || 3).map(function(r) {
+            return {
+                label: copyMappingShort(r.candidate.value, 110),
+                score: r.base,
+                apply: function() { copyMappingSelectModalValue(selector, r.candidate.id); }
+            };
+        });
+    }
+    function copyMappingLogRanking(label, ranked) {
+        copyMappingLog(label + " candidates: " + (ranked || []).slice(0, 3).map(function(r) {
+            return r.score.toFixed(3) + " '" + copyMappingShort(r.candidate.value, 70) + "'";
+        }).join(" | "));
+    }
+    function copyMappingOptionsAsCandidates(selector) {
+        var sel = copyMappingModalQuery(selector);
+        var out = [];
+        if (!sel) return out;
+        for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value) out.push({ id: sel.options[i].value, value: copyMappingNormalize(sel.options[i].textContent) });
+        }
+        return out;
+    }
+    // After the Activity Plan changes ClinSpark clears Scheduled Activity, Check Item and the value
+    // fields. Re-select them with the most similar options in the new plan, or wait for the user.
+    async function copyMappingResolvePlanTargets(ctx, item, progress) {
+        var planSel = copyMappingModalQuery("select#activityPlan");
+        var planId = planSel ? planSel.value : "";
+        var destSAs = await copyMappingAjaxHelp("scheduledActivities", planId);
+        if (destSAs) await copyMappingWaitForOptionCount("select#scheduledActivity", destSAs.length, 12000);
+        else {
+            await copyMappingWaitForModalSettle(800, 12000);
+            destSAs = copyMappingOptionsAsCandidates("select#scheduledActivity");
+        }
+        var autoSaId = (copyMappingModalQuery("select#scheduledActivity") || {}).value || "";
+        if (autoSaId) {
+            // ClinSpark auto-selected the same form in the new plan; let its item load finish first.
+            var autoItems = await copyMappingAjaxHelp("items", autoSaId);
+            if (autoItems) await copyMappingWaitForOptionCount("select#itemRef", autoItems.length, 12000);
+        }
+        await copyMappingWaitForModalSettle(700, 8000);
+        if (!destSAs.length) return { ok: false, detail: "New activity plan has no scheduled activities" };
+
+        var saRanked = copyMappingRankScheduledActivities(ctx, destSAs, item.scheduledActivityText);
+        copyMappingLogRanking("scheduled activity for '" + copyMappingShort(item.scheduledActivityText, 70) + "'", saRanked);
+        var saId = "";
+        var saNote = "";
+        if (copyMappingIsConfidentMatch(saRanked, COPY_MAPPING_SA_MIN_SCORE, COPY_MAPPING_SA_MIN_MARGIN)) {
+            saId = String(saRanked[0].candidate.id);
+            saNote = saRanked[0].bonus >= 1 ? "same form" : "best match " + Math.round(saRanked[0].base * 100) + "%";
+            var currentSa = (copyMappingModalQuery("select#scheduledActivity") || {}).value || "";
+            if (currentSa !== saId && !copyMappingSelectModalValue("select#scheduledActivity", saId)) {
+                return { ok: false, detail: "Could not select scheduled activity " + saRanked[0].candidate.value };
+            }
+        } else {
+            if (progress) progress("Waiting for you to pick a Scheduled Activity");
+            var manualSa = await copyMappingAwaitManual({
+                title: "Select the Scheduled Activity",
+                message: "No similar Scheduled Activity was found in the new activity plan for:\n" + item.scheduledActivityText +
+                    "\n\nPick one in the Copy modal (or below). The automator continues automatically once it is selected.",
+                mode: "watch",
+                suggestions: copyMappingSuggestionsFrom(saRanked, "select#scheduledActivity", 3),
+                watch: function() { return (copyMappingModalQuery("select#scheduledActivity") || {}).value || ""; }
+            });
+            if (!manualSa.ok) return manualSa;
+            saId = manualSa.value;
+            saNote = "chosen manually";
+        }
+        copyMappingLog("scheduled activity -> '" + copyMappingSelectedOptionText("select#scheduledActivity") + "' (" + saNote + ")");
+
+        var destItems = await copyMappingAjaxHelp("items", saId);
+        if (destItems) await copyMappingWaitForOptionCount("select#itemRef", destItems.length, 12000);
+        else {
+            await copyMappingWaitForModalSettle(800, 12000);
+            destItems = copyMappingOptionsAsCandidates("select#itemRef");
+        }
+        await copyMappingWaitForModalSettle(500, 6000);
+        if (!destItems.length) return { ok: false, detail: "Selected scheduled activity has no items" };
+
+        var itemRanked = copyMappingRankItems(ctx, destItems, item.checkItemText);
+        copyMappingLogRanking("check item for '" + copyMappingShort(ctx.sourceItem ? ctx.sourceItem.value : item.checkItemText, 70) + "'", itemRanked);
+        var itemId = "";
+        var itemNote = "";
+        var currentItem = (copyMappingModalQuery("select#itemRef") || {}).value || "";
+        if (currentItem && ctx.itemRefId && currentItem === String(ctx.itemRefId)) {
+            itemId = currentItem;
+            itemNote = "same item";
+        } else if (copyMappingIsConfidentMatch(itemRanked, COPY_MAPPING_ITEM_MIN_SCORE, COPY_MAPPING_ITEM_MIN_MARGIN)) {
+            itemId = String(itemRanked[0].candidate.id);
+            itemNote = itemRanked[0].bonus >= 1 ? "same item" : "best match " + Math.round(itemRanked[0].base * 100) + "%" + (itemRanked[0].bonus >= 0.3 ? ", lab tests match" : "");
+            if (currentItem !== itemId && !copyMappingSelectModalValue("select#itemRef", itemId)) {
+                return { ok: false, detail: "Could not select check item " + itemRanked[0].candidate.value };
+            }
+        } else {
+            if (progress) progress("Waiting for you to pick a Check Item");
+            var manualItem = await copyMappingAwaitManual({
+                title: "Select the Check Item",
+                message: "No similar Check Item was found in the selected Scheduled Activity for:\n" +
+                    (ctx.sourceItem ? ctx.sourceItem.value : item.checkItemText) +
+                    (item.labTestText ? "\n(lab test: " + item.labTestText + ")" : "") +
+                    "\n\nPick one in the Copy modal (or below). The automator continues automatically once it is selected.",
+                mode: "watch",
+                suggestions: copyMappingSuggestionsFrom(itemRanked, "select#itemRef", 3),
+                watch: function() { return (copyMappingModalQuery("select#itemRef") || {}).value || ""; }
+            });
+            if (!manualItem.ok) return manualItem;
+            itemId = manualItem.value;
+            itemNote = "chosen manually";
+        }
+        var itemJson = destItems.filter(function(it) { return String(it.id) === String(itemId); })[0] || null;
+        await copyMappingWaitForItemFields(itemJson && itemJson.comparators ? itemJson : null);
+        copyMappingLog("check item -> '" + copyMappingSelectedOptionText("select#itemRef") + "' (" + itemNote + ")");
+        if (progress) progress("Matched SA (" + saNote + ") and check item (" + itemNote + ")");
+        return {
+            ok: true,
+            itemJson: itemJson,
+            kind: copyMappingItemKind(itemJson),
+            detail: "SA: " + copyMappingShort(copyMappingSelectedOptionText("select#scheduledActivity"), 60) + " [" + saNote + "]; Item: " +
+                copyMappingShort(copyMappingSelectedOptionText("select#itemRef"), 60) + " [" + itemNote + "]"
+        };
+    }
+    function copyMappingBestOptionByText(sel, texts, minScore) {
+        if (!sel) return null;
+        var wanted = (texts || []).map(copyMappingNormalize).filter(Boolean);
+        if (!wanted.length) return null;
+        var lowered = wanted.map(function(t) { return t.toLowerCase(); });
+        for (var i = 0; i < sel.options.length; i++) {
+            var txt = copyMappingNormalize(sel.options[i].textContent).toLowerCase();
+            if (sel.options[i].value && lowered.indexOf(txt) !== -1) return sel.options[i];
+        }
+        // Code list options read "CODE=Decode"; accept a unique match on the decode, then on the code.
+        function splitCode(t) {
+            var at = t.indexOf("=");
+            return at > 0 ? { code: t.slice(0, at).trim(), decode: t.slice(at + 1).trim() } : { code: "", decode: t.trim() };
+        }
+        var wantedParts = lowered.map(splitCode);
+        var partNames = ["decode", "code"];
+        for (var pi = 0; pi < partNames.length; pi++) {
+            var part = partNames[pi];
+            var hits = [];
+            for (var oi = 0; oi < sel.options.length; oi++) {
+                if (!sel.options[oi].value) continue;
+                var optPart = splitCode(copyMappingNormalize(sel.options[oi].textContent).toLowerCase())[part];
+                if (optPart && wantedParts.some(function(wp) { return wp[part] && wp[part] === optPart; })) hits.push(sel.options[oi]);
+            }
+            if (hits.length === 1) return hits[0];
+        }
+        var best = null, bestScore = 0;
+        for (var j = 0; j < sel.options.length; j++) {
+            if (!sel.options[j].value) continue;
+            for (var w = 0; w < wanted.length; w++) {
+                var score = copyMappingSimilarity(wanted[w], sel.options[j].textContent);
+                if (score > bestScore) { bestScore = score; best = sel.options[j]; }
+            }
+        }
+        return bestScore >= (minScore || 0.6) ? best : null;
+    }
+    // Applies Operator and Value for non-lab items, choosing the control ClinSpark actually shows.
+    async function copyMappingApplyComparatorAndValue(item, ctx, progress) {
+        var compDiv = copyMappingModalQuery("#comparatorDiv");
+        var compSel = copyMappingModalQuery("select#eligibilityComparator");
+        if (item.operator && compSel && (!compDiv || copyMappingIsShown(compDiv))) {
+            var compDeadline = Date.now() + 4000;
+            while (!copyMappingNonEmptyOptionCount(compSel) && Date.now() < compDeadline) await sleep(120);
+            var compOk = await copyMappingSetComparatorSelect(compSel, item.operator);
+            if (!compOk) {
+                if (progress) progress("Waiting for you to set the Operator");
+                var manualComp = await copyMappingAwaitManual({
+                    title: "Set the Operator",
+                    message: "Operator '" + item.operator + "' is not available for the selected Check Item.\nChoose the Operator in the Copy modal, then click Continue.",
+                    mode: "continue",
+                    validate: function() { return (copyMappingModalQuery("select#eligibilityComparator") || {}).value ? "" : "Select an Operator first."; }
+                });
+                if (!manualComp.ok) return manualComp;
+            }
+        }
+        var wantedValue = copyMappingNormalize(item.value);
+        if (!wantedValue) return { ok: true };
+        var codeDiv = copyMappingModalQuery("#codeListValueDiv");
+        var optDiv = copyMappingModalQuery("#valueOptionDiv");
+        var valueDiv = copyMappingModalQuery("#valueValueDiv");
+        var target = null;
+        var label = "";
+        if (copyMappingIsShown(codeDiv)) {
+            target = copyMappingModalQuery("select#codeListItem");
+            label = "code list value";
+        } else if (copyMappingIsShown(optDiv)) {
+            target = copyMappingModalQuery("select#valueOption");
+            label = "value option";
+        }
+        if (target) {
+            var opt = copyMappingBestOptionByText(target, [ctx && ctx.codeListText, wantedValue], 0.6);
+            if (opt) {
+                copyMappingCommitSelectOption(target, opt);
+                target.dispatchEvent(new Event("change", { bubbles: true }));
+                await sleep(150);
+                copyMappingLog(label + " -> '" + copyMappingNormalize(opt.textContent) + "'");
+                return { ok: true };
+            }
+            if (progress) progress("Waiting for you to set the Value");
+            var selector = target.id ? "select#" + target.id : "select";
+            var manualVal = await copyMappingAwaitManual({
+                title: "Set the Value",
+                message: "Value '" + wantedValue + "' was not found in the " + label + " list.\nChoose the Value in the Copy modal, then click Continue.",
+                mode: "continue",
+                validate: function() { return (copyMappingModalQuery(selector) || {}).value ? "" : "Select a Value first."; }
+            });
+            return manualVal.ok ? { ok: true } : manualVal;
+        }
+        var input = copyMappingModalQuery("input#value");
+        if (input && (!valueDiv || copyMappingIsShown(valueDiv) || !codeDiv)) {
+            input.value = wantedValue;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            copyMappingLog("value -> '" + wantedValue + "'");
+        }
+        return { ok: true };
+    }
+    async function copyMappingApplyItem(item, progress) {
         var opened = await copyMappingOpenCopyModal(item);
         if (!opened) return { ok: false, detail: "Copy modal did not open" };
         await sleep(600);
@@ -39968,6 +41824,9 @@
         if (!hasTrackedChanges && item.dirty) {
             changed = { itemName: true, sex: true, cohortType: true, cohort: true, outOfRange: true, activityPlanText: true, scheduledActivityText: true, checkItemText: true, operator: true, value: true };
         }
+        var planChanged = !!changed.activityPlanText;
+        // Read the source mapping's exact ids before any field is touched.
+        var ctx = await copyMappingReadSourceContext(item);
         var ok = true;
         if (changed.itemName) {
             ok = await copyMappingSetSelectByText("select#eligibilityItemRef", item.itemName, 0.72);
@@ -39975,78 +41834,66 @@
         }
         var sexSel = document.querySelector("select#sexOption");
         if (sexSel && item.sex && changed.sex) await copyMappingSetSelectByText("select#sexOption", item.sex, 0.8);
-        if (changed.cohortType) await copyMappingSetCohortType(item.cohortType);
         if (changed.cohort) await copyMappingSetCohorts(item.cohort);
         if (changed.outOfRange) await copyMappingSetOutOfRange(item.outOfRange);
-        if (item.labTestText) {
-            ok = await copyMappingConfigureLabTest(item);
-            if (!ok) return { ok: false, detail: "Lab test not found: " + item.labTestText };
-        }
-        if (changed.activityPlanText) {
+        var planResult = null;
+        if (planChanged) {
             ok = await copyMappingSetSelectByText("select#activityPlan", item.activityPlanText, 0.72);
             if (!ok) return { ok: false, detail: "Activity plan not found" };
-            var schedSel = document.querySelector("select#scheduledActivity");
-            if (schedSel) await waitForSelectOptions(schedSel, 1, 12000);
-            ok = await copyMappingSetSelectByText("select#scheduledActivity", item.scheduledActivityText, 0.42);
-            if (!ok) return { ok: false, detail: "Similar scheduled activity not found" };
-            var itemSel = document.querySelector("select#itemRef");
-            if (itemSel) await waitForSelectOptions(itemSel, 1, 12000);
-            ok = await copyMappingSetSelectByText("select#itemRef", item.checkItemText, 0.58);
-            if (!ok) return { ok: false, detail: "Similar check item not found" };
+            if (progress) progress("Matching scheduled activity and check item");
+            planResult = await copyMappingResolvePlanTargets(ctx, item, progress);
+            if (!planResult.ok) return planResult;
         }
-        if (!item.labTestText && changed.operator && item.operator) {
-            var comparatorSel = document.querySelector("select#eligibilityComparator");
-            if (!comparatorSel) comparatorSel = await waitForElement("select#eligibilityComparator", 8000);
-            ok = await copyMappingSetComparatorSelect(comparatorSel, item.operator);
-            if (!ok) return { ok: false, detail: "Comparator not found: " + item.operator };
-        }
-        if (!item.labTestText && changed.value && item.value) {
-            var codeSel = document.querySelector("select#codeListItem");
-            if (codeSel) {
-                await waitForSelectOptions(codeSel, 1, 8000);
-                await copyMappingSetSelectByText("select#codeListItem", item.value, 0.55);
-            } else {
-                var valueInput = document.querySelector("input#value, input[name='value'], input[name*='eligibilityValue']");
-                if (valueInput) {
-                    valueInput.value = item.value;
-                    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
-                    valueInput.dispatchEvent(new Event("change", { bubbles: true }));
-                }
+        // Applied after Activity Plan: ClinSpark's activityPlan change handler resets Cohort Type to the plan default.
+        copyMappingLogCohortTypeState("after activity plan", item, null);
+        var cohortTypeRes = await copyMappingSetCohortType(item.cohortType || "");
+        if (!cohortTypeRes.ok) return { ok: false, detail: cohortTypeRes.detail };
+        var expectedCohortType = cohortTypeRes.value;
+        var isLabItem = planResult ? planResult.kind === "lab" : !!item.labTestText;
+        var labNote = "";
+        if (item.labTestText && isLabItem) {
+            if (progress) progress("Configuring lab test");
+            var labRes = await copyMappingConfigureLabTest(item, ctx, progress);
+            if (!labRes.ok) return labRes;
+            labNote = labRes.detail || "";
+        } else {
+            if (item.labTestText) copyMappingLog("source lab test '" + item.labTestText + "' not applied: selected check item has no lab tests");
+            if (planChanged || changed.operator || changed.value) {
+                var valueRes = await copyMappingApplyComparatorAndValue(item, ctx, progress);
+                if (!valueRes.ok) return valueRes;
             }
         }
-        var saveBtn = document.querySelector("button#actionButton");
-        if (!saveBtn) return { ok: false, detail: "Save button not found" };
-        saveBtn.click();
-        var closed = await waitForModalClose(15000);
-        if (!closed) {
-            var err = document.querySelector("#ajaxModal .alert-danger, #ajaxModal .has-error, #ajaxModal .error-message");
-            var detail = err ? copyMappingNormalize(err.textContent) : "Modal did not close after save";
-            await closeCurrentModal();
-            return { ok: false, detail: detail };
-        }
-        return { ok: true, detail: "Copied" };
+        if (progress) progress("Saving");
+        var saveRes = await copyMappingSubmitModalForm(item, expectedCohortType);
+        if (saveRes.ok && planResult) saveRes.detail += " | " + planResult.detail + (labNote ? "; " + labNote : "");
+        return saveRes;
     }
     async function copyMappingExecute(items) {
         COPY_MAPPING_CANCELLED = false;
         var status = copyMappingCreateStatusPanel(items);
         var success = 0;
         var failed = 0;
+        var skipped = 0;
         for (var i = 0; i < items.length; i++) {
             if (COPY_MAPPING_CANCELLED) { status.update(i, "Skipped", "Cancelled"); continue; }
             status.update(i, "Running", "Opening source Copy modal");
             try {
-                var res = await copyMappingApplyItem(items[i]);
+                var rowIndex = i;
+                var res = await copyMappingApplyItem(items[i], function(detail) { status.update(rowIndex, "Running", detail); });
                 if (res.ok) { success++; status.update(i, "Success", res.detail); }
+                else if (res.skipped) { skipped++; status.update(i, "Skipped", res.detail); await closeCurrentModal(); }
                 else { failed++; status.update(i, "Failed", res.detail); await closeCurrentModal(); }
             } catch (err) {
                 failed++;
                 status.update(i, "Failed", String(err && err.message ? err.message : err));
                 await closeCurrentModal();
+            } finally {
+                copyMappingRemoveManualPrompt();
             }
             await copyMappingResetListFilters("after item " + String(i + 1));
             await sleep(900);
         }
-        copyMappingLog("complete success=" + success + " failed=" + failed + " total=" + items.length);
+        copyMappingLog("complete success=" + success + " failed=" + failed + " skipped=" + skipped + " total=" + items.length);
     }
     async function runCopyMapping() {
         copyMappingLog("button clicked");
@@ -48683,6 +50530,12 @@
             info.appendChild(status);
             info.appendChild(logBox);
         }
+        // The menu grid itself (columns, row height) is styled by panelMenuEnsureStyles.
+        buttonRow.style.gridTemplateColumns = "";
+        buttonRow.style.gridTemplateRows = "";
+        buttonRow.style.gridAutoFlow = "";
+        buttonRow.style.gridAutoColumns = "";
+        buttonRow.style.gridAutoRows = "";
         if (dock === "bottom") {
             bodyContainer.style.flexDirection = "row";
             bodyContainer.style.alignItems = "stretch";
@@ -48691,16 +50544,13 @@
             buttonRow.style.flex = "1 1 auto";
             buttonRow.style.minWidth = "0";
             buttonRow.style.minHeight = "0";
-            buttonRow.style.gridTemplateColumns = "repeat(4,minmax(0,1fr))";
-            buttonRow.style.gridTemplateRows = "";
-            buttonRow.style.gridAutoFlow = "row";
-            buttonRow.style.gridAutoColumns = "";
-            buttonRow.style.gridAutoRows = "minmax(0,1fr)";
             buttonRow.style.gap = "6px";
+            buttonRow.style.alignContent = "start";
             buttonRow.style.overflowY = "auto";
             buttonRow.style.overflowX = "hidden";
+            buttonRow.style.paddingRight = "2px";
             info.style.display = "flex";
-            info.style.flex = "0 1 clamp(210px,24vw,340px)";
+            info.style.flex = "0 1 clamp(210px,28vw,380px)";
             info.style.minWidth = "210px";
             info.style.minHeight = "0";
             info.style.flexDirection = "column";
@@ -48711,17 +50561,12 @@
             logBox.style.marginTop = "0";
             logBox.style.flex = "1 1 auto";
             logBox.style.minHeight = "0";
-            var bottomButtons = buttonRow.querySelectorAll("button");
-            for (var bi = 0; bi < bottomButtons.length; bi++) {
-                bottomButtons[bi].style.minWidth = "0";
-                bottomButtons[bi].style.minHeight = "0";
-                bottomButtons[bi].style.height = "100%";
-                bottomButtons[bi].style.padding = "4px 5px";
-                bottomButtons[bi].style.fontSize = "11px";
-                bottomButtons[bi].style.lineHeight = "1.15";
-                bottomButtons[bi].style.whiteSpace = "normal";
-                bottomButtons[bi].style.overflow = "hidden";
-            }
+            // Balanced columns: all menus on one row when they fit, otherwise two even rows, otherwise wrap.
+            var menuCount = buttonRow.querySelectorAll("[data-aps-menu-trigger]").length || 1;
+            var rowWidth = buttonRow.clientWidth || Math.round((bodyContainer.clientWidth || window.innerWidth) * 0.7);
+            var minCol = 136;
+            var cols = rowWidth >= menuCount * minCol ? menuCount : (rowWidth >= Math.ceil(menuCount / 2) * minCol ? Math.ceil(menuCount / 2) : Math.max(1, Math.floor(rowWidth / minCol)));
+            buttonRow.style.gridTemplateColumns = "repeat(" + cols + ",minmax(0,1fr))";
         } else {
             bodyContainer.style.flexDirection = "column";
             bodyContainer.style.alignItems = "stretch";
@@ -48730,13 +50575,10 @@
             buttonRow.style.flex = "0 0 auto";
             buttonRow.style.minWidth = "";
             buttonRow.style.minHeight = "";
-            buttonRow.style.gridTemplateColumns = "1fr 1fr";
-            buttonRow.style.gridTemplateRows = "";
-            buttonRow.style.gridAutoFlow = "";
-            buttonRow.style.gridAutoColumns = "";
-            buttonRow.style.gridAutoRows = "";
             buttonRow.style.gap = scale(BUTTON_GAP_PX);
+            buttonRow.style.alignContent = "";
             buttonRow.style.overflow = "visible";
+            buttonRow.style.paddingRight = "";
             info.style.display = "contents";
             info.style.flex = "";
             info.style.minWidth = "";
@@ -48747,17 +50589,6 @@
             logBox.style.marginTop = scale(LOG_MARGIN_TOP_PX);
             logBox.style.flex = "1";
             logBox.style.minHeight = scale(LOG_HEIGHT_PX);
-            var rightButtons = buttonRow.querySelectorAll("button");
-            for (var ri = 0; ri < rightButtons.length; ri++) {
-                rightButtons[ri].style.minWidth = "";
-                rightButtons[ri].style.minHeight = "";
-                rightButtons[ri].style.height = "";
-                rightButtons[ri].style.padding = scale(BUTTON_PADDING_PX);
-                rightButtons[ri].style.fontSize = scale(PANEL_FONT_SIZE_PX);
-                rightButtons[ri].style.lineHeight = "";
-                rightButtons[ri].style.whiteSpace = "";
-                rightButtons[ri].style.overflow = "";
-            }
         }
     }
 
@@ -55777,18 +57608,12 @@
             { el: toggleLogsBtn, id: "Hide Logs" }
         ];
 
-        var effectiveLayout = getEffectiveButtonLayout();
-        var sortedLayout = effectiveLayout.slice().sort(function(a, b) { return a.position - b.position; });
         var btnMap = {};
         for (var bi = 0; bi < panelButtons.length; bi++) {
             btnMap[panelButtons[bi].id] = panelButtons[bi].el;
             panelButtons[bi].el.setAttribute("data-feature-button", panelButtons[bi].id);
         }
-        for (var li = 0; li < sortedLayout.length; li++) {
-            if (sortedLayout[li].visible && btnMap[sortedLayout[li].id]) {
-                btnRow.appendChild(btnMap[sortedLayout[li].id]);
-            }
-        }
+        panelMenuMount(btnRow, btnMap);
 
         bodyContainer.appendChild(btnRow);
         var status = document.createElement("div");
@@ -56047,6 +57872,18 @@
             });
         }
 
+        // Keep the launcher beside the panel whenever the panel is resized, re-docked, shown, or hidden.
+        if (typeof ResizeObserver === "function" && !panel.__apsLauncherObserver) {
+            var launcherFrame = 0;
+            panel.__apsLauncherObserver = new ResizeObserver(function () {
+                if (launcherFrame) return;
+                launcherFrame = requestAnimationFrame(function () {
+                    launcherFrame = 0;
+                    updatePanelLauncherVisibility();
+                });
+            });
+            panel.__apsLauncherObserver.observe(panel);
+        }
         log("Panel ready");
         return panel;
     }
