@@ -24416,7 +24416,8 @@
         "Lock Activity Plans": true,
         "Update Study Status": true,
         "Lock Sample Paths": true,
-        "Add Cohort Subjects": true
+        "Add Cohort Subjects": true,
+        "Auto-Resaver": true
     };
 
     function isHiddenFeatureButton(id) {
@@ -24506,9 +24507,9 @@
     var PANEL_MENU_FALLBACK_GROUP = "misc";
     var PANEL_MENU_LABELS = {
         "Run ICF Consent": "Pull ICF Barcode",
-        "Activity Plan Removal": "Form Remover",
+        "Activity Plan Removal": "Remove Forms",
         "Archive/Update Forms": "Archive & Update Forms",
-        "Copy Activity Forms": "Forms Duplicator",
+        "Copy Activity Forms": "Duplicate Forms",
         "Copy A-Plan": "Copy Plan-to-Plan",
         "Import I/E": "Add Mapping",
         "Import From Library": "Import from Library",
@@ -24577,11 +24578,15 @@
         }
     }
 
-    // Returns a sanitized { version, groupOrder, itemOrder, groupColors } for this environment.
+    // Returns a sanitized { version, groupOrder, itemOrder, groupColors, hiddenGroups } for this environment.
     function panelMenuNormalizeConfig(raw) {
         var defaults = panelMenuDefaultItems();
         var groupIds = PANEL_MENU_GROUPS.map(function(g) { return g.id; });
-        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {} };
+        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {}, hiddenGroups: {} };
+        var hidden = raw && raw.hiddenGroups && typeof raw.hiddenGroups === "object" ? raw.hiddenGroups : {};
+        for (var hk in hidden) {
+            if (Object.prototype.hasOwnProperty.call(hidden, hk) && groupIds.indexOf(hk) !== -1 && hidden[hk] === true) cfg.hiddenGroups[hk] = true;
+        }
         var seen = {};
         var savedOrder = raw && Array.isArray(raw.groupOrder) ? raw.groupOrder : [];
         for (var i = 0; i < savedOrder.length; i++) {
@@ -24728,6 +24733,7 @@
         var font = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
         style.textContent = [
             "#" + PANEL_ID + " [data-aps-panel-menu='1'] { display:grid; grid-template-columns:repeat(auto-fill, minmax(128px, 1fr)); grid-auto-rows:minmax(36px, auto); gap:6px; align-content:start; }",
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] .aps-menu-none { grid-column:1 / -1; box-sizing:border-box; padding:10px 12px; border:1px dashed " + (glass ? "rgba(255,255,255,.4)" : "#44444f") + "; border-radius:8px; color:" + (glass ? "rgba(255,255,255,.85)" : "#a3a3b3") + "; font:italic 12px/1.45 " + font + "; text-align:center; }",
             P + " { all:unset; box-sizing:border-box !important; display:flex !important; align-items:center !important; gap:6px !important; width:100% !important; min-width:0 !important; min-height:36px !important; height:auto !important; padding:7px 10px !important; background:" + triggerBg + " !important; color:" + triggerInk + " !important; border:1px solid " + triggerBorder + " !important; border-radius:8px !important; font:600 12.5px/1.2 " + font + " !important; letter-spacing:.1px !important; cursor:pointer !important; user-select:none !important; transition:background .15s ease, border-color .15s ease, box-shadow .15s ease !important; box-shadow:none !important; }",
             P + ":hover { background:" + triggerHover + " !important; border-color:" + (glass ? "rgba(255,255,255,0.5)" : "#5f5a8e") + " !important; }",
             P + ":focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }",
@@ -24958,7 +24964,10 @@
         var glass = isGlassTheme();
         var groupById = {};
         for (var gi = 0; gi < PANEL_MENU_GROUPS.length; gi++) groupById[PANEL_MENU_GROUPS[gi].id] = PANEL_MENU_GROUPS[gi];
+        var mountedMenus = 0;
         for (var oi = 0; oi < cfg.groupOrder.length; oi++) {
+            if (cfg.hiddenGroups[cfg.groupOrder[oi]]) continue;
+            mountedMenus++;
             (function(group) {
                 var ids = (cfg.itemOrder[group.id] || []).filter(function(id) { return !!buttonMap[id]; });
                 var shown = ids.filter(function(id) { return visibility[id] !== false; });
@@ -25027,6 +25036,13 @@
                 btnRow.appendChild(trigger);
                 document.body.appendChild(popover);
             })(groupById[cfg.groupOrder[oi]]);
+        }
+        if (!mountedMenus) {
+            var none = document.createElement("div");
+            none.className = "aps-menu-none";
+            none.setAttribute("role", "note");
+            none.textContent = "All menus are hidden. Open \u2699 Settings to show them.";
+            btnRow.appendChild(none);
         }
     }
 
@@ -25180,7 +25196,7 @@
             { label: "Menus", desc: "Features are grouped into dropdown menus on the panel. Click a menu to open it, then click a button to run that feature. The menu closes by itself; Esc or a click elsewhere also closes it. If a menu has nothing to show, it says why when opened." },
             { label: "Show or hide the panel", desc: "Press " + hotkey + " or click the round lightning button to hide or show the panel. The \u2715 in the panel header also hides it. The lightning button always sits just outside the panel." },
             { label: "Dock and resize", desc: "The \u2194 / \u2195 button in the panel header switches between the right-side dock and the bottom dock. Drag the panel's inner edge to resize it; the size is remembered." },
-            { label: "Customize (\u2699 Settings)", desc: "Reorder the menus, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
+            { label: "Customize (\u2699 Settings)", desc: "Reorder the menus or hide ones you don't use, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
             { label: "Status and logs", desc: "The status line shows what the automator is doing right now, and the log below it records each step. Use Hide Logs and Clear Logs in the Misc. menu to manage it." },
             { label: "Stopping a run", desc: "Use Pause in the Misc. menu to stop a running automation. Many workflows also have their own Cancel button in their progress window." }
         ] });
@@ -25193,9 +25209,10 @@
         ] });
         sections.push({ id: "new", title: "What's New" + (version ? " in " + version : ""), kind: "cards", items: [
             { label: "Dropdown menus", desc: "Buttons are now organized into menus (Study Setup, Barcodes, Activity Plan, Eligibility, Library, Lab Panel, Tester/Coder, Misc.). Your hidden-button choices carried over." },
-            { label: "Renamed buttons", desc: "Some buttons have clearer names, for example Form Remover (was Activity Plan Removal), Forms Duplicator (was Copy Activity Forms), Copy Plan-to-Plan (was Copy A-Plan), and Add Mapping (was Import I/E). Search this guide by the old name to find them." },
+            { label: "Renamed buttons", desc: "Some buttons have clearer names, for example Remove Forms (was Activity Plan Removal), Duplicate Forms (was Copy Activity Forms), Copy Plan-to-Plan (was Copy A-Plan), and Add Mapping (was Import I/E). Search this guide by the old name to find them." },
             { label: "Smarter Copy Mapping", desc: "Cohort Type now copies correctly, and changing the Activity Plan re-selects the most similar Scheduled Activity, Check Item, and Lab Test, pausing for you only when nothing similar exists." },
-            { label: "New Settings layout", desc: "Separate sections for menus and buttons, pastel colors, one-click Randomize per menu, search and filters, and Reset layout." }
+            { label: "New Settings layout", desc: "Separate sections for menus and buttons, pastel colors, one-click Randomize per menu, search and filters, and Reset layout." },
+            { label: "Hide whole menus", desc: "Turn off any dropdown menu in Settings to remove it from the panel. Its buttons, order and colors are kept, so turning it back on restores it exactly." }
         ] });
         for (var gi = 0; gi < cfg.groupOrder.length; gi++) {
             var gid = cfg.groupOrder[gi];
@@ -25212,7 +25229,9 @@
                 if (oldName.toLowerCase() === label.toLowerCase()) oldName = "";
                 return { label: label, oldName: oldName, hidden: visibility[id] === false, desc: PANEL_MENU_HELP[id] || ("Runs the " + label + " workflow.") };
             });
-            sections.push({ id: "menu-" + gid, title: group.label, intro: ids.length ? "" : "No buttons in this menu are available in the " + envName + " environment.", kind: "cards", items: items, isMenu: true });
+            var menuIntro = ids.length ? "" : "No buttons in this menu are available in the " + envName + " environment.";
+            if (cfg.hiddenGroups[gid]) menuIntro = "This menu is hidden from the panel. Turn it back on in Settings under Dropdown Menus." + (menuIntro ? " " + menuIntro : "");
+            sections.push({ id: "menu-" + gid, title: group.label + (cfg.hiddenGroups[gid] ? " (hidden)" : ""), intro: menuIntro, kind: "cards", items: items, isMenu: true });
         }
 
         var overlay = document.createElement("div");
@@ -25654,6 +25673,8 @@
             "#clinspark-settings-modal .aps-chip-btn[aria-pressed='true'] { background:" + tc.tBtnActiveBg + "; border-color:" + tc.tBtnActiveBorder + "; }",
             "#clinspark-settings-modal .aps-group-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; align-items:start; }",
             "#clinspark-settings-modal .aps-group-card { background:" + tc.cardBg + "; border:1px solid " + tc.sectionBorder + "; border-radius:9px; padding:8px; min-width:0; }",
+            "#clinspark-settings-modal .aps-group-card[data-menu-hidden='1'] { border-style:dashed; }",
+            "#clinspark-settings-modal .aps-group-card[data-menu-hidden='1'] .aps-group-list { opacity:.6; }",
             "#clinspark-settings-modal .aps-group-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 4px 8px; }",
             "#clinspark-settings-modal .aps-group-title { color:#fff; font-size:12.5px; font-weight:700; }",
             "#clinspark-settings-modal .aps-group-list { display:flex; flex-direction:column; gap:4px; }",
@@ -25977,7 +25998,7 @@
 
         // === DROPDOWN MENUS ===
         var menuSection = section(false);
-        sectionTitle(menuSection, "Dropdown Menus", "Drag, or use the arrows, to set the order of the menus on the panel. Menus are always shown; a menu with no buttons shows a note when opened.");
+        sectionTitle(menuSection, "Dropdown Menus", "Drag, or use the arrows, to set the order of the menus on the panel. Turn a menu off to hide it from the panel; its buttons, order and colors are kept for when you turn it back on.");
         var menuList = document.createElement("div");
         menuList.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;";
         menuList.setAttribute("aria-label", "Dropdown menu order");
@@ -25991,17 +26012,27 @@
             renderMenus();
             checkDirty();
         }
+        function setMenuHidden(gid, hide) {
+            if (hide) pendingMenu.hiddenGroups[gid] = true; else delete pendingMenu.hiddenGroups[gid];
+            renderMenus();
+            renderButtons();
+            checkDirty();
+            var again = menuList.querySelector(".aps-set-row[data-id='" + gid + "']");
+            if (again) again.focus();
+        }
         function renderMenus() {
             menuList.innerHTML = "";
             pendingMenu.groupOrder.forEach(function(gid, idx) {
                 var ids = pendingMenu.itemOrder[gid] || [];
                 var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
+                var menuHidden = !!pendingMenu.hiddenGroups[gid];
                 var row = document.createElement("div");
                 row.className = "aps-set-row";
                 row.setAttribute("data-id", gid);
+                row.setAttribute("data-hidden", menuHidden ? "1" : "0");
                 row.setAttribute("draggable", "true");
                 row.setAttribute("tabindex", "0");
-                row.setAttribute("aria-label", groupLabel(gid) + ", position " + (idx + 1) + ". Alt plus arrow keys to move.");
+                row.setAttribute("aria-label", groupLabel(gid) + ", position " + (idx + 1) + (menuHidden ? ", hidden from the panel" : ", shown on the panel") + ". Alt plus arrow keys to move, Space to show or hide.");
                 var grip = document.createElement("span");
                 grip.className = "aps-set-grip";
                 grip.textContent = "\u2807";
@@ -26015,7 +26046,7 @@
                 name.textContent = groupLabel(gid);
                 var meta = document.createElement("span");
                 meta.className = "aps-set-meta";
-                meta.textContent = ids.length ? (shown + " of " + ids.length + " shown") : "No buttons here";
+                meta.textContent = menuHidden ? "Hidden from panel" : (ids.length ? (shown + " of " + ids.length + " shown") : "No buttons here");
                 var up = document.createElement("button");
                 up.type = "button";
                 up.className = "aps-set-icon-btn";
@@ -26035,8 +26066,19 @@
                     previewTrigger(gid);
                     checkDirty();
                 });
+                var menuToggle = document.createElement("button");
+                menuToggle.type = "button";
+                menuToggle.className = "aps-switch";
+                menuToggle.setAttribute("role", "switch");
+                menuToggle.setAttribute("data-menu-toggle", gid);
+                menuToggle.setAttribute("aria-checked", menuHidden ? "false" : "true");
+                menuToggle.setAttribute("aria-label", (menuHidden ? "Show " : "Hide ") + groupLabel(gid) + " menu on the panel");
+                menuToggle.title = menuHidden ? "Hidden from the panel - click to show" : "Shown on the panel - click to hide";
+                menuToggle.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+                menuToggle.onclick = function(e) { e.stopPropagation(); setMenuHidden(gid, !menuHidden); };
                 row.addEventListener("keydown", function(e) {
                     if (e.target !== row) return;
+                    if (e.key === " " || e.key === "Enter") { e.preventDefault(); setMenuHidden(gid, !menuHidden); return; }
                     keyboardReorder(e, pendingMenu.groupOrder, gid, setGroupOrder, ".aps-set-row[data-id='" + gid + "']");
                 });
                 row.appendChild(grip);
@@ -26046,6 +26088,7 @@
                 row.appendChild(swatch);
                 row.appendChild(up);
                 row.appendChild(down);
+                row.appendChild(menuToggle);
                 menuList.appendChild(row);
             });
         }
@@ -26184,6 +26227,14 @@
                 var title = document.createElement("span");
                 title.className = "aps-group-title";
                 title.textContent = groupLabel(gid);
+                if (pendingMenu.hiddenGroups[gid]) {
+                    card.setAttribute("data-menu-hidden", "1");
+                    var hiddenBadge = document.createElement("span");
+                    hiddenBadge.className = "aps-set-meta";
+                    hiddenBadge.textContent = " \u00B7 menu hidden";
+                    hiddenBadge.title = "This menu is hidden from the panel. Turn it on under Dropdown Menus.";
+                    title.appendChild(hiddenBadge);
+                }
                 var count = document.createElement("span");
                 count.className = "aps-set-meta";
                 var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
@@ -26329,15 +26380,17 @@
             if (lo.version === 2) {
                 var saved = lo.visibility && typeof lo.visibility === "object" ? lo.visibility : {};
                 for (var k in vis) if (Object.prototype.hasOwnProperty.call(saved, k)) vis[k] = saved[k] !== false;
-                menu = panelMenuNormalizeConfig(lo.menu);
+                var loMenu = lo.menu && typeof lo.menu === "object" ? clone(lo.menu) : {};
+                if (!loMenu.hiddenGroups) loMenu.hiddenGroups = clone(pendingMenu.hiddenGroups || {});
+                menu = panelMenuNormalizeConfig(loMenu);
                 colors = lo.colors || {};
             } else {
                 var layout = Array.isArray(lo.layout) ? lo.layout : [];
                 for (var li = 0; li < layout.length; li++) {
                     if (layout[li] && Object.prototype.hasOwnProperty.call(vis, layout[li].id)) vis[layout[li].id] = layout[li].visible !== false;
                 }
-                menu = panelMenuNormalizeConfig(null);
-                colors = {};
+                menu = panelMenuNormalizeConfig({ groupColors: pendingMenu.groupColors, hiddenGroups: pendingMenu.hiddenGroups });
+                colors = clone(pendingColors);
             }
             persistAll(vis, menu, colors);
             setActiveButtonLoadout(name);
@@ -26385,12 +26438,13 @@
         var resetBtn = document.createElement("button");
         resetBtn.type = "button";
         resetBtn.textContent = "Reset layout";
-        resetBtn.title = "Restore the default menu order, button order, and colors. Button visibility is not changed.";
+        resetBtn.title = "Restore the default menu order, button order, and colors. Menu and button visibility are not changed. In the Glassmorphism theme, colors are kept.";
         resetBtn.className = "aps-chip-btn";
         resetBtn.style.marginRight = "auto";
         resetBtn.onclick = function() {
-            pendingMenu = panelMenuNormalizeConfig(null);
-            pendingColors = {};
+            var keepColors = pendingTheme === THEME_MODE_GLASS;
+            pendingMenu = panelMenuNormalizeConfig({ hiddenGroups: pendingMenu.hiddenGroups, groupColors: keepColors ? pendingMenu.groupColors : {} });
+            if (!keepColors) pendingColors = {};
             renderMenus();
             renderButtons();
             checkDirty();

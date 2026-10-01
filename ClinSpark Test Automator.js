@@ -280,6 +280,7 @@
     const DATA_COLLECTION_SUBJECT_URL = "https://cenexeltest.clinspark.com/secure/datacollection/subject";
     var COLLECT_ALL_CANCELLED = false;
     var COLLECT_ALL_POPUP_REF = null;
+    var COLLECT_ALL_RUN_ID = 0;
     var RUN_ALL_POPUP_REF = null;
     var CLEAR_MAPPING_POPUP_REF = null;
     var IMPORT_ELIG_POPUP_REF = null;
@@ -7068,6 +7069,11 @@
         return null;
     }
 
+    function barcodeIconTooltip(icon) {
+        if (!icon) return "";
+        return icon.getAttribute(BARCODE_SELECTORS.tooltipAttr) || icon.getAttribute("title") || "";
+    }
+
     function announceBarcodeAriaLive(message) {
         if (!PULL_LAB_BARCODE_ARIA_LIVE_EL) {
             return;
@@ -7394,8 +7400,9 @@
         return popup;
     }
 
-    async function collectBarcodeIcons() {
+    async function collectBarcodeIcons(root) {
         log("[PullLabBarcode] collectBarcodeIcons: starting icon collection");
+        var scope = root || document;
         var attempts = 0;
         var maxAttempts = BARCODE_RETRY.collectRetries;
         var result = [];
@@ -7406,7 +7413,7 @@
                 return [];
             }
 
-            var presenceCheck = document.querySelectorAll(BARCODE_SELECTORS.presenceCheckAnyIcon);
+            var presenceCheck = scope.querySelectorAll(BARCODE_SELECTORS.presenceCheckAnyIcon);
             log("[PullLabBarcode] collectBarcodeIcons: attempt " + String(attempts + 1) + ", found " + String(presenceCheck.length) + " fa-barcode icons total");
 
             if (presenceCheck.length === 0) {
@@ -7420,7 +7427,7 @@
                 return [];
             }
 
-            var allIcons = document.querySelectorAll(BARCODE_SELECTORS.barcodeIcon);
+            var allIcons = scope.querySelectorAll(BARCODE_SELECTORS.barcodeIcon);
             log("[PullLabBarcode] collectBarcodeIcons: found " + String(allIcons.length) + " icons matching barcodeIcon selector");
 
             result = [];
@@ -7434,7 +7441,7 @@
 
                 var icon = allIcons[ci];
                 var isVerifiedByClass = icon.classList.contains(BARCODE_SELECTORS.verifiedClass);
-                var tooltip = icon.getAttribute(BARCODE_SELECTORS.tooltipAttr) || "";
+                var tooltip = barcodeIconTooltip(icon);
                 var isVerifiedByTooltip = BARCODE_REGEX.verifiedPrefix.test(tooltip);
 
                 if (isVerifiedByClass || isVerifiedByTooltip) {
@@ -7571,7 +7578,7 @@
         return false;
     }
 
-    async function openBarcodeModalAndFill(iconObj) {
+    async function openBarcodeModalAndFill(iconObj, options) {
         log("[PullLabBarcode] openBarcodeModalAndFill: starting for barcode='" + iconObj.barcode + "'");
         var attempts = 0;
         var maxAttempts = BARCODE_RETRY.fillConfirmRetries + 1;
@@ -7623,6 +7630,19 @@
                 if (!modalInput) { modalInput = document.querySelector(BARCODE_SELECTORS.modalInput); }
             }
 
+            // Inside Collect All an already-open prompt belongs to someone else (e.g. the subject
+            // barcode prompt), so wait for it to go away instead of typing a lab barcode into it.
+            if (existingModal && options && options.strictPrompt) {
+                log("[PullLabBarcode] openBarcodeModalAndFill: a prompt this feature did not open is showing; waiting for it to close");
+                var cleared = await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, 3000);
+                if (!cleared) {
+                    log("[PullLabBarcode] openBarcodeModalAndFill: other prompt still open; not touching it");
+                    return "blocked";
+                }
+                await sleep(BARCODE_TIMEOUTS.waitSettleMs);
+                existingModal = null;
+                modalInput = null;
+            }
             if (existingModal && modalInput) {
                 log("[PullLabBarcode] openBarcodeModalAndFill: existing open modal with input; using directly");
             } else {
@@ -7833,7 +7853,7 @@
         return false;
     }
 
-    async function processIconsSequentially(iconList) {
+    async function processIconsSequentially(iconList, options) {
         log("[PullLabBarcode] processIconsSequentially: starting with " + String(iconList.length) + " icons");
 
         setAriaBusyOn();
@@ -7911,7 +7931,7 @@
             }
 
             try {
-                var fillResult = await openBarcodeModalAndFill(iconObj);
+                var fillResult = await openBarcodeModalAndFill(iconObj, options);
 
                 if (PULL_LAB_BARCODE_STOPPED) {
                     updateBarcodeRightPanelStatus(iconObj.statusKey, BARCODE_LABELS.statusStopped);
@@ -7929,6 +7949,17 @@
                     continue;
                 }
 
+                if (fillResult === "blocked") {
+                    log("[PullLabBarcode] processIconsSequentially: another prompt was open for '" + iconObj.barcode + "'");
+                    updateBarcodeRightPanelStatus(iconObj.statusKey, BARCODE_LABELS.statusFailed, "another barcode prompt was open");
+                    BARCODE_COUNTERS.failures = BARCODE_COUNTERS.failures + 1;
+                    BARCODE_COUNTERS.processed = BARCODE_COUNTERS.processed + 1;
+                    BARCODE_COUNTERS.pending = BARCODE_COUNTERS.pending - 1;
+                    updateBarcodeRightPanelSummary(BARCODE_COUNTERS);
+                    await barcodeYieldToUI();
+                    idx = idx + 1;
+                    continue;
+                }
                 if (fillResult === "invalid_barcode") {
                     log("[PullLabBarcode] processIconsSequentially: invalid barcode for '" + iconObj.barcode + "'");
                     updateBarcodeRightPanelStatus(iconObj.statusKey, BARCODE_LABELS.statusInvalidBarcode);
@@ -7994,7 +8025,7 @@
         announceBarcodeAriaLive(completionMsg);
         updateBarcodeRightPanelSummary(BARCODE_COUNTERS);
 
-        if (PULL_LAB_BARCODE_BUTTON_REF) {
+        if (PULL_LAB_BARCODE_BUTTON_REF && !(options && options.restoreFocus === false)) {
             try {
                 PULL_LAB_BARCODE_BUTTON_REF.focus();
             } catch (focusErr) {}
@@ -18992,7 +19023,8 @@
         "Lock Activity Plans": true,
         "Update Study Status": true,
         "Lock Sample Paths": true,
-        "Add Cohort Subjects": true
+        "Add Cohort Subjects": true,
+        "Auto-Resaver": true
     };
 
     function isHiddenFeatureButton(id) {
@@ -19063,9 +19095,9 @@
     var PANEL_MENU_FALLBACK_GROUP = "misc";
     var PANEL_MENU_LABELS = {
         "Run ICF Consent": "Pull ICF Barcode",
-        "Activity Plan Removal": "Form Remover",
+        "Activity Plan Removal": "Remove Forms",
         "Archive/Update Forms": "Archive & Update Forms",
-        "Copy Activity Forms": "Forms Duplicator",
+        "Copy Activity Forms": "Duplicate Forms",
         "Copy A-Plan": "Copy Plan-to-Plan",
         "Import I/E": "Add Mapping",
         "Import From Library": "Import from Library",
@@ -19134,11 +19166,15 @@
         }
     }
 
-    // Returns a sanitized { version, groupOrder, itemOrder, groupColors } for this environment.
+    // Returns a sanitized { version, groupOrder, itemOrder, groupColors, hiddenGroups } for this environment.
     function panelMenuNormalizeConfig(raw) {
         var defaults = panelMenuDefaultItems();
         var groupIds = PANEL_MENU_GROUPS.map(function(g) { return g.id; });
-        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {} };
+        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {}, hiddenGroups: {} };
+        var hidden = raw && raw.hiddenGroups && typeof raw.hiddenGroups === "object" ? raw.hiddenGroups : {};
+        for (var hk in hidden) {
+            if (Object.prototype.hasOwnProperty.call(hidden, hk) && groupIds.indexOf(hk) !== -1 && hidden[hk] === true) cfg.hiddenGroups[hk] = true;
+        }
         var seen = {};
         var savedOrder = raw && Array.isArray(raw.groupOrder) ? raw.groupOrder : [];
         for (var i = 0; i < savedOrder.length; i++) {
@@ -19285,6 +19321,7 @@
         var font = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
         style.textContent = [
             "#" + PANEL_ID + " [data-aps-panel-menu='1'] { display:grid; grid-template-columns:repeat(auto-fill, minmax(128px, 1fr)); grid-auto-rows:minmax(36px, auto); gap:6px; align-content:start; }",
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] .aps-menu-none { grid-column:1 / -1; box-sizing:border-box; padding:10px 12px; border:1px dashed " + (glass ? "rgba(255,255,255,.4)" : "#44444f") + "; border-radius:8px; color:" + (glass ? "rgba(255,255,255,.85)" : "#a3a3b3") + "; font:italic 12px/1.45 " + font + "; text-align:center; }",
             P + " { all:unset; box-sizing:border-box !important; display:flex !important; align-items:center !important; gap:6px !important; width:100% !important; min-width:0 !important; min-height:36px !important; height:auto !important; padding:7px 10px !important; background:" + triggerBg + " !important; color:" + triggerInk + " !important; border:1px solid " + triggerBorder + " !important; border-radius:8px !important; font:600 12.5px/1.2 " + font + " !important; letter-spacing:.1px !important; cursor:pointer !important; user-select:none !important; transition:background .15s ease, border-color .15s ease, box-shadow .15s ease !important; box-shadow:none !important; }",
             P + ":hover { background:" + triggerHover + " !important; border-color:" + (glass ? "rgba(255,255,255,0.5)" : "#5f5a8e") + " !important; }",
             P + ":focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }",
@@ -19515,7 +19552,10 @@
         var glass = isGlassTheme();
         var groupById = {};
         for (var gi = 0; gi < PANEL_MENU_GROUPS.length; gi++) groupById[PANEL_MENU_GROUPS[gi].id] = PANEL_MENU_GROUPS[gi];
+        var mountedMenus = 0;
         for (var oi = 0; oi < cfg.groupOrder.length; oi++) {
+            if (cfg.hiddenGroups[cfg.groupOrder[oi]]) continue;
+            mountedMenus++;
             (function(group) {
                 var ids = (cfg.itemOrder[group.id] || []).filter(function(id) { return !!buttonMap[id]; });
                 var shown = ids.filter(function(id) { return visibility[id] !== false; });
@@ -19584,6 +19624,13 @@
                 btnRow.appendChild(trigger);
                 document.body.appendChild(popover);
             })(groupById[cfg.groupOrder[oi]]);
+        }
+        if (!mountedMenus) {
+            var none = document.createElement("div");
+            none.className = "aps-menu-none";
+            none.setAttribute("role", "note");
+            none.textContent = "All menus are hidden. Open \u2699 Settings to show them.";
+            btnRow.appendChild(none);
         }
     }
 
@@ -19719,7 +19766,7 @@
         "Edit Forms": "Batch edits form-library configuration: form name, description, usage flags, barcode verification, ICF requirement, lock state, and form usage. Includes full-screen mode, resizable panels, reset controls, and safe edit/lock sequencing.",
         "Lab Panels Builder": "Scans lab configure panels, builds new lab panels, copies lab tests, edits reference ranges, and applies add/remove/update changes with panel-scoped safety checks.",
         "Run Form": "Fills and submits a data collection form with configured in-range or out-of-range values, for testing and setup verification.",
-        "Collect All": "Processes the eligible data collection forms on the current page in sequence, pulling barcodes first when needed.",
+        "Collect All": "Processes the eligible data collection forms on the current page in sequence, pulling the subject barcode first when needed. If a form has lab barcodes marked Scan Required, it runs Pull Lab Barcode on that form before saving and shows the result under the form name.",
         "Search Methods": "Opens the method library that contains coded methods and edit checks.",
         "Formal Expression Editor": "Collects methods from the Method List page and opens a full-screen, code-editor style view for formal expressions. Saves drafts by method ID, compares edited and collected expressions, and batch-saves updated methods with one reason for change.",
         "Item Method Forms": "Finds the forms that contain a specific calculation method item and navigates to the relevant data pages for review.",
@@ -19759,7 +19806,7 @@
             { label: "Menus", desc: "Features are grouped into dropdown menus on the panel. Click a menu to open it, then click a button to run that feature. The menu closes by itself; Esc or a click elsewhere also closes it. If a menu has nothing to show, it says why when opened." },
             { label: "Show or hide the panel", desc: "Press " + hotkey + " or click the round lightning button to hide or show the panel. The \u2715 in the panel header also hides it. The lightning button always sits just outside the panel." },
             { label: "Dock and resize", desc: "The \u2194 / \u2195 button in the panel header switches between the right-side dock and the bottom dock. Drag the panel's inner edge to resize it; the size is remembered." },
-            { label: "Customize (\u2699 Settings)", desc: "Reorder the menus, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
+            { label: "Customize (\u2699 Settings)", desc: "Reorder the menus or hide ones you don't use, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
             { label: "Status and logs", desc: "The status line shows what the automator is doing right now, and the log below it records each step. Use Hide Logs and Clear Logs in the Misc. menu to manage it." },
             { label: "Stopping a run", desc: "Use Pause in the Misc. menu to stop a running automation. Many workflows also have their own Cancel button in their progress window." }
         ] });
@@ -19772,9 +19819,10 @@
         ] });
         sections.push({ id: "new", title: "What's New" + (version ? " in " + version : ""), kind: "cards", items: [
             { label: "Dropdown menus", desc: "Buttons are now organized into menus (Study Setup, Barcodes, Activity Plan, Eligibility, Library, Lab Panel, Tester/Coder, Misc.). Your hidden-button choices carried over." },
-            { label: "Renamed buttons", desc: "Some buttons have clearer names, for example Form Remover (was Activity Plan Removal), Forms Duplicator (was Copy Activity Forms), Copy Plan-to-Plan (was Copy A-Plan), and Add Mapping (was Import I/E). Search this guide by the old name to find them." },
+            { label: "Renamed buttons", desc: "Some buttons have clearer names, for example Remove Forms (was Activity Plan Removal), Duplicate Forms (was Copy Activity Forms), Copy Plan-to-Plan (was Copy A-Plan), and Add Mapping (was Import I/E). Search this guide by the old name to find them." },
             { label: "Smarter Copy Mapping", desc: "Cohort Type now copies correctly, and changing the Activity Plan re-selects the most similar Scheduled Activity, Check Item, and Lab Test, pausing for you only when nothing similar exists." },
-            { label: "New Settings layout", desc: "Separate sections for menus and buttons, pastel colors, one-click Randomize per menu, search and filters, and Reset layout." }
+            { label: "New Settings layout", desc: "Separate sections for menus and buttons, pastel colors, one-click Randomize per menu, search and filters, and Reset layout." },
+            { label: "Hide whole menus", desc: "Turn off any dropdown menu in Settings to remove it from the panel. Its buttons, order and colors are kept, so turning it back on restores it exactly." }
         ] });
         for (var gi = 0; gi < cfg.groupOrder.length; gi++) {
             var gid = cfg.groupOrder[gi];
@@ -19791,7 +19839,9 @@
                 if (oldName.toLowerCase() === label.toLowerCase()) oldName = "";
                 return { label: label, oldName: oldName, hidden: visibility[id] === false, desc: PANEL_MENU_HELP[id] || ("Runs the " + label + " workflow.") };
             });
-            sections.push({ id: "menu-" + gid, title: group.label, intro: ids.length ? "" : "No buttons in this menu are available in the " + envName + " environment.", kind: "cards", items: items, isMenu: true });
+            var menuIntro = ids.length ? "" : "No buttons in this menu are available in the " + envName + " environment.";
+            if (cfg.hiddenGroups[gid]) menuIntro = "This menu is hidden from the panel. Turn it back on in Settings under Dropdown Menus." + (menuIntro ? " " + menuIntro : "");
+            sections.push({ id: "menu-" + gid, title: group.label + (cfg.hiddenGroups[gid] ? " (hidden)" : ""), intro: menuIntro, kind: "cards", items: items, isMenu: true });
         }
 
         var overlay = document.createElement("div");
@@ -20172,6 +20222,8 @@
             "#clinspark-settings-modal .aps-chip-btn[aria-pressed='true'] { background:" + tc.tBtnActiveBg + "; border-color:" + tc.tBtnActiveBorder + "; }",
             "#clinspark-settings-modal .aps-group-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; align-items:start; }",
             "#clinspark-settings-modal .aps-group-card { background:" + tc.cardBg + "; border:1px solid " + tc.sectionBorder + "; border-radius:9px; padding:8px; min-width:0; }",
+            "#clinspark-settings-modal .aps-group-card[data-menu-hidden='1'] { border-style:dashed; }",
+            "#clinspark-settings-modal .aps-group-card[data-menu-hidden='1'] .aps-group-list { opacity:.6; }",
             "#clinspark-settings-modal .aps-group-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 4px 8px; }",
             "#clinspark-settings-modal .aps-group-title { color:#fff; font-size:12.5px; font-weight:700; }",
             "#clinspark-settings-modal .aps-group-list { display:flex; flex-direction:column; gap:4px; }",
@@ -20495,7 +20547,7 @@
 
         // === DROPDOWN MENUS ===
         var menuSection = section(false);
-        sectionTitle(menuSection, "Dropdown Menus", "Drag, or use the arrows, to set the order of the menus on the panel. Menus are always shown; a menu with no buttons shows a note when opened.");
+        sectionTitle(menuSection, "Dropdown Menus", "Drag, or use the arrows, to set the order of the menus on the panel. Turn a menu off to hide it from the panel; its buttons, order and colors are kept for when you turn it back on.");
         var menuList = document.createElement("div");
         menuList.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;";
         menuList.setAttribute("aria-label", "Dropdown menu order");
@@ -20509,17 +20561,27 @@
             renderMenus();
             checkDirty();
         }
+        function setMenuHidden(gid, hide) {
+            if (hide) pendingMenu.hiddenGroups[gid] = true; else delete pendingMenu.hiddenGroups[gid];
+            renderMenus();
+            renderButtons();
+            checkDirty();
+            var again = menuList.querySelector(".aps-set-row[data-id='" + gid + "']");
+            if (again) again.focus();
+        }
         function renderMenus() {
             menuList.innerHTML = "";
             pendingMenu.groupOrder.forEach(function(gid, idx) {
                 var ids = pendingMenu.itemOrder[gid] || [];
                 var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
+                var menuHidden = !!pendingMenu.hiddenGroups[gid];
                 var row = document.createElement("div");
                 row.className = "aps-set-row";
                 row.setAttribute("data-id", gid);
+                row.setAttribute("data-hidden", menuHidden ? "1" : "0");
                 row.setAttribute("draggable", "true");
                 row.setAttribute("tabindex", "0");
-                row.setAttribute("aria-label", groupLabel(gid) + ", position " + (idx + 1) + ". Alt plus arrow keys to move.");
+                row.setAttribute("aria-label", groupLabel(gid) + ", position " + (idx + 1) + (menuHidden ? ", hidden from the panel" : ", shown on the panel") + ". Alt plus arrow keys to move, Space to show or hide.");
                 var grip = document.createElement("span");
                 grip.className = "aps-set-grip";
                 grip.textContent = "\u2807";
@@ -20533,7 +20595,7 @@
                 name.textContent = groupLabel(gid);
                 var meta = document.createElement("span");
                 meta.className = "aps-set-meta";
-                meta.textContent = ids.length ? (shown + " of " + ids.length + " shown") : "No buttons here";
+                meta.textContent = menuHidden ? "Hidden from panel" : (ids.length ? (shown + " of " + ids.length + " shown") : "No buttons here");
                 var up = document.createElement("button");
                 up.type = "button";
                 up.className = "aps-set-icon-btn";
@@ -20553,8 +20615,19 @@
                     previewTrigger(gid);
                     checkDirty();
                 });
+                var menuToggle = document.createElement("button");
+                menuToggle.type = "button";
+                menuToggle.className = "aps-switch";
+                menuToggle.setAttribute("role", "switch");
+                menuToggle.setAttribute("data-menu-toggle", gid);
+                menuToggle.setAttribute("aria-checked", menuHidden ? "false" : "true");
+                menuToggle.setAttribute("aria-label", (menuHidden ? "Show " : "Hide ") + groupLabel(gid) + " menu on the panel");
+                menuToggle.title = menuHidden ? "Hidden from the panel - click to show" : "Shown on the panel - click to hide";
+                menuToggle.addEventListener("mousedown", function(e) { e.stopPropagation(); });
+                menuToggle.onclick = function(e) { e.stopPropagation(); setMenuHidden(gid, !menuHidden); };
                 row.addEventListener("keydown", function(e) {
                     if (e.target !== row) return;
+                    if (e.key === " " || e.key === "Enter") { e.preventDefault(); setMenuHidden(gid, !menuHidden); return; }
                     keyboardReorder(e, pendingMenu.groupOrder, gid, setGroupOrder, ".aps-set-row[data-id='" + gid + "']");
                 });
                 row.appendChild(grip);
@@ -20564,6 +20637,7 @@
                 row.appendChild(swatch);
                 row.appendChild(up);
                 row.appendChild(down);
+                row.appendChild(menuToggle);
                 menuList.appendChild(row);
             });
         }
@@ -20702,6 +20776,14 @@
                 var title = document.createElement("span");
                 title.className = "aps-group-title";
                 title.textContent = groupLabel(gid);
+                if (pendingMenu.hiddenGroups[gid]) {
+                    card.setAttribute("data-menu-hidden", "1");
+                    var hiddenBadge = document.createElement("span");
+                    hiddenBadge.className = "aps-set-meta";
+                    hiddenBadge.textContent = " \u00B7 menu hidden";
+                    hiddenBadge.title = "This menu is hidden from the panel. Turn it on under Dropdown Menus.";
+                    title.appendChild(hiddenBadge);
+                }
                 var count = document.createElement("span");
                 count.className = "aps-set-meta";
                 var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
@@ -20847,15 +20929,17 @@
             if (lo.version === 2) {
                 var saved = lo.visibility && typeof lo.visibility === "object" ? lo.visibility : {};
                 for (var k in vis) if (Object.prototype.hasOwnProperty.call(saved, k)) vis[k] = saved[k] !== false;
-                menu = panelMenuNormalizeConfig(lo.menu);
+                var loMenu = lo.menu && typeof lo.menu === "object" ? clone(lo.menu) : {};
+                if (!loMenu.hiddenGroups) loMenu.hiddenGroups = clone(pendingMenu.hiddenGroups || {});
+                menu = panelMenuNormalizeConfig(loMenu);
                 colors = lo.colors || {};
             } else {
                 var layout = Array.isArray(lo.layout) ? lo.layout : [];
                 for (var li = 0; li < layout.length; li++) {
                     if (layout[li] && Object.prototype.hasOwnProperty.call(vis, layout[li].id)) vis[layout[li].id] = layout[li].visible !== false;
                 }
-                menu = panelMenuNormalizeConfig(null);
-                colors = {};
+                menu = panelMenuNormalizeConfig({ groupColors: pendingMenu.groupColors, hiddenGroups: pendingMenu.hiddenGroups });
+                colors = clone(pendingColors);
             }
             persistAll(vis, menu, colors);
             setActiveButtonLoadout(name);
@@ -20903,12 +20987,13 @@
         var resetBtn = document.createElement("button");
         resetBtn.type = "button";
         resetBtn.textContent = "Reset layout";
-        resetBtn.title = "Restore the default menu order, button order, and colors. Button visibility is not changed.";
+        resetBtn.title = "Restore the default menu order, button order, and colors. Menu and button visibility are not changed. In the Glassmorphism theme, colors are kept.";
         resetBtn.className = "aps-chip-btn";
         resetBtn.style.marginRight = "auto";
         resetBtn.onclick = function() {
-            pendingMenu = panelMenuNormalizeConfig(null);
-            pendingColors = {};
+            var keepColors = pendingTheme === THEME_MODE_GLASS;
+            pendingMenu = panelMenuNormalizeConfig({ hiddenGroups: pendingMenu.hiddenGroups, groupColors: keepColors ? pendingMenu.groupColors : {} });
+            if (!keepColors) pendingColors = {};
             renderMenus();
             renderButtons();
             checkDirty();
@@ -36956,25 +37041,45 @@
         return true;
     }
 
-    function collectAllHasReadyFormModal() {
-        var formEl = document.querySelector("form#modalInput");
-        if (!formEl) return false;
-        var hasGroup = !!formEl.querySelector("div[id^='itemGroupData_'], table[id^='collectTable_'], tr[id^='itemDataCollectRow_']");
-        var hasSave = !!document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
-        return hasGroup || hasSave;
+    function collectAllIsRendered(el) {
+        if (!el || !el.isConnected || !el.getClientRects().length) return false;
+        var st = window.getComputedStyle(el);
+        return st.display !== "none" && st.visibility !== "hidden";
     }
 
+    // The subject barcode check on a freshly collected form. While it shows, the form body
+    // (including any lab barcode icons) is in the page but hidden.
+    function collectAllSubjectBarcodeGateOpen() {
+        return collectAllIsRendered(document.getElementById("requireSubjectBarcodeVerifyDiv"));
+    }
+
+    function collectAllBarcodePromptOpen() {
+        var box = document.querySelector(BARCODE_SELECTORS.bootboxVisibleModal);
+        return !!(box && box.querySelector(BARCODE_SELECTORS.modalInput));
+    }
+
+    function collectAllHasReadyFormModal() {
+        if (collectAllSubjectBarcodeGateOpen() || collectAllBarcodePromptOpen()) return false;
+        var formEl = document.querySelector("form#modalInput");
+        if (!formEl) return false;
+        var parts = formEl.querySelectorAll("div[id^='itemGroupData_'], table[id^='collectTable_'], tr[id^='itemDataCollectRow_']");
+        for (var i = 0; i < parts.length; i++) {
+            if (collectAllIsRendered(parts[i])) return true;
+        }
+        var save = document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
+        return collectAllIsRendered(save);
+    }
+
+    // Resolves { ok, reason }. The subject barcode check is cleared first; only then is the
+    // form treated as open, so nothing else (Run Form, Pull Lab Barcode) sees the hidden form.
     async function waitForCollectAllFormReady(timeoutMs) {
         var max = typeof timeoutMs === "number" ? timeoutMs : 15000;
         var start = Date.now();
         var lastLogAt = 0;
+        var subjectBarcodeTries = 0;
+        var maxSubjectBarcodeTries = 2;
         while (Date.now() - start < max) {
-            if (COLLECT_ALL_CANCELLED || isPaused()) return false;
-
-            if (collectAllHasReadyFormModal()) {
-                log("CollectAll: form modal ready after Collect click");
-                return true;
-            }
+            if (COLLECT_ALL_CANCELLED || isPaused()) return { ok: false, reason: "stopped" };
 
             var formOrderDiv = document.getElementById("requireFormOrderDiv");
             if (formOrderDiv && isFormOrderModalVisible()) {
@@ -36984,13 +37089,22 @@
                 continue;
             }
 
-            var barcodeDiv = document.getElementById("requireSubjectBarcodeVerifyDiv");
-            if (barcodeDiv && isBarcodeVerifyModalVisible()) {
-                log("CollectAll: delayed barcode modal detected while waiting for form");
+            if (collectAllSubjectBarcodeGateOpen() || collectAllBarcodePromptOpen()) {
+                if (subjectBarcodeTries >= maxSubjectBarcodeTries) {
+                    log("CollectAll: subject barcode still required after " + String(subjectBarcodeTries) + " attempt(s)");
+                    return { ok: false, reason: "subject barcode not accepted" };
+                }
+                subjectBarcodeTries = subjectBarcodeTries + 1;
+                log("CollectAll: subject barcode required before the form opens; running Pull Barcode (attempt " + String(subjectBarcodeTries) + ")");
                 await APS_RunBarcode();
-                await waitForAnyModalToClose(5000);
-                await sleep(300);
+                await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, 5000);
+                await sleep(400);
                 continue;
+            }
+
+            if (collectAllHasReadyFormModal()) {
+                log("CollectAll: form modal ready after Collect click");
+                return { ok: true, reason: "" };
             }
 
             var elapsed = Date.now() - start;
@@ -37001,7 +37115,7 @@
             await sleep(250);
         }
         log("CollectAll: form modal did not become ready after Collect click within " + String(max) + "ms");
-        return false;
+        return { ok: false, reason: "form did not open" };
     }
 
     // Await modal close: waits until no visible Bootstrap modal or backdrop remains or timeout.
@@ -37623,6 +37737,132 @@
     }
 
 
+    function collectAllFormRoot() {
+        var form = document.querySelector("#ajaxModal form#modalInput") || document.querySelector("form#modalInput");
+        if (!form) return null;
+        return form.closest(".modal") || form;
+    }
+
+    // Lab barcode icons in the open form that still say "Scan Required" (visible rows only, not yet attempted this form).
+    function collectAllPendingLabBarcodes(root, attempted) {
+        var pending = [];
+        if (!root) return pending;
+        var icons = root.querySelectorAll(BARCODE_SELECTORS.barcodeIcon);
+        for (var i = 0; i < icons.length; i++) {
+            var icon = icons[i];
+            var tip = barcodeIconTooltip(icon);
+            if (icon.classList.contains(BARCODE_SELECTORS.verifiedClass) || BARCODE_REGEX.verifiedPrefix.test(tip)) continue;
+            if (!BARCODE_REGEX.requiredPrefix.test(tip)) continue;
+            if (!collectAllIsRendered(icon)) continue;
+            var m = BARCODE_REGEX.barcodeClassToken.exec(String(icon.className || ""));
+            var code = m && m[1] ? m[1] : "";
+            if (code && attempted && attempted[code]) continue;
+            pending.push(code);
+        }
+        return pending;
+    }
+
+    // Runs Pull Lab Barcode without its own popup against the open form. The manual feature's
+    // panel refs and counters are parked and restored so an open Pull Lab Barcode window is untouched.
+    async function collectAllRunLabBarcodes(root, attempted, isStopped) {
+        var result = { total: 0, verified: 0, skipped: 0, failures: 0, stopped: false, busy: false, error: "" };
+        if (collectAllSubjectBarcodeGateOpen() || collectAllBarcodePromptOpen()) {
+            log("CollectAll: a barcode prompt is still open; leaving lab barcodes alone");
+            result.busy = true;
+            return result;
+        }
+        if (PULL_LAB_BARCODE_RUNNING) {
+            log("CollectAll: Pull Lab Barcode is already running; leaving lab barcodes for this form");
+            result.busy = true;
+            return result;
+        }
+        var parked = {
+            left: PULL_LAB_BARCODE_LEFT_LIST_EL,
+            right: PULL_LAB_BARCODE_RIGHT_LIST_EL,
+            summary: PULL_LAB_BARCODE_SUMMARY_EL,
+            aria: PULL_LAB_BARCODE_ARIA_LIVE_EL,
+            statusMap: PULL_LAB_BARCODE_STATUS_MAP,
+            counters: Object.assign({}, BARCODE_COUNTERS)
+        };
+        PULL_LAB_BARCODE_LEFT_LIST_EL = null;
+        PULL_LAB_BARCODE_RIGHT_LIST_EL = null;
+        PULL_LAB_BARCODE_SUMMARY_EL = null;
+        PULL_LAB_BARCODE_ARIA_LIVE_EL = null;
+        PULL_LAB_BARCODE_STATUS_MAP = {};
+        PULL_LAB_BARCODE_STOPPED = false;
+        PULL_LAB_BARCODE_RUNNING = true;
+        BARCODE_COUNTERS.total = 0;
+        BARCODE_COUNTERS.processed = 0;
+        BARCODE_COUNTERS.verified = 0;
+        BARCODE_COUNTERS.skipped = 0;
+        BARCODE_COUNTERS.failures = 0;
+        BARCODE_COUNTERS.pending = 0;
+        var watch = setInterval(function () {
+            if (isStopped()) PULL_LAB_BARCODE_STOPPED = true;
+        }, 250);
+        try {
+            var icons = await collectBarcodeIcons(root);
+            icons = icons.filter(function (it) { return collectAllIsRendered(it.el) && !(attempted && attempted[it.barcode]); });
+            icons.forEach(function (it) { if (attempted) attempted[it.barcode] = true; });
+            if (icons.length && !PULL_LAB_BARCODE_STOPPED) {
+                await processIconsSequentially(icons, { restoreFocus: false, strictPrompt: true });
+            }
+            result.total = icons.length;
+            result.verified = BARCODE_COUNTERS.verified;
+            result.skipped = BARCODE_COUNTERS.skipped;
+            result.failures = BARCODE_COUNTERS.failures;
+        } catch (err) {
+            result.error = String(err && err.message ? err.message : err);
+            log("CollectAll: lab barcode step failed - " + result.error);
+        } finally {
+            clearInterval(watch);
+            result.stopped = PULL_LAB_BARCODE_STOPPED;
+            if (PULL_LAB_BARCODE_STOPPED) {
+                try {
+                    var openBox = document.querySelector(BARCODE_SELECTORS.bootboxVisibleModal);
+                    var dismiss = openBox && openBox.querySelector(".bootbox-close-button, button[data-dismiss='modal']");
+                    if (dismiss) dismiss.click();
+                } catch (e) {}
+            }
+            PULL_LAB_BARCODE_RUNNING = false;
+            PULL_LAB_BARCODE_STOPPED = false;
+            setAriaBusyOff();
+            PULL_LAB_BARCODE_LEFT_LIST_EL = parked.left;
+            PULL_LAB_BARCODE_RIGHT_LIST_EL = parked.right;
+            PULL_LAB_BARCODE_SUMMARY_EL = parked.summary;
+            PULL_LAB_BARCODE_ARIA_LIVE_EL = parked.aria;
+            PULL_LAB_BARCODE_STATUS_MAP = parked.statusMap;
+            Object.assign(BARCODE_COUNTERS, parked.counters);
+        }
+        return result;
+    }
+
+    function collectAllMergeLabResults(a, b) {
+        if (!a) return b;
+        if (!b) return a;
+        return {
+            total: a.total + b.total,
+            verified: a.verified + b.verified,
+            skipped: a.skipped + b.skipped,
+            failures: a.failures + b.failures,
+            stopped: a.stopped || b.stopped,
+            busy: a.busy || b.busy,
+            error: a.error || b.error
+        };
+    }
+
+    function collectAllLabBarcodeNote(res) {
+        if (!res) return null;
+        if (res.error) return { text: "Lab barcodes: error (" + res.error + ")", tone: "bad" };
+        if (res.busy && !res.total) return { text: "Lab barcodes skipped: another barcode step was still running", tone: "warn" };
+        if (!res.total) return null;
+        var parts = [String(res.verified) + "/" + String(res.total) + " verified"];
+        if (res.skipped) parts.push(String(res.skipped) + " already verified");
+        if (res.failures) parts.push(String(res.failures) + " failed");
+        if (res.stopped) parts.push("stopped");
+        return { text: "Lab barcodes: " + parts.join(", "), tone: res.failures || res.stopped ? "warn" : "ok" };
+    }
+
     // Main "Collect All" feature that combines Run Barcode (if needed) + Run Form (IR) for each first row repeatedly.
     async function runCollectAll(formValueMode) {
         if (!formValueMode) { formValueMode = "randomIr"; }
@@ -37631,6 +37871,10 @@
         // Clear any previous data and reset cancellation flag
         clearCollectAllData();
         COLLECT_ALL_CANCELLED = false;
+        var runId = ++COLLECT_ALL_RUN_ID;
+        function collectAllStopRequested() {
+            return COLLECT_ALL_CANCELLED || runId !== COLLECT_ALL_RUN_ID || isPaused();
+        }
 
         var onPage = isDataCollectionSubjectPage();
         if (!onPage) {
@@ -37724,7 +37968,7 @@
         }, 500);
 
         // Function to add a form to the list
-        function addFormToList(formName, formStatus, formId) {
+        function addFormToList(formName, formStatus, formId, note) {
             var listItem = document.createElement("div");
             listItem.style.display = "flex";
             listItem.style.justifyContent = "space-between";
@@ -37738,6 +37982,17 @@
             nameSpan.textContent = formName || "Unknown Form";
             nameSpan.style.color = "#fff";
             nameSpan.style.flex = "1";
+            nameSpan.style.minWidth = "0";
+            if (note && note.text) {
+                var noteDiv = document.createElement("div");
+                noteDiv.setAttribute("data-collect-all-note", note.tone || "ok");
+                noteDiv.textContent = note.text;
+                noteDiv.style.fontSize = "11px";
+                noteDiv.style.marginTop = "2px";
+                noteDiv.style.color = note.tone === "bad" ? "#ff9a9a" : (note.tone === "warn" ? "#f0c674" : "#8fd19e");
+                nameSpan.style.display = "block";
+                nameSpan.appendChild(noteDiv);
+            }
 
             var statusSpan = document.createElement("span");
             statusSpan.textContent = formStatus || "Unknown";
@@ -37761,7 +38016,7 @@
         var safetyMax = 1000;
 
         while (safety < safetyMax) {
-            if (COLLECT_ALL_CANCELLED) {
+            if (COLLECT_ALL_CANCELLED || runId !== COLLECT_ALL_RUN_ID) {
                 log("CollectAll: cancelled; stopping run");
                 try {
                     clearInterval(animTimer);
@@ -37869,7 +38124,7 @@
             if (barcodeVisible) {
                 log("CollectAll: barcode required; executing Run Barcode feature");
                 await APS_RunBarcode();
-                var okClosed = await waitForAnyModalToClose(3000);
+                var okClosed = await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, 3000);
                 if (okClosed) {
                     log("CollectAll: barcode modal flow appears closed");
                 } else {
@@ -37900,10 +38155,14 @@
             }
 
             var formReady = await waitForCollectAllFormReady(18000);
-            if (!formReady) {
-                log("CollectAll: skipping Run Form because form modal never became ready for formId=" + String(pickedFormId));
+            if (!formReady.ok) {
+                if (formReady.reason === "stopped") {
+                    safety = safety + 1;
+                    continue;
+                }
+                log("CollectAll: skipping Run Form for formId=" + String(pickedFormId) + " (" + formReady.reason + ")");
                 cleanupCollectAllModalArtifacts();
-                addFormToList(formName, "Skipped - form did not open", pickedFormId);
+                addFormToList(formName, "Skipped - " + formReady.reason, pickedFormId);
                 await waitForFormTableRefresh(1000);
                 await ensureCollectAllStudyEventFilter(studyEventFilterState, "skipped form");
                 await sleep(250);
@@ -37911,10 +38170,41 @@
                 continue;
             }
 
+            var labAttempted = {};
+            var labResult = null;
+            var labRoot = collectAllFormRoot();
+            var labPending = collectAllPendingLabBarcodes(labRoot, labAttempted);
+            if (labPending.length > 0) {
+                log("CollectAll: " + String(labPending.length) + " lab barcode(s) need scanning; running Pull Lab Barcode for formId=" + String(pickedFormId));
+                labResult = await collectAllRunLabBarcodes(labRoot, labAttempted, collectAllStopRequested);
+            }
+            if (collectAllStopRequested()) {
+                log("CollectAll: stop requested during lab barcodes; leaving formId=" + String(pickedFormId) + " unsaved");
+                safety = safety + 1;
+                continue;
+            }
+
             log("CollectAll: launching Run Form (" + String(formValueMode) + ") for formId=" + String(pickedFormId));
             RUN_FORM_V2_START_TS = Date.now();
             setFormValueMode(formValueMode);
-            await runFormAutomationV2();
+            await runFormAutomationV2({
+                // Answers can reveal more lab barcode rows; scan those before the form is saved.
+                beforeSave: async function () {
+                    if (collectAllStopRequested()) return false;
+                    var lateRoot = collectAllFormRoot();
+                    var latePending = collectAllPendingLabBarcodes(lateRoot, labAttempted);
+                    if (latePending.length > 0) {
+                        log("CollectAll: " + String(latePending.length) + " more lab barcode(s) appeared after filling; running Pull Lab Barcode before Save");
+                        labResult = collectAllMergeLabResults(labResult, await collectAllRunLabBarcodes(lateRoot, labAttempted, collectAllStopRequested));
+                    }
+                    return !collectAllStopRequested();
+                }
+            });
+            if (collectAllStopRequested()) {
+                log("CollectAll: stop requested before Save; leaving formId=" + String(pickedFormId) + " open");
+                safety = safety + 1;
+                continue;
+            }
 
             var openModalAfterRun = document.querySelector(".modal.in, .modal.show");
             if (!openModalAfterRun) {
@@ -37948,7 +38238,7 @@
             cleanupCollectAllModalArtifacts();
 
             // Add form to list after collection
-            addFormToList(formName, formStatus, pickedFormId);
+            addFormToList(formName, formStatus, pickedFormId, collectAllLabBarcodeNote(labResult));
 
             await waitForFormTableRefresh(1000);
             await ensureCollectAllStudyEventFilter(studyEventFilterState, "collecting " + String(formName || pickedFormId));
@@ -47835,7 +48125,8 @@
 
 
     // Run Form V2 orchestration:
-    async function runFormAutomationV2() {
+    // options.beforeSave: optional async hook run after all groups are filled and before Save; returning false skips the save.
+    async function runFormAutomationV2(options) {
         if (isPaused()) {
             log("Run Form V2: paused; skipping start");
             return;
@@ -47867,6 +48158,19 @@
             processedGroups[gid] = true;
             await sleep(DELAY_V2_GROUP_RESCAN_MS);
             safety = safety + 1;
+        }
+        if (options && typeof options.beforeSave === "function") {
+            var proceedToSave = true;
+            try {
+                proceedToSave = (await options.beforeSave()) !== false;
+            } catch (hookErr) {
+                log("Run Form V2: beforeSave step failed - " + String(hookErr));
+            }
+            if (!proceedToSave) {
+                log("Run Form V2: save skipped; form left open");
+                RUN_FORM_V2_START_TS = 0;
+                return;
+            }
         }
         var finalBtn = document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
         if (finalBtn) {
@@ -56602,8 +56906,8 @@
     }
 
     // Clear all Collect All related data
+    // Leaves COLLECT_ALL_CANCELLED alone: close/pause set it right before calling this, and a new run resets it itself.
     function clearCollectAllData() {
-        COLLECT_ALL_CANCELLED = false;
         COLLECT_ALL_POPUP_REF = null;
         log("CollectAll: data cleared");
     }
