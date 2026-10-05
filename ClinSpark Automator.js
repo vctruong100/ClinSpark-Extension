@@ -24486,8 +24486,8 @@
     //==========================
     // PANEL MENU (dropdown groups)
     //==========================
-    // The main panel groups feature buttons into dropdown menus. Group membership is fixed;
-    // users can reorder menus, reorder buttons inside a menu, hide buttons, and pick colors.
+    // The main panel groups feature buttons into dropdown menus. Group membership remains
+    // the default, but users can place any button in the standalone panel row as well.
     // Button ids are the historical feature-button ids, so saved visibility carries over.
     //==========================
     var STORAGE_PANEL_MENU = "activityPlanState.panelMenu";
@@ -24578,11 +24578,13 @@
         }
     }
 
-    // Returns a sanitized { version, groupOrder, itemOrder, groupColors, hiddenGroups } for this environment.
+    // Returns a sanitized { version, groupOrder, itemOrder, groupColors, hiddenGroups,
+    // buttonPlacement, standaloneOrder, panelOrder } for this environment.
     function panelMenuNormalizeConfig(raw) {
         var defaults = panelMenuDefaultItems();
         var groupIds = PANEL_MENU_GROUPS.map(function(g) { return g.id; });
-        var cfg = { version: 1, groupOrder: [], itemOrder: {}, groupColors: {}, hiddenGroups: {} };
+        var available = panelMenuAvailableIds();
+        var cfg = { version: 3, groupOrder: [], itemOrder: {}, groupColors: {}, hiddenGroups: {}, buttonPlacement: {}, standaloneOrder: [], panelOrder: [] };
         var hidden = raw && raw.hiddenGroups && typeof raw.hiddenGroups === "object" ? raw.hiddenGroups : {};
         for (var hk in hidden) {
             if (Object.prototype.hasOwnProperty.call(hidden, hk) && groupIds.indexOf(hk) !== -1 && hidden[hk] === true) cfg.hiddenGroups[hk] = true;
@@ -24620,6 +24622,59 @@
         for (var ck in colors) {
             if (Object.prototype.hasOwnProperty.call(colors, ck) && groupIds.indexOf(ck) !== -1 && panelMenuIsHexColor(colors[ck])) {
                 cfg.groupColors[ck] = colors[ck];
+            }
+        }
+        var placement = raw && raw.buttonPlacement && typeof raw.buttonPlacement === "object" ? raw.buttonPlacement : {};
+        for (var pk in placement) {
+            if (Object.prototype.hasOwnProperty.call(placement, pk) && available[pk] && placement[pk] === "standalone") {
+                cfg.buttonPlacement[pk] = "standalone";
+            }
+        }
+        var standaloneSeen = {};
+        var savedStandalone = raw && Array.isArray(raw.standaloneOrder) ? raw.standaloneOrder : [];
+        for (var so = 0; so < savedStandalone.length; so++) {
+            var standaloneId = savedStandalone[so];
+            if (available[standaloneId] && cfg.buttonPlacement[standaloneId] === "standalone" && !standaloneSeen[standaloneId]) {
+                cfg.standaloneOrder.push(standaloneId);
+                standaloneSeen[standaloneId] = true;
+            }
+        }
+        for (var sd = 0; sd < PANEL_BUTTON_DEFS.length; sd++) {
+            var defaultStandaloneId = PANEL_BUTTON_DEFS[sd].id;
+            if (cfg.buttonPlacement[defaultStandaloneId] === "standalone" && !standaloneSeen[defaultStandaloneId]) {
+                cfg.standaloneOrder.push(defaultStandaloneId);
+                standaloneSeen[defaultStandaloneId] = true;
+            }
+        }
+        var panelOrderSeen = {};
+        var savedPanelOrder = raw && Array.isArray(raw.panelOrder) ? raw.panelOrder : [];
+        for (var po = 0; po < savedPanelOrder.length; po++) {
+            var token = String(savedPanelOrder[po] || "");
+            var validToken = false;
+            if (token.indexOf("menu:") === 0) {
+                var menuId = token.substring(5);
+                validToken = groupIds.indexOf(menuId) !== -1;
+            } else if (token.indexOf("button:") === 0) {
+                var buttonId = token.substring(7);
+                validToken = available[buttonId] && cfg.buttonPlacement[buttonId] === "standalone";
+            }
+            if (validToken && !panelOrderSeen[token]) {
+                cfg.panelOrder.push(token);
+                panelOrderSeen[token] = true;
+            }
+        }
+        for (var pm = 0; pm < cfg.groupOrder.length; pm++) {
+            var menuToken = "menu:" + cfg.groupOrder[pm];
+            if (!panelOrderSeen[menuToken]) {
+                cfg.panelOrder.push(menuToken);
+                panelOrderSeen[menuToken] = true;
+            }
+        }
+        for (var pb = 0; pb < cfg.standaloneOrder.length; pb++) {
+            var buttonToken = "button:" + cfg.standaloneOrder[pb];
+            if (!panelOrderSeen[buttonToken]) {
+                cfg.panelOrder.push(buttonToken);
+                panelOrderSeen[buttonToken] = true;
             }
         }
         return cfg;
@@ -24752,7 +24807,10 @@
             ".aps-menu-popover button.aps-menu-item:hover, .aps-menu-popover button.aps-menu-item:focus-visible { background:" + itemHover + " !important; }",
             ".aps-menu-popover button.aps-menu-item:focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }",
             ".aps-menu-popover button.aps-menu-item:disabled { opacity:.55 !important; cursor:not-allowed !important; }",
-            ".aps-menu-popover .aps-menu-empty { padding:10px 14px; color:" + (glass ? "rgba(255,255,255,.8)" : "#a3a3b3") + "; font:italic 12px/1.45 " + font + "; border:1px dashed " + (glass ? "rgba(255,255,255,.35)" : "#3f3f4c") + "; border-radius:7px; }"
+            ".aps-menu-popover .aps-menu-empty { padding:10px 14px; color:" + (glass ? "rgba(255,255,255,.8)" : "#a3a3b3") + "; font:italic 12px/1.45 " + font + "; border:1px dashed " + (glass ? "rgba(255,255,255,.35)" : "#3f3f4c") + "; border-radius:7px; }",
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] button.aps-standalone-item { all:unset; box-sizing:border-box !important; display:flex !important; align-items:center !important; justify-content:center !important; width:100% !important; min-width:0 !important; min-height:36px !important; height:auto !important; padding:7px 10px !important; background:" + (glass ? THEME_GRADIENT_BG : "var(--aps-fill, " + PANEL_MENU_DEFAULT_ITEM_COLOR + ")") + " !important; color:" + (glass ? "#fff" : "var(--aps-ink, #f5f5f7)") + " !important; border:1px solid rgba(255,255,255,.1) !important; border-radius:8px !important; font:600 12.5px/1.2 " + font + " !important; cursor:pointer !important; user-select:none !important; transition:background .12s ease, border-color .12s ease !important; }",
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] button.aps-standalone-item:hover { background:" + (glass ? "linear-gradient(135deg, #7b8ff0 0%, #8b5bb8 100%)" : "var(--aps-fill-hover, #3a3a45)") + " !important; border-color:" + (glass ? "rgba(255,255,255,.5)" : "#5f5a8e") + " !important; }",
+            "#" + PANEL_ID + " [data-aps-panel-menu='1'] button.aps-standalone-item:focus-visible { outline:2px solid #8b7de8 !important; outline-offset:1px !important; }"
         ].join("\n");
     }
 
@@ -24874,6 +24932,8 @@
         if (!state) return;
         PANEL_MENU_OPEN = null;
         if (state.raf) cancelAnimationFrame(state.raf);
+        if (state.hoverOpenTimer) clearTimeout(state.hoverOpenTimer);
+        if (state.hoverCloseTimer) clearTimeout(state.hoverCloseTimer);
         state.popover.setAttribute("data-open", "0");
         state.trigger.setAttribute("aria-expanded", "false");
         panelMenuHideCaret();
@@ -24962,6 +25022,7 @@
         var cfg = panelMenuGetConfig();
         var visibility = panelMenuVisibilityMap();
         var glass = isGlassTheme();
+        var buttonColors = glass ? {} : getButtonColors();
         var groupById = {};
         for (var gi = 0; gi < PANEL_MENU_GROUPS.length; gi++) groupById[PANEL_MENU_GROUPS[gi].id] = PANEL_MENU_GROUPS[gi];
         var mountedMenus = 0;
@@ -24969,7 +25030,7 @@
             if (cfg.hiddenGroups[cfg.groupOrder[oi]]) continue;
             mountedMenus++;
             (function(group) {
-                var ids = (cfg.itemOrder[group.id] || []).filter(function(id) { return !!buttonMap[id]; });
+                var ids = (cfg.itemOrder[group.id] || []).filter(function(id) { return !!buttonMap[id] && cfg.buttonPlacement[id] !== "standalone"; });
                 var shown = ids.filter(function(id) { return visibility[id] !== false; });
                 var trigger = document.createElement("button");
                 trigger.type = "button";
@@ -25000,6 +25061,7 @@
                 for (var i = 0; i < shown.length; i++) {
                     var el = buttonMap[shown[i]];
                     el.type = "button";
+                    el.classList.remove("aps-standalone-item");
                     el.classList.add("aps-menu-item");
                     el.setAttribute("role", "menuitem");
                     el.setAttribute("data-feature-button", shown[i]);
@@ -25027,6 +25089,33 @@
                     if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) panelMenuClose(false);
                     else panelMenuOpen(trigger, popover, e.detail === 0);
                 });
+                // Hover opens the side menu without removing click/keyboard access.
+                // The close delay bridges the gap between the docked trigger and the
+                // body-level popover so the menu does not flicker while traversing it.
+                var hoverOpenTimer = 0;
+                var hoverCloseTimer = 0;
+                function cancelHoverTimers() {
+                    if (hoverOpenTimer) { clearTimeout(hoverOpenTimer); hoverOpenTimer = 0; }
+                    if (hoverCloseTimer) { clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; }
+                }
+                function scheduleHoverClose() {
+                    if (hoverCloseTimer) clearTimeout(hoverCloseTimer);
+                    hoverCloseTimer = setTimeout(function() {
+                        hoverCloseTimer = 0;
+                        var state = PANEL_MENU_OPEN;
+                        if (state && state.trigger === trigger && !trigger.matches(":hover") && !popover.matches(":hover")) panelMenuClose(false);
+                    }, 220);
+                }
+                trigger.addEventListener("mouseenter", function() {
+                    cancelHoverTimers();
+                    if (!(PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger)) panelMenuOpen(trigger, popover, false);
+                });
+                trigger.addEventListener("mouseleave", scheduleHoverClose);
+                popover.addEventListener("mouseenter", function() {
+                    cancelHoverTimers();
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.popover === popover) PANEL_MENU_OPEN.hoverInside = true;
+                });
+                popover.addEventListener("mouseleave", scheduleHoverClose);
                 trigger.addEventListener("keydown", function(e) {
                     if (e.key === "ArrowDown" && !(PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger)) {
                         e.preventDefault();
@@ -25037,7 +25126,34 @@
                 document.body.appendChild(popover);
             })(groupById[cfg.groupOrder[oi]]);
         }
-        if (!mountedMenus) {
+        var standaloneShown = cfg.standaloneOrder.filter(function(id) { return !!buttonMap[id] && visibility[id] !== false; });
+        for (var si = 0; si < standaloneShown.length; si++) {
+            var standaloneId = standaloneShown[si];
+            var standaloneEl = buttonMap[standaloneId];
+            standaloneEl.type = "button";
+            standaloneEl.classList.remove("aps-menu-item");
+            standaloneEl.classList.add("aps-standalone-item");
+            standaloneEl.setAttribute("role", "menuitem");
+            standaloneEl.setAttribute("data-feature-button", standaloneId);
+            if (!PANEL_MENU_DYNAMIC_LABEL_IDS[standaloneId]) standaloneEl.textContent = panelMenuLabel(standaloneId);
+            if (!glass) panelMenuPaint(standaloneEl, buttonColors[standaloneId] || "");
+            btnRow.appendChild(standaloneEl);
+        }
+        // Reorder the existing panel children using the unified saved order. This
+        // allows standalone buttons to sit before, between, or after dropdowns.
+        var orderedPanelNodes = [];
+        for (var pi = 0; pi < cfg.panelOrder.length; pi++) {
+            var panelToken = cfg.panelOrder[pi];
+            var panelNode = null;
+            if (panelToken.indexOf("menu:") === 0) {
+                panelNode = btnRow.querySelector("[data-aps-menu-trigger='" + panelToken.substring(5) + "']");
+            } else if (panelToken.indexOf("button:") === 0) {
+                panelNode = btnRow.querySelector(".aps-standalone-item[data-feature-button='" + panelToken.substring(7) + "']");
+            }
+            if (panelNode && orderedPanelNodes.indexOf(panelNode) === -1) orderedPanelNodes.push(panelNode);
+        }
+        for (var pn = 0; pn < orderedPanelNodes.length; pn++) btnRow.appendChild(orderedPanelNodes[pn]);
+        if (!mountedMenus && !standaloneShown.length) {
             var none = document.createElement("div");
             none.className = "aps-menu-none";
             none.setAttribute("role", "note");
@@ -25897,7 +26013,7 @@
             if (t && pendingTheme === THEME_MODE_BLACK && !isGlassTheme()) panelMenuPaint(t, pendingMenu.groupColors[groupId] || "");
         }
         function previewItem(id) {
-            var items = document.querySelectorAll(".aps-menu-popover [data-feature-button]");
+            var items = document.querySelectorAll(".aps-menu-popover [data-feature-button], #" + PANEL_ID + " [data-aps-panel-menu='1'] .aps-standalone-item[data-feature-button]");
             for (var i = 0; i < items.length; i++) {
                 if (items[i].getAttribute("data-feature-button") === id && pendingTheme === THEME_MODE_BLACK && !isGlassTheme()) panelMenuPaint(items[i], pendingColors[id] || "");
             }
@@ -26003,12 +26119,32 @@
         menuList.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;";
         menuList.setAttribute("aria-label", "Dropdown menu order");
         menuSection.appendChild(menuList);
+        var panelOrderLabel = document.createElement("div");
+        panelOrderLabel.style.cssText = "color:" + tc.textSec + ";font-size:12px;font-weight:600;margin:14px 0 6px;";
+        panelOrderLabel.textContent = "Panel order";
+        menuSection.appendChild(panelOrderLabel);
+        var panelOrderHint = document.createElement("div");
+        panelOrderHint.style.cssText = "font-size:11px;color:" + tc.textMuted + ";margin-bottom:8px;";
+        panelOrderHint.textContent = "Drag menus and standalone buttons together to place standalone buttons before, between, or after menus.";
+        menuSection.appendChild(panelOrderHint);
+        var panelOrderList = document.createElement("div");
+        panelOrderList.className = "aps-group-list";
+        panelOrderList.setAttribute("aria-label", "Combined panel order");
+        menuSection.appendChild(panelOrderList);
         function groupLabel(gid) {
             for (var i = 0; i < PANEL_MENU_GROUPS.length; i++) if (PANEL_MENU_GROUPS[i].id === gid) return PANEL_MENU_GROUPS[i].label;
             return gid;
         }
         function setGroupOrder(ids) {
             pendingMenu.groupOrder = ids;
+            var menuTokens = ids.map(function(id) { return "menu:" + id; });
+            var menuIndex = 0;
+            pendingMenu.panelOrder = pendingMenu.panelOrder.map(function(token) {
+                if (String(token).indexOf("menu:") === 0 && menuIndex < menuTokens.length) return menuTokens[menuIndex++];
+                return token;
+            });
+            while (menuIndex < menuTokens.length) pendingMenu.panelOrder.push(menuTokens[menuIndex++]);
+            renderPanelOrder();
             renderMenus();
             checkDirty();
         }
@@ -26023,7 +26159,7 @@
         function renderMenus() {
             menuList.innerHTML = "";
             pendingMenu.groupOrder.forEach(function(gid, idx) {
-                var ids = pendingMenu.itemOrder[gid] || [];
+                var ids = (pendingMenu.itemOrder[gid] || []).filter(function(id) { return pendingMenu.buttonPlacement[id] !== "standalone"; });
                 var shown = ids.filter(function(id) { return pendingVis[id] !== false; }).length;
                 var menuHidden = !!pendingMenu.hiddenGroups[gid];
                 var row = document.createElement("div");
@@ -26094,9 +26230,62 @@
         }
         makeSortable(menuList, function() { return pendingMenu.groupOrder; }, setGroupOrder);
 
+        function setPanelOrder(ids) {
+            var clean = [];
+            var seen = {};
+            for (var i = 0; i < ids.length; i++) {
+                if (!seen[ids[i]]) { clean.push(ids[i]); seen[ids[i]] = true; }
+            }
+            pendingMenu.panelOrder = clean;
+            pendingMenu.groupOrder = clean.filter(function(token) { return String(token).indexOf("menu:") === 0; }).map(function(token) { return String(token).substring(5); });
+            pendingMenu.standaloneOrder = clean.filter(function(token) { return String(token).indexOf("button:") === 0; }).map(function(token) { return String(token).substring(7); });
+            renderMenus();
+            renderButtons();
+            renderPanelOrder();
+            checkDirty();
+        }
+        function renderPanelOrder() {
+            panelOrderList.innerHTML = "";
+            pendingMenu.panelOrder.forEach(function(token, idx) {
+                var row = document.createElement("div");
+                row.className = "aps-set-row";
+                row.setAttribute("data-id", token);
+                row.setAttribute("draggable", "true");
+                row.setAttribute("tabindex", "0");
+                var isMenu = String(token).indexOf("menu:") === 0;
+                var id = String(token).substring(isMenu ? 5 : 7);
+                var label = isMenu ? groupLabel(id) : panelMenuLabel(id);
+                row.setAttribute("aria-label", label + ", panel position " + (idx + 1) + ". Alt plus arrow keys to move.");
+                var grip = document.createElement("span");
+                grip.className = "aps-set-grip";
+                grip.textContent = "\u2807";
+                grip.setAttribute("aria-hidden", "true");
+                var pos = document.createElement("span");
+                pos.className = "aps-set-meta";
+                pos.style.minWidth = "14px";
+                pos.textContent = String(idx + 1);
+                var name = document.createElement("span");
+                name.className = "aps-set-name";
+                name.textContent = label;
+                var type = document.createElement("span");
+                type.className = "aps-set-meta";
+                type.textContent = isMenu ? "Dropdown" : "Standalone";
+                row.appendChild(grip);
+                row.appendChild(pos);
+                row.appendChild(name);
+                row.appendChild(type);
+                row.addEventListener("keydown", function(e) {
+                    if (e.target !== row) return;
+                    keyboardReorder(e, pendingMenu.panelOrder, token, setPanelOrder, ".aps-set-row[data-id='" + token.replace(/'/g, "\\'") + "']");
+                });
+                panelOrderList.appendChild(row);
+            });
+        }
+        makeSortable(panelOrderList, function() { return pendingMenu.panelOrder; }, setPanelOrder);
+
         // === BUTTONS ===
         var btnSection = section(false);
-        sectionTitle(btnSection, "Buttons", "Show or hide buttons, drag them to reorder within their menu, and choose a color. Hidden buttons stay available here.");
+        sectionTitle(btnSection, "Buttons", "Show or hide buttons, choose Menu or Panel placement, drag Menu buttons within their menu, and drag Panel buttons to set their standalone order. Hidden buttons stay available here.");
 
         var loadoutBar = document.createElement("div");
         loadoutBar.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px;";
@@ -26166,7 +26355,42 @@
 
         var groupGrid = document.createElement("div");
         groupGrid.className = "aps-group-grid";
+        var standaloneGrid = document.createElement("div");
+        standaloneGrid.className = "aps-group-grid";
+        standaloneGrid.style.marginBottom = "10px";
+        btnSection.appendChild(standaloneGrid);
         btnSection.appendChild(groupGrid);
+        var standaloneList = document.createElement("div");
+        function setStandaloneOrder(newIds) {
+            pendingMenu.standaloneOrder = newIds;
+            var standaloneTokens = newIds.map(function(id) { return "button:" + id; });
+            var standaloneIndex = 0;
+            pendingMenu.panelOrder = pendingMenu.panelOrder.map(function(token) {
+                if (String(token).indexOf("button:") === 0 && standaloneIndex < standaloneTokens.length) return standaloneTokens[standaloneIndex++];
+                return token;
+            });
+            while (standaloneIndex < standaloneTokens.length) pendingMenu.panelOrder.push(standaloneTokens[standaloneIndex++]);
+            renderPanelOrder();
+            renderButtons();
+            checkDirty();
+        }
+        makeSortable(standaloneList, function() { return pendingMenu.standaloneOrder; }, setStandaloneOrder);
+
+        function setButtonPlacement(id, standalone) {
+            if (standalone) {
+                pendingMenu.buttonPlacement[id] = "standalone";
+                if (pendingMenu.standaloneOrder.indexOf(id) === -1) pendingMenu.standaloneOrder.push(id);
+                if (pendingMenu.panelOrder.indexOf("button:" + id) === -1) pendingMenu.panelOrder.push("button:" + id);
+            } else {
+                delete pendingMenu.buttonPlacement[id];
+                pendingMenu.standaloneOrder = pendingMenu.standaloneOrder.filter(function(existingId) { return existingId !== id; });
+                pendingMenu.panelOrder = pendingMenu.panelOrder.filter(function(token) { return token !== "button:" + id; });
+            }
+            renderPanelOrder();
+            renderMenus();
+            renderButtons();
+            checkDirty();
+        }
 
         // Assigns each button in a menu a distinct random pastel (repeats only if a menu has more
         // buttons than pastels), and avoids handing back the exact same assignment.
@@ -26203,10 +26427,92 @@
             if (again) again.focus();
         }
         function renderButtons() {
+            standaloneGrid.innerHTML = "";
+            standaloneList.innerHTML = "";
             groupGrid.innerHTML = "";
             var anyShown = false;
+            var standaloneIds = pendingMenu.standaloneOrder.filter(function(id) { return pendingMenu.buttonPlacement[id] === "standalone"; });
+            var standaloneFiltered = standaloneIds.filter(function(id) {
+                var vis = pendingVis[id] !== false;
+                if (buttonFilter === "enabled" && !vis) return false;
+                if (buttonFilter === "disabled" && vis) return false;
+                if (buttonSearch) {
+                    var hay = (panelMenuLabel(id) + " standalone panel").toLowerCase();
+                    if (hay.indexOf(buttonSearch) === -1) return false;
+                }
+                return true;
+            });
+            var standaloneFiltering = buttonFilter !== "all" || !!buttonSearch;
+            if (standaloneIds.length && (!standaloneFiltering || standaloneFiltered.length)) {
+                var standaloneCard = document.createElement("div");
+                standaloneCard.className = "aps-group-card";
+                var standaloneHead = document.createElement("div");
+                standaloneHead.className = "aps-group-head";
+                var standaloneTitle = document.createElement("span");
+                standaloneTitle.className = "aps-group-title";
+                standaloneTitle.textContent = "Standalone Panel Buttons";
+                standaloneHead.appendChild(standaloneTitle);
+                var standaloneMeta = document.createElement("span");
+                standaloneMeta.className = "aps-set-meta";
+                standaloneMeta.textContent = standaloneIds.length + " button" + (standaloneIds.length === 1 ? "" : "s");
+                standaloneHead.appendChild(standaloneMeta);
+                standaloneCard.appendChild(standaloneHead);
+                standaloneList.setAttribute("aria-label", "Standalone panel button order");
+                var standaloneRows = standaloneFiltering ? standaloneFiltered : standaloneIds;
+                for (var spi = 0; spi < standaloneRows.length; spi++) {
+                    var standaloneId = standaloneRows[spi];
+                    var standaloneRow = document.createElement("div");
+                    standaloneRow.className = "aps-set-row";
+                    standaloneRow.setAttribute("data-id", standaloneId);
+                    standaloneRow.setAttribute("data-hidden", pendingVis[standaloneId] !== false ? "0" : "1");
+                    standaloneRow.setAttribute("tabindex", "0");
+                    if (!standaloneFiltering) standaloneRow.setAttribute("draggable", "true");
+                    standaloneRow.setAttribute("aria-label", panelMenuLabel(standaloneId) + ", standalone panel position " + (standaloneIds.indexOf(standaloneId) + 1));
+                    var standaloneGrip = document.createElement("span");
+                    standaloneGrip.className = "aps-set-grip";
+                    standaloneGrip.textContent = standaloneFiltering ? "" : "\u2807";
+                    standaloneGrip.setAttribute("aria-hidden", "true");
+                    var standaloneName = document.createElement("span");
+                    standaloneName.className = "aps-set-name";
+                    standaloneName.textContent = panelMenuLabel(standaloneId);
+                    standaloneRow.appendChild(standaloneGrip);
+                    standaloneRow.appendChild(standaloneName);
+                    var standaloneSwatch = makeSwatch(panelMenuLabel(standaloneId), function(id) { return function() { return pendingColors[id] || ""; }; }(standaloneId), function(id) { return function(c) {
+                        if (c) pendingColors[id] = c; else delete pendingColors[id];
+                        previewItem(id);
+                        checkDirty();
+                    }; }(standaloneId));
+                    standaloneRow.appendChild(standaloneSwatch);
+                    var standaloneMenuBtn = chip("Menu", "Move this button back into its dropdown menu");
+                    standaloneMenuBtn.style.cssText = "padding:3px 8px;font-size:11px;";
+                    standaloneMenuBtn.onclick = function(id) { return function(e) { e.stopPropagation(); setButtonPlacement(id, false); }; }(standaloneId);
+                    standaloneRow.appendChild(standaloneMenuBtn);
+                    var standaloneToggle = document.createElement("button");
+                    standaloneToggle.type = "button";
+                    standaloneToggle.className = "aps-switch";
+                    standaloneToggle.setAttribute("role", "switch");
+                    standaloneToggle.setAttribute("aria-checked", pendingVis[standaloneId] !== false ? "true" : "false");
+                    standaloneToggle.setAttribute("aria-label", (pendingVis[standaloneId] !== false ? "Hide " : "Show ") + panelMenuLabel(standaloneId));
+                    standaloneToggle.title = pendingVis[standaloneId] !== false ? "Shown - click to hide" : "Hidden - click to show";
+                    standaloneToggle.onclick = function(id) { return function(e) {
+                        e.stopPropagation();
+                        pendingVis[id] = !(pendingVis[id] !== false);
+                        renderMenus();
+                        renderButtons();
+                        checkDirty();
+                    }; }(standaloneId);
+                    standaloneRow.appendChild(standaloneToggle);
+                    standaloneRow.addEventListener("keydown", function(id) { return function(e) {
+                        if (e.target !== this) return;
+                        keyboardReorder(e, pendingMenu.standaloneOrder, id, setStandaloneOrder, ".aps-set-row[data-id='" + id.replace(/'/g, "\\'") + "']");
+                    }; }(standaloneId));
+                    standaloneList.appendChild(standaloneRow);
+                }
+                standaloneCard.appendChild(standaloneList);
+                standaloneGrid.appendChild(standaloneCard);
+            }
             pendingMenu.groupOrder.forEach(function(gid) {
-                var ids = pendingMenu.itemOrder[gid] || [];
+                var ids = (pendingMenu.itemOrder[gid] || []).filter(function(id) { return pendingMenu.buttonPlacement[id] !== "standalone"; });
                 var filtered = ids.filter(function(id) {
                     var vis = pendingVis[id] !== false;
                     if (buttonFilter === "enabled" && !vis) return false;
@@ -26317,6 +26623,10 @@
                     row.appendChild(grip);
                     row.appendChild(name);
                     row.appendChild(swatch);
+                    var placementBtn = chip("Panel", "Move this button out of the dropdown and onto the panel");
+                    placementBtn.style.cssText = "padding:3px 8px;font-size:11px;";
+                    placementBtn.onclick = function(buttonId) { return function(e) { e.stopPropagation(); setButtonPlacement(buttonId, true); }; }(id);
+                    row.appendChild(placementBtn);
                     row.appendChild(toggle);
                     list.appendChild(row);
                 });
@@ -26519,6 +26829,7 @@
 
         refreshLoadoutSelect();
         renderMenus();
+        renderPanelOrder();
         renderButtons();
         modalBody.appendChild(hotkeySection);
         modalBody.appendChild(smartNavSection);
@@ -27546,7 +27857,7 @@
     function applyPanelButtonColors(panel) {
         var glass = isGlassTheme();
         var colors = glass ? {} : getButtonColors();
-        var items = document.querySelectorAll(".aps-menu-popover button[data-feature-button]");
+        var items = document.querySelectorAll(".aps-menu-popover button[data-feature-button], #" + PANEL_ID + " .aps-standalone-item[data-feature-button]");
         for (var i = 0; i < items.length; i++) {
             panelMenuPaint(items[i], glass ? "" : (colors[items[i].getAttribute("data-feature-button")] || ""));
         }
