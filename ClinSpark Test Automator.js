@@ -19542,7 +19542,7 @@
         popover.setAttribute("data-open", "1");
         trigger.setAttribute("aria-expanded", "true");
         panelMenuPosition(trigger, popover);
-        var state = { trigger: trigger, popover: popover, raf: 0, lastRect: "" };
+        var state = { trigger: trigger, popover: popover, raf: 0, lastRect: "", pinned: false };
         state.onOutside = function(e) {
             if (popover.contains(e.target) || trigger.contains(e.target)) return;
             panelMenuClose(false);
@@ -19674,8 +19674,12 @@
                 });
                 trigger.addEventListener("click", function(e) {
                     e.preventDefault();
-                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) panelMenuClose(false);
-                    else panelMenuOpen(trigger, popover, e.detail === 0);
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) {
+                        panelMenuClose(false);
+                    } else {
+                        panelMenuOpen(trigger, popover, e.detail === 0);
+                        if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) PANEL_MENU_OPEN.pinned = true;
+                    }
                 });
                 // Hover opens the side menu without removing click/keyboard access.
                 // The close delay bridges the gap between the docked trigger and the
@@ -19691,11 +19695,13 @@
                     hoverCloseTimer = setTimeout(function() {
                         hoverCloseTimer = 0;
                         var state = PANEL_MENU_OPEN;
+                        if (state && state.trigger === trigger && state.pinned) return;
                         if (state && state.trigger === trigger && !trigger.matches(":hover") && !popover.matches(":hover")) panelMenuClose(false);
                     }, 220);
                 }
                 trigger.addEventListener("mouseenter", function() {
                     cancelHoverTimers();
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.pinned) return;
                     if (!(PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger)) panelMenuOpen(trigger, popover, false);
                 });
                 trigger.addEventListener("mouseleave", scheduleHoverClose);
@@ -21461,6 +21467,7 @@
     var STORAGE_ANS_CURRENT = "activityPlanState.ans.current";
     var STORAGE_ANS_CURRENT_VOLUNTEER = "activityPlanState.ans.currentVolunteer";
     var STORAGE_ANS_REUSE_SUBJECT = "activityPlanState.ans.reuseSubject";
+    var STORAGE_ANS_ICF_SUBJECT = "activityPlanState.ans.icfSubject";
     var ADD_NEW_SUBJECT_POPUP_REF = null;
 
     function clearAddExistingSubjectData() {
@@ -22786,6 +22793,7 @@
             localStorage.removeItem(STORAGE_ANS_CURRENT);
             localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER);
             localStorage.removeItem(STORAGE_ANS_REUSE_SUBJECT);
+            localStorage.removeItem(STORAGE_ANS_ICF_SUBJECT);
             localStorage.removeItem("activityPlanState.cohortAdd.editDoneMap");
         } catch (e) {}
         ADD_NEW_SUBJECT_POPUP_REF = null;
@@ -22921,6 +22929,54 @@
     function ansSetReuseSubject(subject) {
         try { localStorage.setItem(STORAGE_ANS_REUSE_SUBJECT, JSON.stringify(subject || null)); } catch (e) {}
         log("ANS: reusable subject saved volunteerId=" + String(subject && subject.volunteerId) + " subjectNumber=" + String(subject && subject.subjectNumber));
+    }
+
+    function ansGetIcfSubject() {
+        try {
+            var raw = localStorage.getItem(STORAGE_ANS_ICF_SUBJECT);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return null;
+    }
+
+    function ansSetIcfSubject(subject) {
+        try { localStorage.setItem(STORAGE_ANS_ICF_SUBJECT, JSON.stringify(subject || null)); } catch (e) {}
+        log("ANS: ICF subject saved volunteerId=" + String(subject && subject.volunteerId) + " subjectId=" + String(subject && subject.subjectId) + " subjectNumber=" + String(subject && subject.subjectNumber));
+    }
+
+    function ansQueueHasScreening(queue) {
+        queue = Array.isArray(queue) ? queue : [];
+        for (var i = 0; i < queue.length; i++) {
+            if (ansIsScreeningQueueItem(queue[i])) return true;
+        }
+        return false;
+    }
+
+    function ansCaptureScreeningSubject(row, volunteerId, current) {
+        var subjectId = "";
+        var subjectNumber = "";
+        var chosenText = "";
+        if (row) {
+            var subjectAnchor = row.querySelector("a[href*='/secure/study/subjects/show/']");
+            var subjectHref = subjectAnchor ? (subjectAnchor.getAttribute("href") || "") : "";
+            var subjectIdMatch = subjectHref.match(/\/show\/(\d+)/);
+            if (subjectIdMatch) subjectId = subjectIdMatch[1];
+            var subjectSpan = row.querySelector("span.tooltips[data-original-title='Subject Number'], span[data-original-title='Subject Number'], [title='Subject Number']");
+            if (subjectSpan) subjectNumber = ansNormalizeText(subjectSpan.textContent || subjectSpan.getAttribute("data-value") || "");
+            if (!subjectNumber) subjectNumber = ansNormalizeText(row.getAttribute("data-subject-number") || row.getAttribute("data-subjectNumber") || "");
+            var volunteerAnchor = row.querySelector("a[href*='/secure/volunteers/manage/show/']");
+            chosenText = ansNormalizeText(volunteerAnchor ? volunteerAnchor.textContent : "");
+        }
+        var subject = {
+            volunteerId: String(volunteerId || ""),
+            subjectId: String(subjectId || ""),
+            subjectNumber: String(subjectNumber || ""),
+            chosenText: chosenText,
+            sourceEpochName: current && current.epochName ? current.epochName : "",
+            sourceCohortName: current && current.cohortName ? current.cohortName : ""
+        };
+        log("ANS: screening identity probe subjectId=" + String(subject.subjectId) + " subjectNumber=" + String(subject.subjectNumber) + " volunteerId=" + String(subject.volunteerId));
+        return subject;
     }
 
     function ansApplyQueueSubjectPolicy(queue) {
@@ -23788,20 +23844,6 @@
             waited += 400;
         }
         if (!targetRow) throw new Error("Could not find the newly added volunteer row for activation.");
-        if (current && current.createReusableSubject && !ansGetReuseSubject()) {
-            var subjectSpan = targetRow.querySelector("span.tooltips[data-original-title='Subject Number']");
-            var subjectAnchor = targetRow.querySelector("a[href*='/secure/study/subjects/show/']");
-            var volunteerAnchor = targetRow.querySelector("a[href*='/secure/volunteers/manage/show/']");
-            var subjectNumber = ansNormalizeText(subjectSpan ? subjectSpan.textContent : (subjectAnchor ? subjectAnchor.textContent : ""));
-            var chosenText = ansNormalizeText(volunteerAnchor ? volunteerAnchor.textContent : "");
-            ansSetReuseSubject({
-                volunteerId: String(targetVolId),
-                subjectNumber: subjectNumber,
-                chosenText: chosenText,
-                sourceEpochName: current.epochName,
-                sourceCohortName: current.cohortName
-            });
-        }
         var actionBtn = getRowActionButton(targetRow);
         if (!actionBtn) throw new Error("Could not find row Actions button for activation.");
         actionBtn.click();
@@ -23820,13 +23862,48 @@
         } else {
             throw new Error("Activate Volunteer link was not found for volunteerId=" + String(targetVolId) + ". The subject may not have been saved into this cohort.");
         }
+        if (current && current.isScreeningEpoch) {
+            var screeningSubject = null;
+            var captureWait = 0;
+            while (captureWait <= 6000) {
+                var refreshedRow = findCohortRowByVolunteerId(targetVolId) || targetRow;
+                screeningSubject = ansCaptureScreeningSubject(refreshedRow, targetVolId, current);
+                if (screeningSubject && (screeningSubject.subjectId || screeningSubject.subjectNumber)) break;
+                await sleep(400);
+                captureWait += 400;
+            }
+            if (!screeningSubject || (!screeningSubject.subjectId && !screeningSubject.subjectNumber)) {
+                throw new Error("The screening subject was activated, but its subject identity was not available for ICF Barcode.");
+            }
+            ansSetIcfSubject(screeningSubject);
+            if (current.createReusableSubject && !ansGetReuseSubject()) ansSetReuseSubject(screeningSubject);
+            log("ANS: captured activated screening subject subjectId=" + String(screeningSubject.subjectId) + " subjectNumber=" + String(screeningSubject.subjectNumber));
+        }
         ansSetIndex(idx + 1);
         setCohortGuard("");
         clearSelectedVolunteerIds();
         try { localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER); } catch (e2) {}
         if (idx + 1 >= queue.length) {
-            log("ANS: queue complete after " + (idx + 1) + "/" + queue.length);
-            ansShowComplete();
+            if (ansQueueHasScreening(queue)) {
+                var icfSubject = ansGetIcfSubject() || ansGetReuseSubject();
+                if (!icfSubject || (!icfSubject.subjectId && !icfSubject.volunteerId)) {
+                    throw new Error("The screening subject was added, but its identity could not be confirmed for ICF Barcode.");
+                }
+                log("ANS: queue complete after " + (idx + 1) + "/" + queue.length + "; routing exact screening subject to ICF Barcode");
+                try { localStorage.removeItem(STORAGE_CONSENT_SCAN_INDEX); } catch (e3) {}
+                setRunMode("ansconsent");
+                ansShowProgress("Running ICF Barcode...");
+                ansUpdateProgress("Running ICF Barcode...", "Using screening subject " + String(icfSubject.subjectNumber || icfSubject.subjectId || icfSubject.volunteerId));
+                var directSubjectId = String(icfSubject.subjectId || "");
+                var icfUrl = directSubjectId
+                    ? location.origin + "/secure/study/subjects/show/" + directSubjectId + "?autoconsent=1"
+                    : "/secure/study/subjects/list?autoconsent=1";
+                if (!directSubjectId) setLastVolunteerId(icfSubject.volunteerId);
+                setTimeout(function() { location.href = icfUrl; }, 100);
+            } else {
+                log("ANS: queue complete after " + (idx + 1) + "/" + queue.length);
+                ansShowComplete();
+            }
         } else {
             log("ANS: advancing to next queue item " + (idx + 2) + "/" + queue.length);
             ansNavigateToCurrent();
@@ -48467,7 +48544,17 @@
                 return;
             }
         }
-        var finalBtn = document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
+        var customSaveHandled = false;
+        if (options && typeof options.save === "function") {
+            try {
+                customSaveHandled = true;
+                await options.save();
+                log("Run Form V2: custom save callback completed");
+            } catch (customSaveErr) {
+                log("Run Form V2: custom save callback failed - " + String(customSaveErr));
+            }
+        }
+        var finalBtn = customSaveHandled ? null : document.querySelector("button.btn.green[onclick^=\"return saveAndPostModalForm(false, '/secure/datacollection/formdata/validateform/\"]");
         if (finalBtn) {
             finalBtn.click();
             log("Run Form V2: clicked final Save and Return");
@@ -48492,7 +48579,7 @@
                     log("Run Form V2: deviation modal Save button not found");
                 }
             }
-        } else {
+        } else if (!customSaveHandled) {
             log("Run Form V2: final Save and Return button not found");
         }
         if (RUN_FORM_V2_START_TS > 0) {
@@ -52579,29 +52666,30 @@
             log("ICF: openBarcodeInput calling inputBarcodeInModal()");
             try {
                 inputBarcodeInModal();
-                await sleep(400);
-                return true;
+                var inlineInput = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 3000);
+                if (inlineInput) return true;
             } catch (e) {
                 log("ICF: openBarcodeInput inputBarcodeInModal error=" + String(e));
             }
         }
-        var icon = document.getElementById(BARCODE_ICON_ID);
+        var icon = modalEl ? modalEl.querySelector("i#" + BARCODE_ICON_ID + ".fa.fa-barcode") : null;
+        if (!icon) icon = document.getElementById(BARCODE_ICON_ID);
         if (icon) {
             log("ICF: openBarcodeInput clicking barcode icon");
             await clickWithRetry(icon);
-            await sleep(400);
-            return true;
+            var iconInput = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 5000);
+            if (iconInput) return true;
         }
         if (modalEl) {
             var altIcon = modalEl.querySelector("i.fa.fa-barcode");
             if (altIcon) {
                 log("ICF: openBarcodeInput clicking alternate barcode icon");
                 await clickWithRetry(altIcon);
-                await sleep(400);
-                return true;
+                var altInput = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 5000);
+                if (altInput) return true;
             }
         }
-        var barcodeInput = document.querySelector("input.bootbox-input.bootbox-input-text.form-control");
+        var barcodeInput = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 1500);
         if (barcodeInput) {
             log("ICF: openBarcodeInput focusing barcode input directly");
             barcodeInput.focus();
@@ -52611,23 +52699,100 @@
         return false;
     }
 
+    function icfIsVisibleElement(el) {
+        if (!el || !document.documentElement.contains(el)) return false;
+        var style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+        var rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    async function waitForVisibleSelector(selector, timeoutMs) {
+        var waited = 0;
+        var limit = typeof timeoutMs === "number" ? timeoutMs : 5000;
+        while (waited <= limit) {
+            var candidates = document.querySelectorAll(selector);
+            for (var i = candidates.length - 1; i >= 0; i--) {
+                if (icfIsVisibleElement(candidates[i])) return candidates[i];
+            }
+            await sleep(100);
+            waited += 100;
+        }
+        return null;
+    }
+
+    async function waitForIcfBarcodeHiddenValue(modalEl, value, timeoutMs) {
+        var waited = 0;
+        var limit = typeof timeoutMs === "number" ? timeoutMs : 4000;
+        while (waited <= limit) {
+            var root = modalEl || document;
+            var hidden = root.querySelector("input#informedConsentVersionHidden");
+            if (!hidden) {
+                var icon = root.querySelector("i#" + BARCODE_ICON_ID + ".fa-barcode");
+                var row = icon ? icon.closest("tr") : null;
+                if (row) hidden = row.querySelector("input[type='hidden'][name^='itemData_'], input[id*='informedConsentVersion']");
+            }
+            if (!hidden) hidden = document.querySelector("input#informedConsentVersionHidden");
+            if (hidden && String(hidden.value || "").trim() === String(value || "").trim()) return true;
+            var staticValue = root.querySelector("#informedConsentVersionStatic");
+            if (staticValue && String(staticValue.textContent || "").trim() === String(value || "").trim()) return true;
+            await sleep(100);
+            waited += 100;
+        }
+        return false;
+    }
+
+    function applyIcfBarcodeToFormFields(modalEl, value) {
+        var root = modalEl || document;
+        var hidden = root.querySelector("input#informedConsentVersionHidden");
+        if (!hidden) {
+            var icon = root.querySelector("i#" + BARCODE_ICON_ID + ".fa-barcode");
+            var row = icon ? icon.closest("tr") : null;
+            if (row) hidden = row.querySelector("input[type='hidden'][name^='itemData_'], input[id*='informedConsentVersion']");
+        }
+        if (hidden) {
+            try {
+                var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+                if (setter && setter.set) setter.set.call(hidden, String(value));
+                else hidden.value = String(value);
+            } catch (e) { hidden.value = String(value); }
+            hidden.dispatchEvent(new Event("input", { bubbles: true }));
+            hidden.dispatchEvent(new Event("change", { bubbles: true }));
+            log("ICF: barcode hidden form field assigned directly");
+        }
+        var staticValue = root.querySelector("#informedConsentVersionStatic");
+        if (staticValue) staticValue.textContent = String(value);
+        return !!hidden;
+    }
+
     async function setBarcodeValueInModal(modalEl, value) {
         log("ICF: setBarcodeValueInModal value=" + String(value));
-        var inputBox = await waitForSelector("input.bootbox-input.bootbox-input-text.form-control", 8000);
+        var inputBox = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 8000);
         if (!inputBox) {
             log("ICF: setBarcodeValueInModal input not found");
             return false;
         }
-        var currentVal = inputBox.value || "";
-        if (currentVal === value) {
-            log("ICF: setBarcodeValueInModal value already set; short-circuiting");
-        } else {
-            inputBox.value = value;
-            var evt = new Event("input", { bubbles: true });
-            inputBox.dispatchEvent(evt);
-            log("ICF: setBarcodeValueInModal value set and event dispatched");
+        var confirmed = false;
+        for (var attempt = 1; attempt <= 3; attempt++) {
+            try {
+                inputBox.focus();
+                var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+                if (setter && setter.set) setter.set.call(inputBox, String(value));
+                else inputBox.value = String(value);
+            } catch (setErr) {
+                inputBox.value = String(value);
+                log("ICF: setBarcodeValueInModal setter attempt=" + String(attempt) + " error=" + String(setErr));
+            }
+            inputBox.dispatchEvent(new Event("input", { bubbles: true }));
+            inputBox.dispatchEvent(new Event("change", { bubbles: true }));
+            inputBox.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "" }));
+            await sleep(150);
+            confirmed = String(inputBox.value || "") === String(value || "");
+            log("ICF: setBarcodeValueInModal attempt=" + String(attempt) + " confirmed=" + String(confirmed));
+            if (confirmed) break;
+            inputBox = await waitForVisibleSelector("input.bootbox-input.bootbox-input-text.form-control", 1500);
+            if (!inputBox) break;
         }
-        var confirmed = inputBox.value === value;
         log("ICF: setBarcodeValueInModal confirmed=" + String(confirmed));
         if (!confirmed) {
             log("ICF: setBarcodeValueInModal value mismatch after set");
@@ -52641,6 +52806,12 @@
         }
         log("ICF: setBarcodeValueInModal OK clicked");
         await sleep(300);
+        var hiddenApplied = await waitForIcfBarcodeHiddenValue(modalEl, value, 1500);
+        log("ICF: setBarcodeValueInModal hidden barcode applied=" + String(hiddenApplied));
+        if (!hiddenApplied) {
+            log("ICF: hidden barcode was not updated by page callback; applying barcode to form field directly");
+            applyIcfBarcodeToFormFields(modalEl, value);
+        }
         var bootboxGone = true;
         var bootboxModal = document.querySelector("div.bootbox.modal.in, div.bootbox.modal.show");
         if (bootboxModal) {
@@ -52680,6 +52851,58 @@
             i = i + 1;
         }
         log("ICF: fillTextareaFieldsInModal filled " + String(filled) + " field(s)");
+    }
+
+    async function fillIcfAuditDropdownIfVisible(modalEl) {
+        if (!modalEl) return;
+        var containers = modalEl.querySelectorAll(".select2-container.auditReasonForChange, select.auditReasonForChange, select[id$='_auditRecord']");
+        for (var i = 0; i < containers.length; i++) {
+            var container = containers[i];
+            var visibleControl = container.matches("select") ? container : container;
+            if (!icfIsVisibleElement(visibleControl)) continue;
+            var hidden = null;
+            if (container.matches("select")) {
+                hidden = container;
+            } else {
+                var containerId = (container.id || "").replace(/^s2id_/, "");
+                hidden = containerId ? modalEl.querySelector("input#" + CSS.escape(containerId) + ", select#" + CSS.escape(containerId)) : null;
+                if (!hidden) hidden = modalEl.querySelector("input.auditReasonForChange.collectInput[id$='_auditRecord']");
+            }
+            var desired = "Data clarification";
+            var optionExists = true;
+            if (hidden && hidden.tagName === "SELECT") {
+                optionExists = false;
+                var options = hidden.querySelectorAll("option");
+                for (var oi = 0; oi < options.length; oi++) {
+                    if (String(options[oi].textContent || "").trim() === desired || String(options[oi].value || "").trim() === desired) {
+                        optionExists = true;
+                        break;
+                    }
+                }
+                if (!optionExists && options.length > 0) desired = options[0].value;
+            }
+            var set = false;
+            if (hidden && window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+                try {
+                    window.jQuery(hidden).select2("val", desired);
+                    window.jQuery(hidden).trigger("change");
+                    set = true;
+                } catch (jqErr) {
+                    log("ICF: audit select2 set error=" + String(jqErr));
+                }
+            }
+            if (hidden && !set) {
+                hidden.value = desired;
+                hidden.dispatchEvent(new Event("input", { bubbles: true }));
+                hidden.dispatchEvent(new Event("change", { bubbles: true }));
+                set = true;
+            }
+            var chosen = container.querySelector(".select2-chosen");
+            if (chosen) chosen.textContent = desired;
+            log("ICF: visible Audit dropdown set=" + String(set) + " value=" + String(desired));
+            return;
+        }
+        log("ICF: no visible Audit dropdown found; continuing without audit value");
     }
 
     async function clickCurrentTimeButtonsInModal(modalEl) {
@@ -52897,6 +53120,18 @@
 
         log("ICF: filling textarea fields");
         modalEl = getDataCollectionModalElement();
+        applyIcfBarcodeToFormFields(modalEl, barcodeValue);
+        await fillIcfAuditDropdownIfVisible(modalEl);
+        var runFormResult = await runFormAfterIcfBarcode();
+        if (runFormResult === true) {
+            log("ICF: Run Form completed after barcode; in-place ICF flow finished");
+            return;
+        }
+        if (runFormResult === false) {
+            log("ICF: Run Form after barcode failed; leaving the modal open for review");
+            return;
+        }
+        modalEl = getDataCollectionModalElement();
         await fillTextareaFieldsInModal(modalEl);
 
         log("ICF: clicking Current Time buttons");
@@ -52977,6 +53212,8 @@
         var rows = document.querySelectorAll('tbody#subjectTableBody > tr');
         log("processSubjectsListPageForConsent: actual subject rows=" + String(rows.length));
         var volId = getLastVolunteerId();
+        var icfTarget = mode === "ansconsent" ? ansGetIcfSubject() : null;
+        var exactTargetFound = false;
         if (volId && volId.length > 0) {
             var iTarget = 0;
             var targetRow = null;
@@ -52984,6 +53221,15 @@
                 var rT = rows[iTarget];
                 var volA = rT.querySelector('a[href^="/secure/volunteers/manage/show/"]');
                 var match = false;
+                var showA = rT.querySelector('a[href*="/secure/study/subjects/show/"]');
+                var rowText = ansNormalizeText(rT.textContent);
+                if (icfTarget && icfTarget.subjectId && showA) {
+                    var showMatch = (showA.getAttribute("href") || "").match(/\/show\/(\d+)/);
+                    match = !!(showMatch && showMatch[1] === String(icfTarget.subjectId));
+                }
+                if (!match && icfTarget && icfTarget.subjectNumber && rowText.indexOf(ansNormalizeText(icfTarget.subjectNumber)) !== -1) {
+                    match = true;
+                }
                 if (volA) {
                     var hrefVol = volA.getAttribute('href') + "";
                     var mv = hrefVol.match(/\/show\/(\d+)/);
@@ -52991,7 +53237,7 @@
                     if (mv && mv[1]) {
                         idVol = mv[1];
                     }
-                    match = idVol === String(volId);
+                    match = match || idVol === String(volId);
                     log("processSubjectsListPageForConsent: row " + String(iTarget) + " volunteer href=" + String(hrefVol) + " parsed=" + String(idVol) + " match=" + String(match));
                 } else {
                     log("processSubjectsListPageForConsent: row " + String(iTarget) + " volunteer link missing");
@@ -53003,6 +53249,18 @@
                 iTarget = iTarget + 1;
             }
             if (targetRow) {
+                exactTargetFound = true;
+                var exactId = extractSubjectShowIdFromRow(targetRow);
+                if (icfTarget && mode === "ansconsent") {
+                    if (!exactId && icfTarget.subjectId) exactId = String(icfTarget.subjectId);
+                    if (exactId) {
+                        var exactUrl = location.origin + "/secure/study/subjects/show/" + exactId + "?autoconsent=1";
+                        log("processSubjectsListPageForConsent: navigating to exact Add New Subject target " + String(exactUrl));
+                        location.href = exactUrl;
+                        return;
+                    }
+                    log("processSubjectsListPageForConsent: exact target row found but subject show id missing");
+                }
                 var noConsentT = rowHasNoInformedConsentInFourthCell(targetRow);
                 log("processSubjectsListPageForConsent: targeted row hasNoConsent=" + String(noConsentT));
                 if (noConsentT) {
@@ -53021,6 +53279,10 @@
             } else {
                 log("processSubjectsListPageForConsent: targeted volunteer row not found; scanning");
             }
+        }
+        if (mode === "ansconsent" && icfTarget && !exactTargetFound) {
+            log("processSubjectsListPageForConsent: exact Add New Subject target was not found; refusing fallback subject selection");
+            return;
         }
         var idxRaw = getConsentScanIndex();
         var idx = 0;
@@ -53184,6 +53446,13 @@
                 return;
             }
             log("Consent already filled for targeted subject");
+            if (getRunMode() === "ansconsent") {
+                log("ICF already filled for Add New Subject screening subject; completing Add New Subject");
+                clearConsentScanIndex();
+                clearRunMode();
+                ansShowComplete();
+                return;
+            }
             if (getRunMode() === "consentmid") {
                 log("ICF already filled mid-flow; resuming epoch queue");
                 clearConsentScanIndex();
@@ -53218,6 +53487,12 @@
             return;
         }
         clearConsentScanIndex();
+        if (getRunMode() === "ansconsent") {
+            log("ICF Barcode collected for Add New Subject screening subject; completing Add New Subject");
+            clearRunMode();
+            ansShowComplete();
+            return;
+        }
         var wasMidMode = getRunMode() === "consentmid";
         if (wasMidMode) {
             // ICF Barcode done mid-flow; resume non-screening epochs
@@ -53289,6 +53564,32 @@
         return false;
     }
 
+    async function runFormAfterIcfBarcode() {
+        var modalEl = getDataCollectionModalElement();
+        if (!modalEl || !isModalOpen(modalEl)) {
+            log("ICF: Run Form handoff skipped because the ICF modal is not open");
+            return null;
+        }
+        var formEl = modalEl.querySelector("form#modalInput") || document.querySelector("form#modalInput");
+        if (!formEl) {
+            log("ICF: Run Form handoff skipped because form#modalInput was not found");
+            return null;
+        }
+        var selectedMode = "randomIr";
+        RUN_FORM_V2_START_TS = Date.now();
+        setFormValueMode(selectedMode);
+        log("ICF: barcode complete; starting Run Form automatically with Random In Range");
+        await runFormAutomationV2({
+            save: async function() {
+                var saveResult = await saveAndCloseModal(getDataCollectionModalElement());
+                if (!saveResult.success) throw new Error(saveResult.error || "ICF modal save failed");
+            }
+        });
+        var closed = await waitForModalClose(5000);
+        log("ICF: Run Form handoff completed modalClosed=" + String(closed));
+        return closed;
+    }
+
     // Automate the consent collection flow on a subject show page.
     async function collectConsentOnSubjectShow() {
         var tab = await waitForSelector('a#consentTabLink[href="#consentTab"]', 8000);
@@ -53305,7 +53606,9 @@
         }
         collectBtn.click();
         await sleep(600);
-        var barcodeIcon = await waitForSelector('i#icfBarcodeIcon.fa.fa-barcode', 2000);
+        var modalEl = getDataCollectionModalElement();
+        var barcodeIcon = modalEl ? modalEl.querySelector('i#icfBarcodeIcon.fa.fa-barcode') : null;
+        if (!barcodeIcon) barcodeIcon = await waitForSelector('i#icfBarcodeIcon.fa.fa-barcode', 3000);
         if (!barcodeIcon) {
             var addNewBtn = document.querySelector('a.btn.btn-default.blue.pull-right[onclick*="maybeAddNew"]');
             if (!addNewBtn) {
@@ -53325,40 +53628,41 @@
             log("Barcode icon not found");
             return false;
         }
-        barcodeIcon.click();
-        await sleep(400);
-        var inputBox = await waitForSelector('input.bootbox-input.bootbox-input-text.form-control', 8000);
-        if (!inputBox) {
-            log("Bootbox input not found");
-            return false;
-        }
         var code = getIcBarcode();
         if (!code || code.length === 0) {
             log("IC barcode missing");
             return false;
         }
-        inputBox.value = code;
-        var evt = new Event("input", { bubbles: true });
-        inputBox.dispatchEvent(evt);
-        var ok1 = await clickBootboxOk(6000);
-        if (!ok1) {
-            log("Bootbox OK for barcode not found");
+        modalEl = getDataCollectionModalElement();
+        var inputOpened = await openBarcodeInput(modalEl);
+        if (!inputOpened) {
+            log("Barcode input could not be opened");
             return false;
         }
-        var nowBtn = await waitForSelector('button[id$="_currentTime"].btn.btn-xs.dark', 8000);
-        if (!nowBtn) {
-            log("Current Time button not found");
+        var barcodeSet = await setBarcodeValueInModal(modalEl, code);
+        if (!barcodeSet) {
+            log("Barcode value was not applied to the ICF item");
             return false;
         }
-        nowBtn.click();
-        await sleep(300);
-        var saveBtn = await waitForSelector('button#saveAndCloseSubmit.btn.green', 8000);
-        if (!saveBtn) {
-            log("Save and Close button not found");
+        modalEl = getDataCollectionModalElement();
+        applyIcfBarcodeToFormFields(modalEl, code);
+        await fillIcfAuditDropdownIfVisible(modalEl);
+        var runFormResult = await runFormAfterIcfBarcode();
+        if (runFormResult === true) return true;
+        if (runFormResult === false) return false;
+        modalEl = getDataCollectionModalElement();
+        await fillTextareaFieldsInModal(modalEl);
+        await clickCurrentTimeButtonsInModal(modalEl);
+        var saveResult = await saveAndCloseModal(modalEl);
+        if (!saveResult.success) {
+            log("ICF Save and Close failed: " + String(saveResult.error));
             return false;
         }
-        saveBtn.click();
-        await sleep(1200);
+        var finalModal = getDataCollectionModalElement();
+        if (finalModal && isModalOpen(finalModal)) {
+            log("ICF modal remained open after save");
+            return false;
+        }
         return true;
     }
 
@@ -53458,7 +53762,14 @@
         while (Date.now() - start < timeoutMs) {
             var rows = document.querySelectorAll('tbody#subjectTableBody > tr');
             if (rows && rows.length > 0) {
-                return rows;
+                for (var i = 0; i < rows.length; i++) {
+                    var row = rows[i];
+                    var hasSubjectLink = !!row.querySelector('a[href^="/secure/study/subjects/show/"]');
+                    var hasDataCells = row.querySelectorAll("td").length > 1;
+                    var rowText = ansNormalizeText(row.textContent).toLowerCase();
+                    var isLoading = rowText === "loading..." || rowText === "loading";
+                    if ((hasSubjectLink || hasDataCells) && !isLoading) return rows;
+                }
             }
             await sleep(200);
         }

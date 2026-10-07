@@ -22110,6 +22110,43 @@
     //==================================================
     //
     //==================================================
+    function isVisibleBarcodeModal(el) {
+        if (!el || !el.isConnected) return false;
+        var style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+        return !!el.getClientRects().length;
+    }
+
+    function getVisibleBarcodeModal() {
+        var modals = document.querySelectorAll("div.bootbox.modal");
+        for (var i = modals.length - 1; i >= 0; i--) {
+            if (isVisibleBarcodeModal(modals[i])) return modals[i];
+        }
+        return null;
+    }
+
+    async function waitForVisibleBarcodeModalInput(timeoutMs) {
+        var start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            var modal = getVisibleBarcodeModal();
+            if (modal) {
+                var input = modal.querySelector(BARCODE_SELECTORS.modalInput);
+                if (input && isVisibleBarcodeModal(input)) return { modal: modal, input: input };
+            }
+            await sleep(100);
+        }
+        return null;
+    }
+
+    async function waitUntilVisibleBarcodeModalCloses(timeoutMs) {
+        var start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            if (!getVisibleBarcodeModal()) return true;
+            await sleep(150);
+        }
+        return false;
+    }
+
     function setAriaBusyOn() {
         log("[PullLabBarcode] setAriaBusyOn: setting aria-busy on body");
         try {
@@ -22182,7 +22219,7 @@
         }
         PULL_LAB_BARCODE_IDLE_IDS = [];
         try {
-            var openModal = document.querySelector(BARCODE_SELECTORS.bootboxVisibleModal);
+            var openModal = getVisibleBarcodeModal();
             if (openModal) {
                 var modalCloseBtn = openModal.querySelector(".bootbox-close-button, button[data-dismiss='modal']");
                 if (modalCloseBtn) {
@@ -22744,10 +22781,10 @@
             attempts = attempts + 1;
             log("[PullLabBarcode] openBarcodeModalAndFill: attempt " + String(attempts) + "/" + String(maxAttempts));
 
-            var existingModal = document.querySelector(BARCODE_SELECTORS.bootboxVisibleModal);
+            var existingModal = getVisibleBarcodeModal();
             if (existingModal) {
                 log("[PullLabBarcode] openBarcodeModalAndFill: existing modal detected, waiting for it to close");
-                await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, BARCODE_TIMEOUTS.waitModalCloseMs);
+                await waitUntilVisibleBarcodeModalCloses(BARCODE_TIMEOUTS.waitModalCloseMs);
                 await sleep(BARCODE_TIMEOUTS.waitSettleMs);
             }
 
@@ -22794,8 +22831,8 @@
             }
 
             log("[PullLabBarcode] openBarcodeModalAndFill: waiting for modal input");
-            var modalInput = await waitForSelector(BARCODE_SELECTORS.modalInput, BARCODE_TIMEOUTS.waitModalOpenMs);
-            if (!modalInput) {
+            var modalResult = await waitForVisibleBarcodeModalInput(BARCODE_TIMEOUTS.waitModalOpenMs);
+            if (!modalResult) {
                 log("[PullLabBarcode] openBarcodeModalAndFill: modal input not found after waiting");
                 if (attempts < maxAttempts) {
                     await sleep(BARCODE_TIMEOUTS.waitSettleMs);
@@ -22804,15 +22841,8 @@
                 return false;
             }
 
-            var visibleModal = document.querySelector(BARCODE_SELECTORS.bootboxVisibleModal);
-            if (!visibleModal) {
-                log("[PullLabBarcode] openBarcodeModalAndFill: modal container not visible");
-                if (attempts < maxAttempts) {
-                    await sleep(BARCODE_TIMEOUTS.waitSettleMs);
-                    continue;
-                }
-                return false;
-            }
+            var visibleModal = modalResult.modal;
+            var modalInput = modalResult.input;
 
             log("[PullLabBarcode] openBarcodeModalAndFill: filling input with '" + iconObj.barcode + "'");
             try {
@@ -22832,10 +22862,10 @@
             await sleep(BARCODE_TIMEOUTS.waitSettleMs);
 
             log("[PullLabBarcode] openBarcodeModalAndFill: looking for confirm button");
-            var confirmBtn = document.querySelector(BARCODE_SELECTORS.modalConfirmPrimary);
+            var confirmBtn = visibleModal.querySelector(BARCODE_SELECTORS.modalConfirmPrimary);
             if (!confirmBtn) {
                 log("[PullLabBarcode] openBarcodeModalAndFill: primary confirm not found, trying fallback");
-                var allPrimaryBtns = document.querySelectorAll(BARCODE_SELECTORS.modalAnyPrimary);
+                var allPrimaryBtns = visibleModal.querySelectorAll(".modal-footer .btn.btn-primary");
                 var bi = 0;
                 while (bi < allPrimaryBtns.length) {
                     var btnText = (allPrimaryBtns[bi].textContent || "").trim();
@@ -22870,7 +22900,7 @@
             }
 
             log("[PullLabBarcode] openBarcodeModalAndFill: waiting for modal to close");
-            var closed = await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, BARCODE_TIMEOUTS.waitModalCloseMs);
+            var closed = await waitUntilVisibleBarcodeModalCloses(BARCODE_TIMEOUTS.waitModalCloseMs);
             if (!closed) {
                 log("[PullLabBarcode] openBarcodeModalAndFill: modal did not close in time");
                 if (attempts < maxAttempts) {
@@ -22880,7 +22910,13 @@
             }
 
             log("[PullLabBarcode] openBarcodeModalAndFill: modal closed, checking for error modal");
-            var errorModal = await waitForSelector(BARCODE_SELECTORS.bootboxVisibleModal, 1500);
+            var errorModal = null;
+            var errorWaitStart = Date.now();
+            while (Date.now() - errorWaitStart < 1500) {
+                errorModal = getVisibleBarcodeModal();
+                if (errorModal) break;
+                await sleep(100);
+            }
             if (errorModal) {
                 var errorBody = errorModal.querySelector(BARCODE_SELECTORS.bootboxBody);
                 var errorText = errorBody ? (errorBody.textContent || "").trim() : "";
@@ -22907,7 +22943,7 @@
                         } catch (okErr) {
                             log("[PullLabBarcode] openBarcodeModalAndFill: OK click error " + String(okErr));
                         }
-                        await waitUntilHidden(BARCODE_SELECTORS.bootboxVisibleModal, BARCODE_TIMEOUTS.waitModalCloseMs);
+                        await waitUntilVisibleBarcodeModalCloses(BARCODE_TIMEOUTS.waitModalCloseMs);
                         await sleep(BARCODE_TIMEOUTS.waitSettleMs);
                     }
                     return "invalid_barcode";
@@ -24954,7 +24990,7 @@
         popover.setAttribute("data-open", "1");
         trigger.setAttribute("aria-expanded", "true");
         panelMenuPosition(trigger, popover);
-        var state = { trigger: trigger, popover: popover, raf: 0, lastRect: "" };
+        var state = { trigger: trigger, popover: popover, raf: 0, lastRect: "", pinned: false };
         state.onOutside = function(e) {
             if (popover.contains(e.target) || trigger.contains(e.target)) return;
             panelMenuClose(false);
@@ -25086,8 +25122,12 @@
                 });
                 trigger.addEventListener("click", function(e) {
                     e.preventDefault();
-                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) panelMenuClose(false);
-                    else panelMenuOpen(trigger, popover, e.detail === 0);
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) {
+                        panelMenuClose(false);
+                    } else {
+                        panelMenuOpen(trigger, popover, e.detail === 0);
+                        if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger) PANEL_MENU_OPEN.pinned = true;
+                    }
                 });
                 // Hover opens the side menu without removing click/keyboard access.
                 // The close delay bridges the gap between the docked trigger and the
@@ -25103,11 +25143,13 @@
                     hoverCloseTimer = setTimeout(function() {
                         hoverCloseTimer = 0;
                         var state = PANEL_MENU_OPEN;
+                        if (state && state.trigger === trigger && state.pinned) return;
                         if (state && state.trigger === trigger && !trigger.matches(":hover") && !popover.matches(":hover")) panelMenuClose(false);
                     }, 220);
                 }
                 trigger.addEventListener("mouseenter", function() {
                     cancelHoverTimers();
+                    if (PANEL_MENU_OPEN && PANEL_MENU_OPEN.pinned) return;
                     if (!(PANEL_MENU_OPEN && PANEL_MENU_OPEN.trigger === trigger)) panelMenuOpen(trigger, popover, false);
                 });
                 trigger.addEventListener("mouseleave", scheduleHoverClose);
@@ -30681,6 +30723,9 @@
         var fallbackTextarea = null;
         var fallbackGutter = null;
         var fallbackHighlight = null;
+        var fallbackHighlightFrame = null;
+        var fallbackSelection = null;
+        var fallbackSelecting = false;
         var semanticTooltip = null;
         var fallbackUndoTimer = null;
         var validationTimer = null;
@@ -31611,15 +31656,35 @@
         }
 
         function refreshFallbackHighlight() {
+            if (fallbackHighlightFrame) {
+                window.cancelAnimationFrame(fallbackHighlightFrame);
+                fallbackHighlightFrame = null;
+            }
             refreshFallbackGutter();
             if (fallbackHighlight && fallbackTextarea) {
-                var marks = mfeAnalyzeEditorMarks(fallbackTextarea.value || "", fallbackTextarea.selectionStart || 0);
+                var value = fallbackTextarea.value || "";
+                var selectionStart = typeof fallbackTextarea.selectionStart === "number" ? fallbackTextarea.selectionStart : 0;
+                var selectionEnd = typeof fallbackTextarea.selectionEnd === "number" ? fallbackTextarea.selectionEnd : selectionStart;
+                var selectionDirection = fallbackTextarea.selectionDirection || "none";
+                fallbackSelection = { start: selectionStart, end: selectionEnd, direction: selectionDirection, value: value };
+                var marks = mfeAnalyzeEditorMarks(value, selectionStart);
                 if (validationJumpMark) {
                     mfeAddMark(marks, validationJumpMark.start, "mfe-validation-jump", "Validation location", validationJumpMark.end);
                 }
-                fallbackHighlight.innerHTML = mfeCodeHtml(fallbackTextarea.value || "", marks);
+                fallbackHighlight.innerHTML = mfeCodeHtml(value, marks);
                 fallbackHighlight.style.transform = "translateY(" + (-fallbackTextarea.scrollTop) + "px)";
+                if (document.activeElement === fallbackTextarea && fallbackTextarea.value === value) {
+                    try { fallbackTextarea.setSelectionRange(selectionStart, selectionEnd, selectionDirection); } catch (ignore) {}
+                }
             }
+        }
+
+        function scheduleFallbackHighlightRefresh() {
+            if (fallbackHighlightFrame) return;
+            fallbackHighlightFrame = window.requestAnimationFrame(function() {
+                fallbackHighlightFrame = null;
+                refreshFallbackHighlight();
+            });
         }
 
         function persistSelectedDraft() {
@@ -31764,15 +31829,30 @@
                     if (fallbackHighlight) fallbackHighlight.style.transform = "translateY(" + (-fallbackTextarea.scrollTop) + "px)";
                     if (semanticTooltip) semanticTooltip.style.display = "none";
                 });
-                fallbackTextarea.addEventListener("click", refreshFallbackHighlight);
-                fallbackTextarea.addEventListener("keyup", refreshFallbackHighlight);
-                fallbackTextarea.addEventListener("select", refreshFallbackHighlight);
-                fallbackTextarea.addEventListener("mousemove", mfeShowSemanticTooltip);
+                fallbackTextarea.addEventListener("mousedown", function() {
+                    fallbackSelecting = true;
+                    if (semanticTooltip) semanticTooltip.style.display = "none";
+                });
+                fallbackTextarea.addEventListener("click", scheduleFallbackHighlightRefresh);
+                fallbackTextarea.addEventListener("keyup", scheduleFallbackHighlightRefresh);
+                fallbackTextarea.addEventListener("select", function() {
+                    fallbackSelection = {
+                        start: fallbackTextarea.selectionStart || 0,
+                        end: fallbackTextarea.selectionEnd || 0,
+                        direction: fallbackTextarea.selectionDirection || "none",
+                        value: fallbackTextarea.value || ""
+                    };
+                    scheduleFallbackHighlightRefresh();
+                });
+                fallbackTextarea.addEventListener("mousemove", function(e) {
+                    if (fallbackSelecting || e.buttons) return;
+                    mfeShowSemanticTooltip(e);
+                });
                 fallbackTextarea.addEventListener("mouseleave", function() { if (semanticTooltip) semanticTooltip.style.display = "none"; });
                 fallbackTextarea.addEventListener("input", function() {
                     if (!selected) return;
                     selected.editedExpression = fallbackTextarea.value;
-                    refreshFallbackHighlight();
+                    scheduleFallbackHighlightRefresh();
                     persistSelectedDraft();
                     mfeScheduleValidation();
                 });
@@ -31851,6 +31931,16 @@
             if (editor) editor.resize();
         });
         document.addEventListener("mouseup", function() {
+            fallbackSelecting = false;
+            if (fallbackTextarea && document.activeElement === fallbackTextarea) {
+                fallbackSelection = {
+                    start: fallbackTextarea.selectionStart || 0,
+                    end: fallbackTextarea.selectionEnd || 0,
+                    direction: fallbackTextarea.selectionDirection || "none",
+                    value: fallbackTextarea.value || ""
+                };
+                scheduleFallbackHighlightRefresh();
+            }
             if (resizing) document.body.style.cursor = "";
             resizing = false;
         });
