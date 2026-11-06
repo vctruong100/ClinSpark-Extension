@@ -544,9 +544,57 @@
     var SVC_POPUP_REF = null;
     var SVC_PROGRESS_POPUP_REF = null;
     var SVC_CANCELLED = false;
-    var SVC_BG_IFRAME = null;
-    var SVC_BG_IFRAME_DOC = null;
-    var SVC_ITEM_CACHE = {}; // keyed by formName -> [{value, text}]
+    var SVC_SESSION_ID = 0;
+    var SVC_BG_WORKERS = [];
+    var SVC_BG_POOL_SIZE = 2;
+    var SVC_ITEM_CACHE = {}; // keyed by full target/source context
+    var SVC_BG_QUEUE = [];
+    var SVC_BG_QUEUE_ORDER = 0;
+    function svcRunOnBgQueue(task, priority) {
+        var sessionId = SVC_SESSION_ID;
+        var entry = { task: task, priority: priority || 0, order: SVC_BG_QUEUE_ORDER++, sessionId: sessionId, state: "queued" };
+        var queuedPromise = new Promise(function(resolve, reject) {
+            entry.resolve = resolve;
+            entry.reject = reject;
+        });
+        queuedPromise._svcQueueEntry = entry;
+        SVC_BG_QUEUE.push(entry);
+        SVC_BG_QUEUE.sort(function(a, b) { return b.priority - a.priority || a.order - b.order; });
+        svcPumpBgQueue();
+        return queuedPromise;
+    }
+
+    function svcPromoteBgQueueTask(queuedPromise, priority) {
+        var entry = queuedPromise && queuedPromise._svcQueueEntry;
+        if (!entry || SVC_BG_QUEUE.indexOf(entry) === -1) return;
+        entry.priority = Math.max(entry.priority, priority || 0);
+        SVC_BG_QUEUE.sort(function(a, b) { return b.priority - a.priority || a.order - b.order; });
+    }
+
+    function svcPumpBgQueue() {
+        if (!SVC_BG_WORKERS.length || !SVC_BG_QUEUE.length) return;
+        for (var wi = 0; wi < SVC_BG_WORKERS.length; wi++) {
+            var worker = SVC_BG_WORKERS[wi];
+            if (worker.busy || !worker.ready) continue;
+            var entry = SVC_BG_QUEUE.shift();
+            if (!entry) break;
+            entry.state = "running";
+            worker.busy = true;
+            worker.currentEntry = entry;
+            Promise.resolve().then((function(entry, worker) {
+                return function() {
+                    if (SVC_CANCELLED || entry.sessionId !== SVC_SESSION_ID) return false;
+                    return entry.task(worker);
+                };
+            })(entry, worker)).then(entry.resolve, entry.reject).then((function(worker) {
+                return function() {
+                    worker.busy = false;
+                    worker.currentEntry = null;
+                    svcPumpBgQueue();
+                };
+            })(worker));
+        }
+    }
     var SVC_TARGET_URLS = [
         "https://cenexel.clinspark.com/secure/crfdesign/activityplans/show/",
         "https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/"
@@ -562,47 +610,60 @@
     }
 
 
-    // Open a background iframe pointing to the current Activity Plan page
     function svcOpenBgIframe() {
-        if (SVC_BG_IFRAME && SVC_BG_IFRAME.parentNode) return;
-        SVC_BG_IFRAME = document.createElement("iframe");
-        SVC_BG_IFRAME.id = "svc_bg_iframe";
-        SVC_BG_IFRAME.src = location.href;
-        SVC_BG_IFRAME.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none;opacity:0;pointer-events:none;";
-        document.body.appendChild(SVC_BG_IFRAME);
-        log("SVC: opened background iframe");
+        svcCloseBgIframe();
+        for (var i = 0; i < SVC_BG_POOL_SIZE; i++) {
+            var iframe = document.createElement("iframe");
+            iframe.id = "svc_bg_iframe_" + i;
+            iframe.src = location.href;
+            iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none;opacity:0;pointer-events:none;";
+            var worker = { id: i, iframe: iframe, doc: null, activeContext: null, busy: false, currentEntry: null, ready: false };
+            SVC_BG_WORKERS.push(worker);
+            document.body.appendChild(iframe);
+        }
+        log("SVC: opened " + SVC_BG_WORKERS.length + " isolated background workers");
     }
 
-    async function svcWaitForBgIframeReady() {
+    async function svcWaitForBgIframeReady(worker) {
         var start = Date.now();
         while (Date.now() - start < 20000) {
             try {
-                var doc = SVC_BG_IFRAME.contentDocument || SVC_BG_IFRAME.contentWindow.document;
+                var doc = worker.iframe.contentDocument || worker.iframe.contentWindow.document;
                 if (doc && doc.readyState === "complete" && doc.getElementById("saTableBody")) {
-                    SVC_BG_IFRAME_DOC = doc;
-                    log("SVC: background iframe ready");
+                    worker.doc = doc;
+                    worker.ready = true;
+                    log("SVC: background iframe worker " + worker.id + " ready");
                     return true;
                 }
             } catch (e) {}
             await sleep(300);
         }
-        log("SVC: background iframe timed out");
+        log("SVC: background iframe worker " + worker.id + " timed out");
         return false;
     }
 
     function svcCloseBgIframe() {
-        if (SVC_BG_IFRAME) {
-            try { if (SVC_BG_IFRAME.parentNode) SVC_BG_IFRAME.parentNode.removeChild(SVC_BG_IFRAME); } catch (e) {}
-            SVC_BG_IFRAME = null;
-            SVC_BG_IFRAME_DOC = null;
-            log("SVC: closed background iframe");
+        while (SVC_BG_QUEUE.length) {
+            var pendingEntry = SVC_BG_QUEUE.shift();
+            pendingEntry.state = "cancelled";
+            pendingEntry.resolve(false);
+        }
+        if (SVC_BG_WORKERS.length) {
+            for (var i = 0; i < SVC_BG_WORKERS.length; i++) {
+                var worker = SVC_BG_WORKERS[i];
+                try { if (worker.iframe && worker.iframe.parentNode) worker.iframe.parentNode.removeChild(worker.iframe); } catch (e) {}
+                worker.doc = null;
+                worker.activeContext = null;
+            }
+            SVC_BG_WORKERS = [];
+            log("SVC: closed background iframe worker pool");
         }
     }
 
     // Find a row in the background iframe's saTableBody
-    function svcFindRowInBgIframe(segmentText, eventText, formText) {
-        if (!SVC_BG_IFRAME_DOC) return null;
-        var tbody = SVC_BG_IFRAME_DOC.getElementById("saTableBody");
+    function svcFindRowInBgIframe(worker, segmentText, eventText, formText) {
+        if (!worker || !worker.doc) return null;
+        var tbody = worker.doc.getElementById("saTableBody");
         if (!tbody) return null;
         var trs = tbody.querySelectorAll("tr");
         for (var i = 0; i < trs.length; i++) {
@@ -619,16 +680,15 @@
     }
 
     // Wait for a modal in the bg iframe
-    async function svcWaitForBgModal(timeoutMs) {
+    async function svcWaitForBgModal(worker, timeoutMs) {
         var start = Date.now();
         var max = timeoutMs || 10000;
         while (Date.now() - start < max) {
             try {
-                var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+                var modal = worker.doc.getElementById("ajaxModal");
                 if (modal && modal.classList.contains("in")) {
                     var body = modal.querySelector("#modalbody, .modal-body");
-                    if (body) {
-                        await sleep(500);
+                    if (body && (body.querySelector("select, input, button") || (body.textContent || "").trim())) {
                         return modal;
                     }
                 }
@@ -638,12 +698,12 @@
         return null;
     }
 
-    async function svcWaitForBgModalClose(timeoutMs) {
+    async function svcWaitForBgModalClose(worker, timeoutMs) {
         var start = Date.now();
         var max = timeoutMs || 10000;
         while (Date.now() - start < max) {
             try {
-                var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+                var modal = worker.doc.getElementById("ajaxModal");
                 if (!modal || !modal.classList.contains("in")) return true;
             } catch (e) {}
             await sleep(300);
@@ -651,76 +711,120 @@
         return false;
     }
 
+    // Dispatch exactly one native change event in the iframe realm.
+    function svcDispatchBgSelectChange(worker, selectId, selectElement) {
+        try {
+            var changeEvent = new worker.iframe.contentWindow.Event("change", { bubbles: true });
+            selectElement.dispatchEvent(changeEvent);
+            return true;
+        } catch (e) {
+            log("SVC: could not dispatch iframe change for " + selectId + " - " + String(e));
+            return false;
+        }
+    }
+
     // Set a select2 value inside the bg iframe by text match
-    async function svcSetBgSelect2ByText(selectId, targetText) {
-        var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+    async function svcSetBgSelect2ByText(worker, selectId, targetText) {
+        var sel = worker.doc.getElementById(selectId);
         if (!sel) {
             log("SVC: bg iframe select " + selectId + " not found");
             return false;
         }
         var normalizedTarget = normalizeVisibilityText(targetText);
         var opts = sel.querySelectorAll("option");
-        var matchValue = null;
-        // Exact normalized match
+        var exactMatches = [];
         for (var i = 0; i < opts.length; i++) {
             var optNorm = normalizeVisibilityText(opts[i].textContent);
-            if (optNorm === normalizedTarget) {
-                matchValue = opts[i].value;
-                break;
-            }
+            if (optNorm === normalizedTarget && (opts[i].value || "").trim()) exactMatches.push(opts[i].value);
         }
-        // Fuzzy fallback: substring containment
+        var matchValue = exactMatches.length === 1 ? exactMatches[0] : null;
+        if (exactMatches.length > 1) {
+            log("SVC: ambiguous exact match for '" + targetText + "' in " + selectId);
+            return false;
+        }
+        // Fuzzy fallback is allowed only when exactly one option matches.
         if (!matchValue) {
+            var fuzzyMatches = [];
             for (var j = 0; j < opts.length; j++) {
                 var optNorm2 = normalizeVisibilityText(opts[j].textContent);
-                if (optNorm2.indexOf(normalizedTarget) !== -1 || normalizedTarget.indexOf(optNorm2) !== -1) {
-                    matchValue = opts[j].value;
-                    break;
-                }
+                if ((opts[j].value || "").trim() && (optNorm2.indexOf(normalizedTarget) !== -1 || normalizedTarget.indexOf(optNorm2) !== -1)) fuzzyMatches.push(opts[j].value);
             }
+            if (fuzzyMatches.length === 1) matchValue = fuzzyMatches[0];
         }
         if (!matchValue) {
             log("SVC: bg iframe could not match '" + targetText + "' in " + selectId);
             return false;
         }
         sel.value = matchValue;
-        sel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin = SVC_BG_IFRAME.contentWindow;
-            if (bgWin.jQuery && bgWin.jQuery.fn.select2) {
-                bgWin.jQuery("#" + selectId).trigger("change");
-            }
-        } catch (e) {}
-        await sleep(500);
+        svcDispatchBgSelectChange(worker, selectId, sel);
         log("SVC: bg iframe selected '" + targetText + "' in " + selectId);
         return true;
     }
 
-    // Wait for a bg iframe select to get options populated
-    async function svcWaitForBgSelectOptions(selectId, timeoutMs) {
+    // Wait for dependent options to finish populating in the background iframe.
+    function svcGetBgAjaxCount(worker) {
+        try {
+            var win = worker && worker.iframe && worker.iframe.contentWindow;
+            var jq = win && (win.jQuery || win.$);
+            return jq && typeof jq.active === "number" ? jq.active : null;
+        } catch (e) { return null; }
+    }
+
+    async function svcWaitForBgSelectOptions(worker, selectId, timeoutMs, changedFromSignature, requireMutation, ajaxBaseline, requireAjaxIdle) {
         var start = Date.now();
-        var max = timeoutMs || 5000;
+        var max = timeoutMs || 10000;
+        var lastSignature = null;
+        var stableCount = 0;
+        var mutationCount = 0;
+        var sawAjax = false;
+        var observer = null;
+        try {
+            var observedSelect = worker && worker.doc && worker.doc.getElementById(selectId);
+            var Observer = worker && worker.iframe && worker.iframe.contentWindow.MutationObserver;
+            if (observedSelect && Observer) {
+                observer = new Observer(function(records) { mutationCount += records.length || 1; });
+                observer.observe(observedSelect, { childList: true, subtree: true });
+            }
+        } catch (e) {}
         while (Date.now() - start < max) {
             try {
-                var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+                var sel = worker.doc.getElementById(selectId);
                 if (sel) {
                     var opts = sel.querySelectorAll("option");
-                    if (opts.length > 1) {
-                        await sleep(200);
+                    var signature = Array.prototype.map.call(opts, function(opt) {
+                        return (opt.value || "") + "\u001f" + (opt.textContent || "").trim();
+                    }).join("\u001e");
+                    var validCount = 0;
+                    for (var i = 0; i < opts.length; i++) if ((opts[i].value || "").trim()) validCount++;
+                    var hasBaseline = changedFromSignature !== undefined && changedFromSignature !== null;
+                    var ajaxCount = svcGetBgAjaxCount(worker);
+                    if (ajaxBaseline !== undefined && ajaxBaseline !== null && ajaxCount !== null && ajaxCount > ajaxBaseline) sawAjax = true;
+                    var ajaxSettled = ajaxBaseline === undefined || ajaxBaseline === null || ajaxCount === null ||
+                        (sawAjax ? ajaxCount <= ajaxBaseline : (!requireAjaxIdle || ajaxCount === 0));
+                    // Option changes can be staged (clear first, refill after Ajax); don't
+                    // accept an intermediate list while the dependent request is in flight.
+                    var changed = !hasBaseline || signature !== changedFromSignature || (requireMutation && mutationCount > 0) || (sawAjax && ajaxSettled);
+                    var hasStableData = validCount > 0;
+                    if (hasStableData && ajaxSettled && signature === lastSignature && changed) stableCount++;
+                    else stableCount = 0;
+                    lastSignature = signature;
+                    if (hasStableData && ajaxSettled && changed && stableCount >= 3) {
+                        if (observer) observer.disconnect();
                         return true;
                     }
                 }
             } catch (e) {}
-            await sleep(200);
+            await sleep(100);
         }
+        if (observer) observer.disconnect();
         return false;
     }
 
     // Collect option list from a bg iframe select
-    function svcCollectBgSelectOptions(selectId) {
+    function svcCollectBgSelectOptions(worker, selectId) {
         var results = [];
         try {
-            var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+            var sel = worker.doc.getElementById(selectId);
             if (!sel) return results;
             var opts = sel.querySelectorAll("option");
             for (var i = 0; i < opts.length; i++) {
@@ -735,8 +839,8 @@
     }
 
     // Open the visibility modal in the bg iframe for a given row
-    async function svcOpenVisibilityModalInBg(segmentText, eventText, formText) {
-        var row = svcFindRowInBgIframe(segmentText, eventText, formText);
+    async function svcOpenVisibilityModalInBg(worker, segmentText, eventText, formText) {
+        var row = svcFindRowInBgIframe(worker, segmentText, eventText, formText);
         if (!row) {
             log("SVC: bg iframe row not found for " + segmentText + " | " + eventText + " | " + formText);
             return false;
@@ -748,7 +852,7 @@
             return false;
         }
         visLink.click();
-        var modal = await svcWaitForBgModal(10000);
+        var modal = await svcWaitForBgModal(worker, 10000);
         if (!modal) {
             log("SVC: bg iframe visibility modal did not open");
             return false;
@@ -758,9 +862,13 @@
     }
 
     // Select first activity plan option, then select the scheduled activity matching studyEvent + formName
-    async function svcSelectActivityAndSA(studyEvent, formName) {
+    async function svcSelectActivityAndSA(worker, studyEvent, formName) {
+        if (!(await svcWaitForBgSelectOptions(worker, "visibleActivityPlan", 15000))) {
+            log("SVC: visibleActivityPlan did not populate");
+            return false;
+        }
         // Select first available activity plan
-        var apSel = SVC_BG_IFRAME_DOC.getElementById("visibleActivityPlan");
+        var apSel = worker.doc.getElementById("visibleActivityPlan");
         if (!apSel) {
             log("SVC: visibleActivityPlan not found");
             return false;
@@ -775,17 +883,13 @@
             log("SVC: no activity plan options available");
             return false;
         }
+        var oldSASelect = worker.doc.getElementById("visibleScheduledActivity");
+        var oldSASignature = oldSASelect ? Array.prototype.map.call(oldSASelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
         apSel.value = firstAPValue;
-        apSel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin = SVC_BG_IFRAME.contentWindow;
-            if (bgWin.jQuery && bgWin.jQuery.fn.select2) bgWin.jQuery("#visibleActivityPlan").trigger("change");
-        } catch (e) {}
+        svcDispatchBgSelectChange(worker, "visibleActivityPlan", apSel);
         log("SVC: selected first activity plan value=" + firstAPValue);
-        await sleep(1000);
-
         // Wait for scheduledActivity to populate
-        var saReady = await svcWaitForBgSelectOptions("visibleScheduledActivity", 5000);
+        var saReady = await svcWaitForBgSelectOptions(worker, "visibleScheduledActivity", 15000, oldSASignature);
         if (!saReady) {
             log("SVC: visibleScheduledActivity did not populate");
             return false;
@@ -793,73 +897,107 @@
 
         // Match by studyEvent + formName combo
         var targetCombo = normalizeVisibilityText(studyEvent + " " + formName);
-        var saSel = SVC_BG_IFRAME_DOC.getElementById("visibleScheduledActivity");
+        var saSel = worker.doc.getElementById("visibleScheduledActivity");
         var saOpts = saSel ? saSel.querySelectorAll("option") : [];
-        var saMatch = null;
+        var saMatches = [];
         for (var j = 0; j < saOpts.length; j++) {
             var optNorm = normalizeVisibilityText(saOpts[j].textContent);
-            if (optNorm.indexOf(targetCombo) !== -1) {
-                saMatch = saOpts[j].value;
-                break;
-            }
+            if (saOpts[j].value && optNorm.indexOf(targetCombo) !== -1) saMatches.push(saOpts[j].value);
         }
-        // Fallback: try matching formName alone
+        if (saMatches.length > 1) {
+            log("SVC: ambiguous scheduledActivity match for " + studyEvent + " / " + formName);
+            return false;
+        }
+        var saMatch = saMatches.length === 1 ? saMatches[0] : null;
+        // Fallback to form name only when it identifies exactly one option.
         if (!saMatch) {
             var targetForm = normalizeVisibilityText(formName);
+            var formMatches = [];
             for (var k = 0; k < saOpts.length; k++) {
                 var optNorm2 = normalizeVisibilityText(saOpts[k].textContent);
-                if (optNorm2.indexOf(targetForm) !== -1) {
-                    saMatch = saOpts[k].value;
-                    break;
-                }
+                if (saOpts[k].value && optNorm2.indexOf(targetForm) !== -1) formMatches.push(saOpts[k].value);
             }
+            if (formMatches.length === 1) saMatch = formMatches[0];
         }
         if (!saMatch) {
             log("SVC: could not match scheduledActivity for " + studyEvent + " / " + formName);
             return false;
         }
+        var oldItemSelect = worker.doc.getElementById("visibleItemRef");
+        var oldItemSignature = oldItemSelect ? Array.prototype.map.call(oldItemSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
         saSel.value = saMatch;
-        saSel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin2 = SVC_BG_IFRAME.contentWindow;
-            if (bgWin2.jQuery && bgWin2.jQuery.fn.select2) bgWin2.jQuery("#visibleScheduledActivity").trigger("change");
-        } catch (e) {}
+        svcDispatchBgSelectChange(worker, "visibleScheduledActivity", saSel);
         log("SVC: selected scheduledActivity value=" + saMatch);
-        await sleep(1000);
-
         // Wait for item ref to populate
-        await svcWaitForBgSelectOptions("visibleItemRef", 5000);
-        return true;
+        return await svcWaitForBgSelectOptions(worker, "visibleItemRef", 15000, oldItemSignature);
     }
 
     // Collect items from the bg iframe after SA is selected
-    function svcCollectItems() {
-        return svcCollectBgSelectOptions("visibleItemRef");
+    function svcCollectItems(worker) {
+        return svcCollectBgSelectOptions(worker, "visibleItemRef");
     }
 
     // Select an item in the bg iframe and collect its values
-    async function svcSelectItemAndCollectValues(itemText) {
-        var matched = await svcSetBgSelect2ByText("visibleItemRef", itemText);
+    async function svcSelectItemAndCollectValues(worker, itemText) {
+        var valueSelect = worker && worker.doc && worker.doc.getElementById("visibleCodeListItem");
+        var oldValueSignature = valueSelect ? Array.prototype.map.call(valueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
+        var matched = await svcSetBgSelect2ByText(worker, "visibleItemRef", itemText);
         if (!matched) return [];
-        await sleep(500);
-        await svcWaitForBgSelectOptions("visibleCodeListItem", 5000);
-        return svcCollectBgSelectOptions("visibleCodeListItem");
+        if (!(await svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 15000, oldValueSignature))) return [];
+        return svcCollectBgSelectOptions(worker, "visibleCodeListItem");
+    }
+
+    async function svcSelectItemByValueAndCollectValues(worker, itemValue) {
+        var itemSelect = worker && worker.doc && worker.doc.getElementById("visibleItemRef");
+        var valueSelect = worker && worker.doc && worker.doc.getElementById("visibleCodeListItem");
+        if (!itemSelect || !valueSelect) return { ok: false, values: [] };
+        var desiredValue = String(itemValue || "");
+        var exists = false;
+        for (var i = 0; i < itemSelect.options.length; i++) {
+            if (String(itemSelect.options[i].value) === desiredValue) { exists = true; break; }
+        }
+        if (!exists) return { ok: false, values: [] };
+        if (String(itemSelect.value) === desiredValue) {
+            var activeBefore = svcGetBgAjaxCount(worker);
+            var alreadyReady = await svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 10000, null, false, activeBefore, true);
+            var existingValues = alreadyReady ? svcCollectBgSelectOptions(worker, "visibleCodeListItem") : [];
+            return { ok: alreadyReady && existingValues.length > 0, values: existingValues, reason: alreadyReady ? "Item Value list was empty." : "Item Value request did not settle." };
+        }
+        var oldSignature = Array.prototype.map.call(valueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e");
+        var ajaxBaseline = svcGetBgAjaxCount(worker);
+        var readyPromise = svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 12000, oldSignature, true, ajaxBaseline, true);
+        itemSelect.value = desiredValue;
+        svcDispatchBgSelectChange(worker, "visibleItemRef", itemSelect);
+        var ready = await readyPromise;
+        if (!ready) {
+            log("SVC: Item Value load timed out; retrying item change once itemId=" + desiredValue);
+            var retryValueSelect = worker.doc.getElementById("visibleCodeListItem");
+            var retrySignature = retryValueSelect ? Array.prototype.map.call(retryValueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
+            var retryAjaxBaseline = svcGetBgAjaxCount(worker);
+            var retryPromise = svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 6000, retrySignature, true, retryAjaxBaseline, true);
+            svcDispatchBgSelectChange(worker, "visibleItemRef", itemSelect);
+            ready = await retryPromise;
+        }
+        var values = ready ? svcCollectBgSelectOptions(worker, "visibleCodeListItem") : [];
+        log("SVC: item values loaded=" + ready + " count=" + values.length + " itemId=" + desiredValue);
+        return { ok: ready && values.length > 0, values: values, reason: ready ? "Item Value list was empty." : "Item Value options did not stabilize after retry." };
     }
 
     // Close the modal in the bg iframe
-    async function svcCloseBgModal() {
+    async function svcCloseBgModal(worker) {
         try {
-            var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+            var modal = worker.doc.getElementById("ajaxModal");
             if (modal) {
                 var closeBtn = modal.querySelector("button[data-dismiss='modal'], .close, .btn-default");
                 if (closeBtn) closeBtn.click();
                 else {
                     var esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true });
-                    SVC_BG_IFRAME_DOC.dispatchEvent(esc);
+                    worker.doc.dispatchEvent(esc);
                 }
             }
         } catch (e) {}
-        await svcWaitForBgModalClose(5000);
+        await svcWaitForBgModalClose(worker, 5000);
+        worker.activeContext = null;
     }
 
     // Build the SVC selection GUI
@@ -1064,14 +1202,26 @@
         }
 
         function updateConfirmState() {
-            if (getFilledHiddenDropboxCount() > 0) {
+            var allMappingsReady = true;
+            for (var key in dropboxMappings) {
+                if (!dropboxMappings.hasOwnProperty(key)) continue;
+                var target = saItems[parseInt(key)];
+                if (target && target.visibilityMustBeSet) {
+                    var currentMapping = dropboxMappings[key];
+                    var selectedCache = currentMapping._itemValuesById && currentMapping._itemValuesById[String(currentMapping._prefillItemId || "")];
+                    if (currentMapping._loadState !== "ready" || currentMapping._valuesLoading || (currentMapping._prefillItemId && selectedCache && selectedCache.state !== "ready")) allMappingsReady = false;
+                }
+            }
+            if (getFilledHiddenDropboxCount() > 0 && allMappingsReady) {
                 confirmBtn.disabled = false;
                 confirmBtn.style.opacity = "1";
                 confirmBtn.style.cursor = "pointer";
+                confirmBtn.title = "Apply the configured visibility conditions";
             } else {
                 confirmBtn.disabled = true;
                 confirmBtn.style.opacity = "0.5";
                 confirmBtn.style.cursor = "not-allowed";
+                confirmBtn.title = allMappingsReady ? "Map at least one form" : "Wait for all mapped visibility fields to finish loading, or retry failed mappings";
             }
         }
 
@@ -1203,6 +1353,9 @@
                         if (isDropEnabled) {
                             rowBg = mapping ? "#1e2e1e" : "#2a2235";
                             rowBorder = mapping ? "#3a6a3a" : "#554";
+                            if (mapping && mapping._loadState === "ready" && !mapping._valuesLoading) rowBorder = "#28b8a0";
+                            else if (mapping && mapping._loadState === "error") rowBorder = "#d45b5b";
+                            else if (mapping && (mapping._valuesLoading || mapping._loadState === "queued" || mapping._loadState === "loading")) rowBorder = "#c89a42";
                         }
 
                         var formRow = document.createElement("div");
@@ -1263,7 +1416,8 @@
                             dropbox.appendChild(disabledLabel);
                         } else if (mapping) {
                             var tag = document.createElement("span");
-                            tag.textContent = mapping.form;
+                            var svcStateLabel = mapping._loadState === "queued" ? " · Queued" : mapping._loadState === "loading" ? " · Loading…" : mapping._loadState === "ready" ? " · Ready" : mapping._loadState === "error" ? " · Retry" : "";
+                            tag.textContent = mapping.form + svcStateLabel;
                             tag.title = mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
                             tag.style.cssText = "display:inline-block;padding:1px 4px;background:#3a3a5a;border-radius:3px;font-size:9px;color:#ccc;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;flex:1;min-width:0;";
                             tag.addEventListener("click", (function(gIdx) {
@@ -1271,9 +1425,8 @@
                                     e.stopPropagation();
                                     selectedDropboxIdx = gIdx;
                                     log("SVC: dropbox form clicked idx=" + gIdx);
-                                    renderPrimaryPanel();
-                                    renderSegNavPanel();
                                     loadFormAttributesForDropbox(gIdx);
+                                    renderSegNavPanel();
                                 };
                             })(globalIdx));
                             // X remove button - appended to dropbox directly so it's always visible
@@ -1354,8 +1507,9 @@
                                         sourceIdx: parseInt(srcIdx),
                                         prefillReason: "Add visibility condition"
                                     };
+                                    selectedDropboxIdx = gIdx;
                                     log("SVC: mapped form " + srcItem.form + " to dropbox idx=" + gIdx);
-                                    renderPrimaryPanel();
+                                    loadFormAttributesForDropbox(gIdx);
                                     renderSegNavPanel();
                                     updateConfirmState();
                                 };
@@ -1396,7 +1550,7 @@
         attrSection.style.cssText = "flex:1;display:flex;flex-direction:column;gap:8px;padding-bottom:8px;";
 
         var attrPlaceholder = document.createElement("div");
-        attrPlaceholder.textContent = "Click a form inside a dropbox to configure its visibility condition";
+        attrPlaceholder.textContent = "Drop a source form to load its visibility fields automatically, or select a mapped form to edit it";
         attrPlaceholder.style.cssText = "color:#666;font-size:12px;text-align:center;padding:20px;";
 
         // Item dropdown
@@ -1408,21 +1562,16 @@
         itemSelect.addEventListener("change", async function() {
             var selectedText = this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
             if (!selectedText) return;
+            var selectedValue = this.options[this.selectedIndex] ? this.options[this.selectedIndex].value : "";
             log("SVC: item selected: " + selectedText);
-            // Persist selection back to mapping
-            if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
-                dropboxMappings[String(selectedDropboxIdx)].prefillItem = selectedText;
-                dropboxMappings[String(selectedDropboxIdx)].prefillItemValue = null;
+            var valueLoadIdx = selectedDropboxIdx;
+            var valueLoadMapping = valueLoadIdx !== null ? dropboxMappings[String(valueLoadIdx)] : null;
+            if (valueLoadMapping) {
+                valueLoadMapping.prefillItem = selectedText;
+                valueLoadMapping._prefillItemId = selectedValue;
+                valueLoadMapping.prefillItemValue = null;
             }
-            // Collect item values via bg iframe
-            currentItemValues = await svcSelectItemAndCollectValues(selectedText);
-            // Cache item values on the mapping so they persist across dropbox switches
-            if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
-                dropboxMappings[String(selectedDropboxIdx)]._cachedItemValues = currentItemValues.slice();
-            }
-            renderItemValueDropdown();
-            renderPrimaryPanel();
-            renderSegNavPanel();
+            if (valueLoadMapping) await svcLoadMappingItemValues(valueLoadIdx, valueLoadMapping, selectedValue, selectedText, false);
         });
 
         // Item Value dropdown
@@ -1432,7 +1581,7 @@
         var itemValSelect = document.createElement("select");
         itemValSelect.style.cssText = "padding:6px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;width:100%;font-size:12px;";
         itemValSelect.addEventListener("change", function() {
-            var selectedText = this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
+            var selectedText = this.selectedIndex > 0 && this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
             if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
                 dropboxMappings[String(selectedDropboxIdx)].prefillItemValue = selectedText || null;
                 log("SVC: item value persisted: " + selectedText);
@@ -1458,7 +1607,7 @@
         });
 
 
-        function renderItemDropdown(items, prefillItem) {
+        function renderItemDropdown(items, prefillItem, prefillItemId) {
             itemSelect.innerHTML = "";
             var defaultOpt = document.createElement("option");
             defaultOpt.value = "";
@@ -1470,7 +1619,12 @@
                 opt.textContent = items[i].text;
                 itemSelect.appendChild(opt);
             }
-            if (prefillItem) {
+            if (prefillItemId) {
+                for (var vi = 0; vi < itemSelect.options.length; vi++) {
+                    if (String(itemSelect.options[vi].value) === String(prefillItemId)) { itemSelect.selectedIndex = vi; break; }
+                }
+            }
+            if (itemSelect.selectedIndex === 0 && prefillItem) {
                 for (var j = 0; j < itemSelect.options.length; j++) {
                     if (normalizeVisibilityText(itemSelect.options[j].text) === normalizeVisibilityText(prefillItem)) {
                         itemSelect.selectedIndex = j;
@@ -1502,7 +1656,249 @@
             }
         }
 
-        async function loadFormAttributesForDropbox(gIdx, forceRefresh) {
+        function svcLoadMappingItemValues(gIdx, mapping, itemId, itemText, forceRefresh, queuePriority) {
+            var idKey = String(itemId || "");
+            if (!mapping || !idKey) return Promise.resolve(false);
+            var priority = typeof queuePriority === "number" ? queuePriority : (selectedDropboxIdx === gIdx ? 40 : 5);
+            var backgroundPrefetch = priority <= 0;
+            mapping._itemValuesById = mapping._itemValuesById || {};
+            mapping._itemValuePromisesById = mapping._itemValuePromisesById || {};
+            var cached = mapping._itemValuesById[idKey];
+            if (!forceRefresh && cached && cached.state === "ready") {
+                if (selectedDropboxIdx === gIdx) {
+                    currentItemValues = cached.values.slice();
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                return Promise.resolve(true);
+            }
+            if (!forceRefresh && mapping._itemValuePromisesById[idKey]) {
+                if (selectedDropboxIdx === gIdx) svcPromoteBgQueueTask(mapping._itemValuePromisesById[idKey], priority);
+                if (selectedDropboxIdx === gIdx) {
+                    currentItemValues = [];
+                    renderSelectedDropboxConfig(gIdx);
+                    updateConfirmState();
+                }
+                return mapping._itemValuePromisesById[idKey];
+            }
+            mapping._itemValuesById[idKey] = { state: "loading", values: cached && cached.values ? cached.values : [] };
+            mapping._valuesLoading = true;
+            if (!backgroundPrefetch || selectedDropboxIdx === gIdx) {
+                renderPrimaryPanel();
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                updateConfirmState();
+            }
+            var task = svcRunOnBgQueue(async function(worker) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return { ok: false, values: [], reason: "This mapping is no longer active." };
+                if (!(await svcEnsureBgMappingContext(worker, gIdx, mapping))) return { ok: false, values: [], reason: "Could not open the background visibility form. Retry the mapping." };
+                return await svcSelectItemByValueAndCollectValues(worker, idKey);
+            }, priority);
+            mapping._itemValuePromisesById[idKey] = task;
+            var resultPromise = task.then(function(result) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                var ok = !!(result && result.ok);
+                var values = result && Array.isArray(result.values) ? result.values : [];
+                mapping._itemValuesById[idKey] = { state: ok ? "ready" : "error", values: values.slice(), error: ok ? "" : String(result && result.reason || "The background request returned no usable Item Values.") };
+                if (ok && !mapping.prefillItemValue && String(mapping._prefillItemId) === idKey && values.length === 1) mapping.prefillItemValue = values[0].text;
+                return ok;
+            }).catch(function(err) {
+                var errorText = String(err && err.message || err || "The background request failed.");
+                if (dropboxMappings[String(gIdx)] === mapping) mapping._itemValuesById[idKey] = { state: "error", values: [], error: errorText };
+                log("SVC: item values failed for " + itemText + " - " + errorText);
+                return false;
+            }).then(function(ok) {
+                if (mapping._itemValuePromisesById) delete mapping._itemValuePromisesById[idKey];
+                mapping._valuesLoading = !!(mapping._itemValuePromisesById && Object.keys(mapping._itemValuePromisesById).length);
+                if (!backgroundPrefetch || selectedDropboxIdx === gIdx) renderPrimaryPanel();
+                if (dropboxMappings[String(gIdx)] === mapping && selectedDropboxIdx === gIdx) {
+                    var selectedCache = mapping._itemValuesById[idKey];
+                    currentItemValues = String(mapping._prefillItemId) === idKey && selectedCache && selectedCache.state === "ready" ? selectedCache.values.slice() : [];
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                if (!backgroundPrefetch || selectedDropboxIdx === gIdx) updateConfirmState();
+                return ok;
+            });
+            resultPromise._svcQueueEntry = task._svcQueueEntry;
+            mapping._itemValuePromisesById[idKey] = resultPromise;
+            return resultPromise;
+        }
+
+        function svcPrefetchMappingItemValues(gIdx, mapping) {
+            if (!mapping || dropboxMappings[String(gIdx)] !== mapping || mapping._itemValuesPrefetchStarted) return;
+            var items = Array.isArray(mapping._cachedItems) ? mapping._cachedItems : [];
+            if (!items.length) return;
+            mapping._itemValuesPrefetchStarted = true;
+            var seen = {};
+            var scheduled = 0;
+            for (var i = 0; i < items.length; i++) {
+                var itemId = String(items[i] && items[i].value || "");
+                if (!itemId || seen[itemId]) continue;
+                seen[itemId] = true;
+                var cached = mapping._itemValuesById && mapping._itemValuesById[itemId];
+                if (cached && cached.state === "ready") continue;
+                svcLoadMappingItemValues(gIdx, mapping, itemId, items[i].text || itemId, false, 0);
+                scheduled++;
+            }
+            log("SVC: prefetch queued " + scheduled + " Item Value lists for mapping idx=" + gIdx);
+        }
+
+        async function svcEnsureBgMappingContext(worker, gIdx, mapping) {
+            var target = saItems[gIdx];
+            if (!worker || !worker.ready || !target || !mapping) return false;
+            var contextKey = JSON.stringify([target.segment, target.studyEvent, target.form, target.saRowIndex, mapping.segment, mapping.studyEvent, mapping.form, mapping.sourceIdx].map(function(v) { return normalizeVisibilityText(String(v == null ? "" : v)); }));
+            var modal = worker.doc && worker.doc.getElementById("ajaxModal");
+            if (worker.activeContext === contextKey && modal && modal.classList.contains("in")) return true;
+            await svcCloseBgModal(worker);
+            var opened = await svcOpenVisibilityModalInBg(worker, target.segment, target.studyEvent, target.form);
+            if (!opened || !(await svcSelectActivityAndSA(worker, mapping.studyEvent, mapping.form))) return false;
+            worker.activeContext = contextKey;
+            return true;
+        }
+
+        function renderSelectedDropboxConfig(gIdx) {
+            var mapping = dropboxMappings[String(gIdx)];
+            var target = saItems[gIdx];
+            attrSection.innerHTML = "";
+            if (!mapping || !target) { attrSection.appendChild(attrPlaceholder); return; }
+            if (mapping._loadState === "queued" || mapping._loadState === "loading") {
+                var status = document.createElement("div");
+                status.style.cssText = "padding:16px;color:#b9d9ff;font-size:12px;text-align:center;line-height:1.5;";
+                status.textContent = (mapping._loadState === "queued" ? "Queued" : "Loading") + " visibility fields for " + target.form + " from " + mapping.form + "…";
+                attrSection.appendChild(status);
+                return;
+            }
+            if (mapping._loadState === "error" && !(mapping._cachedItems && mapping._cachedItems.length)) {
+                var error = document.createElement("div");
+                error.style.cssText = "padding:12px;color:#ffb4a8;font-size:12px;text-align:center;";
+                error.textContent = "Could not load visibility fields: " + (mapping._loadError || "the background request did not return usable fields.");
+                var retry = document.createElement("button");
+                retry.textContent = "Retry loading";
+                retry.style.cssText = "padding:6px 12px;margin:0 auto;border:1px solid #6b82ab;border-radius:4px;background:#26364d;color:#fff;cursor:pointer;";
+                retry.onclick = function() { loadFormAttributesForDropbox(gIdx, true); };
+                attrSection.appendChild(error);
+                attrSection.appendChild(retry);
+                return;
+            }
+            currentItems = mapping._cachedItems || [];
+            var selectedItemId = mapping._prefillItemId || "";
+            if (!selectedItemId && mapping.prefillItem) {
+                var itemMatches = currentItems.filter(function(item) { return normalizeVisibilityText(item.text) === normalizeVisibilityText(mapping.prefillItem); });
+                if (itemMatches.length === 1) selectedItemId = itemMatches[0].value;
+            }
+            if (selectedItemId && !mapping._prefillItemId) mapping._prefillItemId = selectedItemId;
+            var selectedValueCache = mapping._itemValuesById && mapping._itemValuesById[String(selectedItemId)];
+            currentItemValues = selectedValueCache && selectedValueCache.state === "ready" ? selectedValueCache.values.slice() : [];
+            if (!selectedValueCache && mapping._cachedItemValuesLoaded) currentItemValues = mapping._cachedItemValues || [];
+            if (!currentItems.length) { attrSection.appendChild(attrPlaceholder); return; }
+            var info = document.createElement("div");
+            info.style.cssText = "padding:6px 8px;margin-bottom:4px;border:1px solid #333;border-radius:4px;background:#1e1e2e;";
+            var targetLine = document.createElement("div");
+            targetLine.style.cssText = "font-size:10px;color:#8a8aaa;margin-bottom:2px;";
+            targetLine.textContent = "Target: " + target.segment + " - " + target.studyEvent + " - " + target.form;
+            var sourceLine = document.createElement("div");
+            sourceLine.style.cssText = "font-size:10px;color:#9a9aba;";
+            sourceLine.textContent = "Source: " + mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
+            info.appendChild(targetLine);
+            info.appendChild(sourceLine);
+            attrSection.appendChild(info);
+            attrSection.appendChild(itemLbl);
+            renderItemDropdown(currentItems, mapping.prefillItem || null, selectedItemId);
+            attrSection.appendChild(itemSelect);
+            attrSection.appendChild(itemValLbl);
+            renderItemValueDropdown(mapping.prefillItemValue || null);
+            itemValSelect.disabled = !!(selectedValueCache && selectedValueCache.state === "loading");
+            attrSection.appendChild(itemValSelect);
+            if (selectedValueCache && selectedValueCache.state === "loading") {
+                var valueLoading = document.createElement("div");
+                valueLoading.style.cssText = "font-size:11px;color:#9bbbd8;padding:4px 0;";
+                valueLoading.textContent = "Loading values for " + (mapping.prefillItem || "the selected item") + "…";
+                attrSection.appendChild(valueLoading);
+            } else if (selectedValueCache && selectedValueCache.state === "error") {
+                var valueError = document.createElement("div");
+                valueError.style.cssText = "font-size:11px;color:#ffb4a8;padding:4px 0;";
+                valueError.textContent = (selectedValueCache.error || "Values did not load.") + " Your selected item is saved; retry without losing it.";
+                var valueRetry = document.createElement("button");
+                valueRetry.textContent = "Retry item values";
+                valueRetry.style.cssText = "padding:5px 10px;border:1px solid #6b82ab;border-radius:4px;background:#26364d;color:#fff;cursor:pointer;align-self:flex-start;";
+                valueRetry.onclick = function() { svcLoadMappingItemValues(gIdx, mapping, selectedItemId, mapping.prefillItem, true); };
+                attrSection.appendChild(valueError);
+                attrSection.appendChild(valueRetry);
+            }
+            attrSection.appendChild(reasonLbl);
+            reasonInput.value = mapping.prefillReason || "Add visibility condition";
+            attrSection.appendChild(reasonInput);
+        }
+
+        function loadFormAttributesForDropbox(gIdx, forceRefresh) {
+            var mapping = dropboxMappings[String(gIdx)];
+            if (!mapping) return Promise.resolve();
+            if (!forceRefresh && mapping._loadState === "ready" && mapping._cachedItems && mapping._cachedItems.length) {
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                svcPrefetchMappingItemValues(gIdx, mapping);
+                var readyItemId = String(mapping._prefillItemId || "");
+                var readyValueState = readyItemId && mapping._itemValuesById && mapping._itemValuesById[readyItemId];
+                if (readyItemId && (!readyValueState || readyValueState.state === "error")) {
+                    svcLoadMappingItemValues(gIdx, mapping, readyItemId, mapping.prefillItem || "", false);
+                }
+                return Promise.resolve(true);
+            }
+            if (mapping._loadPromise && !forceRefresh) {
+                if (selectedDropboxIdx === gIdx) svcPromoteBgQueueTask(mapping._loadPromise, 60);
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                return mapping._loadPromise;
+            }
+            mapping._loadState = "queued";
+            mapping._loadError = null;
+            var loadSessionId = SVC_SESSION_ID;
+            var task = svcRunOnBgQueue(function(worker) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                return Promise.resolve(loadFormAttributesForDropboxQueued(worker, gIdx, forceRefresh)).then(async function(result) {
+                    if (result || SVC_CANCELLED || loadSessionId !== SVC_SESSION_ID || dropboxMappings[String(gIdx)] !== mapping || !mapping._loadError || /target activity-plan row/i.test(mapping._loadError)) return result;
+                    log("SVC: worker " + worker.id + " retrying transient mapping load idx=" + gIdx + " reason=" + mapping._loadError);
+                    mapping._loadError = "Temporary load issue; retrying once…";
+                    await svcCloseBgModal(worker);
+                    return await loadFormAttributesForDropboxQueued(worker, gIdx, true);
+                });
+            }, selectedDropboxIdx === gIdx ? 50 : 1);
+            mapping._loadPromise = task;
+            renderPrimaryPanel();
+            if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+            return task.then(function(result) {
+                if (dropboxMappings[String(gIdx)] === mapping) {
+                    mapping._loadState = result ? "ready" : "error";
+                    if (!result && !mapping._loadError) mapping._loadError = "request returned no Item fields.";
+                }
+                if (!result && selectedDropboxIdx === gIdx && dropboxMappings[String(gIdx)] === mapping) {
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                return result;
+            }).catch(function(err) {
+                if (dropboxMappings[String(gIdx)] === mapping) {
+                    mapping._loadState = "error";
+                    mapping._loadError = String(err && err.message || err || "unexpected background error");
+                }
+                log("SVC: queued visibility load failed idx=" + gIdx + " - " + String(err));
+                return false;
+            }).then(function(result) {
+                if (dropboxMappings[String(gIdx)] === mapping) mapping._loadPromise = null;
+                renderPrimaryPanel();
+                if (selectedDropboxIdx === gIdx) {
+                    renderSelectedDropboxConfig(gIdx);
+                    var itemId = String(mapping._prefillItemId || "");
+                    var valueState = itemId && mapping._itemValuesById && mapping._itemValuesById[itemId];
+                    if (result && itemId && (!valueState || valueState.state === "error")) {
+                        svcLoadMappingItemValues(gIdx, mapping, itemId, mapping.prefillItem || "", false);
+                    }
+                }
+                if (result && dropboxMappings[String(gIdx)] === mapping) svcPrefetchMappingItemValues(gIdx, mapping);
+                return result;
+            });
+        }
+
+        async function loadFormAttributesForDropboxQueued(worker, gIdx, forceRefresh) {
+            var activeMapping = dropboxMappings[String(gIdx)];
+            if (activeMapping) activeMapping._loadState = "loading";
+            renderPrimaryPanel();
+            if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
             var loadSeq = svcAttrLoadSeq + 1;
             svcAttrLoadSeq = loadSeq;
             var mapping = dropboxMappings[String(gIdx)];
@@ -1514,6 +1910,7 @@
             // Source = the form that was dragged into the dropbox (mapping)
             var targetItem = saItems[gIdx];
             if (!targetItem) {
+                mapping._loadError = "target activity-plan row was not found.";
                 log("SVC: target saItem not found for gIdx=" + gIdx);
                 renderConfigPanel();
                 return;
@@ -1522,8 +1919,9 @@
             if (forceRefresh) {
                 delete mapping._cachedItems;
                 delete mapping._cachedItemValues;
-                currentItems = [];
-                currentItemValues = [];
+                delete mapping._cachedItemValuesLoaded;
+                mapping._itemValuesById = {};
+                mapping._itemValuesPrefetchStarted = false;
             }
 
             var prefill = mapping.prefillItem || null;
@@ -1535,65 +1933,14 @@
 
             // Determine if this mapping already has cached items from a previous load
             var hasCachedItems = !!(mapping._cachedItems && mapping._cachedItems.length > 0);
-            var hasCachedItemValues = !!(mapping._cachedItemValues && mapping._cachedItemValues.length > 0);
 
             if (hasCachedItems) {
                 // Restore from per-mapping cache — no bg iframe needed
-                currentItems = mapping._cachedItems;
-                currentItemValues = hasCachedItemValues ? mapping._cachedItemValues : [];
-                log("SVC: restored cached items for idx=" + gIdx + " (" + currentItems.length + " items, " + currentItemValues.length + " values)");
+                log("SVC: restored cached items for idx=" + gIdx + " (" + mapping._cachedItems.length + " items)");
             } else {
-                // Full load via bg iframe
-                attrSection.innerHTML = "";
-                var loadingWrap = document.createElement("div");
-                loadingWrap.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:10px;color:#d8ecff;font-size:12px;text-align:center;padding:14px;border:1px solid #2f4f73;border-radius:6px;background:#151f2b;";
-                var spinner = document.createElement("div");
-                spinner.style.cssText = "width:24px;height:24px;border:3px solid #2f4f73;border-top-color:#7cc7ff;border-radius:50%;box-sizing:border-box;";
-                var loadingMsg = document.createElement("div");
-                loadingMsg.style.cssText = "font-weight:600;line-height:1.35;max-width:100%;word-break:break-word;";
-                var loadingDetail = document.createElement("div");
-                loadingDetail.style.cssText = "color:#9bbbd8;font-size:11px;line-height:1.3;";
-                var loadingStartedAt = Date.now();
-                var loadingFrame = 0;
-                var loadingBaseText = "Loading visibility for " + targetItem.form + " (source: " + mapping.form + ")";
-                function updateVisibilityLoadingAnimation() {
-                    loadingFrame = loadingFrame + 1;
-                    spinner.style.transform = "rotate(" + String(loadingFrame * 30) + "deg)";
-                    var dots = new Array((loadingFrame % 4) + 1).join(".");
-                    var elapsed = Math.max(1, Math.floor((Date.now() - loadingStartedAt) / 1000));
-                    loadingMsg.textContent = loadingBaseText + dots;
-                    loadingDetail.textContent = "Still working - " + String(elapsed) + "s elapsed. Use Refresh if this appears stuck.";
-                }
-                updateVisibilityLoadingAnimation();
-                var loadingAnimTimer = setInterval(function() {
-                    if (!loadingWrap.isConnected || loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) {
-                        clearInterval(loadingAnimTimer);
-                        return;
-                    }
-                    updateVisibilityLoadingAnimation();
-                }, 350);
-                var refreshLoadBtn = document.createElement("button");
-                refreshLoadBtn.textContent = "Refresh";
-                refreshLoadBtn.title = "Retry loading visibility for this mapped form";
-                refreshLoadBtn.style.cssText = "padding:6px 12px;border-radius:4px;border:1px solid #4a6fa5;background:#26364d;color:#d8ecff;font-size:11px;font-weight:600;cursor:pointer;";
-                refreshLoadBtn.addEventListener("mouseenter", function() { this.style.background = "#314b70"; });
-                refreshLoadBtn.addEventListener("mouseleave", function() { this.style.background = "#26364d"; });
-                refreshLoadBtn.addEventListener("click", function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (!dropboxMappings[String(gIdx)]) return;
-                    selectedDropboxIdx = gIdx;
-                    log("SVC: refresh requested for visibility load idx=" + gIdx);
-                    loadFormAttributesForDropbox(gIdx, true);
-                });
-                loadingWrap.appendChild(spinner);
-                loadingWrap.appendChild(loadingMsg);
-                loadingWrap.appendChild(loadingDetail);
-                loadingWrap.appendChild(refreshLoadBtn);
-                attrSection.appendChild(loadingWrap);
-
+                // Background work never writes into the single shared config panel.
                 // Cache key combines target + source since items depend on which source SA is selected
-                var cacheKey = targetItem.form + "||" + mapping.form;
+                var cacheKey = JSON.stringify([targetItem.segment, targetItem.studyEvent, targetItem.form, targetItem.saRowIndex, mapping.segment, mapping.studyEvent, mapping.form, mapping.sourceIdx].map(function(v) { return normalizeVisibilityText(String(v == null ? "" : v)); }));
                 if (forceRefresh) {
                     delete SVC_ITEM_CACHE[cacheKey];
                 }
@@ -1605,65 +1952,49 @@
                     log("SVC: using global cached items for " + cacheKey + " (" + items.length + " items)");
                 } else {
                     // Use bg iframe - open visibility modal for the TARGET row
-                    await svcCloseBgModal();
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    await sleep(300);
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    var opened = await svcOpenVisibilityModalInBg(targetItem.segment, targetItem.studyEvent, targetItem.form);
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    if (opened) {
-                        // Fill modal dropdowns with the SOURCE form's info
-                        var saOk = await svcSelectActivityAndSA(mapping.studyEvent, mapping.form);
-                        if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                        if (saOk) {
-                            items = svcCollectItems();
-                            SVC_ITEM_CACHE[cacheKey] = items;
-                            log("SVC: collected " + items.length + " items for " + cacheKey);
-                        }
+                    if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                    var contextReady = await svcEnsureBgMappingContext(worker, gIdx, mapping);
+                    if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                    if (!contextReady) {
+                        mapping._loadError = "could not open the visibility modal or match its scheduled activity.";
+                        return false;
+                    }
+                    if (contextReady) {
+                        items = svcCollectItems(worker);
+                        SVC_ITEM_CACHE[cacheKey] = items;
+                        log("SVC: collected " + items.length + " items for " + cacheKey);
                     }
                 }
 
-                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                currentItems = items;
-                currentItemValues = [];
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                var jobItems = items;
+                if (!jobItems.length) {
+                    mapping._loadError = "the visibility modal returned no Item fields.";
+                    log("SVC: no visibility items loaded for idx=" + gIdx);
+                    return false;
+                }
                 // Store on the mapping so switching back won't need bg iframe again
-                mapping._cachedItems = items.slice();
+                mapping._cachedItems = jobItems.slice();
             }
 
-            // Render attribute controls
-            attrSection.innerHTML = "";
-
-            // Show target and source info above Item label
-            var segStudyInfo = document.createElement("div");
-            segStudyInfo.style.cssText = "padding:6px 8px;margin-bottom:4px;border:1px solid #333;border-radius:4px;background:#1e1e2e;";
-            var targetInfoLine = document.createElement("div");
-            targetInfoLine.style.cssText = "font-size:10px;color:#8a8aaa;margin-bottom:2px;";
-            targetInfoLine.textContent = "Target: " + targetItem.segment + " - " + targetItem.studyEvent + " - " + targetItem.form;
-            var sourceInfoLine = document.createElement("div");
-            sourceInfoLine.style.cssText = "font-size:10px;color:#9a9aba;";
-            sourceInfoLine.textContent = "Source: " + mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
-            segStudyInfo.appendChild(targetInfoLine);
-            segStudyInfo.appendChild(sourceInfoLine);
-            attrSection.appendChild(segStudyInfo);
-
-            attrSection.appendChild(itemLbl);
-            renderItemDropdown(currentItems, prefill);
-            attrSection.appendChild(itemSelect);
-            attrSection.appendChild(itemValLbl);
-            renderItemValueDropdown(prefillVal);
-            attrSection.appendChild(itemValSelect);
-            attrSection.appendChild(reasonLbl);
-            reasonInput.value = prefillReason;
-            attrSection.appendChild(reasonInput);
-
-            // If prefill item is set but we did a full bg iframe load (no cached values yet), trigger item value loading
-            if (!hasCachedItems && prefill && itemSelect.selectedIndex > 0) {
-                currentItemValues = await svcSelectItemAndCollectValues(prefill);
-                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                // Cache the loaded item values on the mapping
-                mapping._cachedItemValues = currentItemValues.slice();
-                renderItemValueDropdown(prefillVal);
+            // Single-item selection is safe even if this mapping is no longer active.
+            var jobItems = mapping._cachedItems || [];
+            if (!jobItems.length) {
+                mapping._loadError = "the visibility modal returned no Item fields.";
+                return false;
             }
+            if (!prefill && jobItems.length === 1) {
+                prefill = jobItems[0].text;
+                mapping.prefillItem = prefill;
+                mapping._prefillItemId = jobItems[0].value;
+            } else if (!mapping._prefillItemId && prefill) {
+                var matchingItems = jobItems.filter(function(item) { return normalizeVisibilityText(item.text) === normalizeVisibilityText(prefill); });
+                if (matchingItems.length === 1) mapping._prefillItemId = matchingItems[0].value;
+            }
+            if (selectedDropboxIdx !== gIdx) return true;
+            renderSelectedDropboxConfig(gIdx);
+            // The dependent value request starts after this serialized modal task exits.
+            return true;
         }
 
         function renderConfigPanel() {
@@ -1934,10 +2265,12 @@
                 refConfigs[re.item.form] = {
                     attachedForm: m.form,
                     prefillItem: m.prefillItem,
+                    _prefillItemId: m._prefillItemId || "",
                     prefillItemValue: m.prefillItemValue,
                     prefillReason: m.prefillReason,
                     _cachedItems: m._cachedItems ? m._cachedItems.slice() : null,
-                    _cachedItemValues: m._cachedItemValues ? m._cachedItemValues.slice() : null
+                    _cachedItemValues: m._cachedItemValues ? m._cachedItemValues.slice() : null,
+                    _itemValuesById: JSON.parse(JSON.stringify(m._itemValuesById || {}))
                 };
             }
 
@@ -2138,10 +2471,12 @@
                         form: w.config.attachedForm,
                         sourceIdx: sourceIdx,
                         prefillItem: w.config.prefillItem,
+                        _prefillItemId: w.config._prefillItemId || "",
                         prefillItemValue: w.config.prefillItemValue,
                         prefillReason: w.config.prefillReason,
                         _cachedItems: w.config._cachedItems ? w.config._cachedItems.slice() : null,
-                        _cachedItemValues: w.config._cachedItemValues ? w.config._cachedItemValues.slice() : null
+                        _cachedItemValues: w.config._cachedItemValues ? w.config._cachedItemValues.slice() : null,
+                        _itemValuesById: JSON.parse(JSON.stringify(w.config._itemValuesById || {}))
                     };
 
                     w.status = "populated";
@@ -2184,14 +2519,12 @@
             getItemForIdx: function(gIdx) {
                 var m = dropboxMappings[String(gIdx)];
                 if (!m) return null;
-                if (m.prefillItem) return m.prefillItem;
-                return itemSelect.options[itemSelect.selectedIndex] ? itemSelect.options[itemSelect.selectedIndex].text : null;
+                return m.prefillItem || null;
             },
             getItemValueForIdx: function(gIdx) {
                 var m = dropboxMappings[String(gIdx)];
                 if (!m) return null;
-                if (m.prefillItemValue) return m.prefillItemValue;
-                return itemValSelect.options[itemValSelect.selectedIndex] ? itemValSelect.options[itemValSelect.selectedIndex].text : null;
+                return m.prefillItemValue || null;
             }
         };
     }
@@ -2566,6 +2899,7 @@
     // Main entry point
     async function runSetVisibilityCondition() {
         SVC_CANCELLED = false;
+        SVC_SESSION_ID++;
         SVC_ITEM_CACHE = {};
         log("SVC: runSetVisibilityCondition started");
 
@@ -2587,7 +2921,15 @@
 
         // Open background iframe
         svcOpenBgIframe();
-        var bgReady = await svcWaitForBgIframeReady();
+        var bgWorkers = SVC_BG_WORKERS.slice();
+        var workerReadiness = await Promise.all(bgWorkers.map(function(worker) { return svcWaitForBgIframeReady(worker); }));
+        for (var bwi = 0; bwi < bgWorkers.length; bwi++) {
+            if (!workerReadiness[bwi]) {
+                try { if (bgWorkers[bwi].iframe.parentNode) bgWorkers[bwi].iframe.parentNode.removeChild(bgWorkers[bwi].iframe); } catch (e) {}
+                SVC_BG_WORKERS = SVC_BG_WORKERS.filter(function(worker) { return worker !== bgWorkers[bwi]; });
+            }
+        }
+        var bgReady = SVC_BG_WORKERS.some(function(worker) { return worker.ready; });
         if (!bgReady) {
             collecting.close();
             createPopup({
@@ -2598,6 +2940,8 @@
             });
             return;
         }
+        svcPumpBgQueue();
+        log("SVC: background worker pool ready count=" + SVC_BG_WORKERS.length);
 
         collecting.close();
 
@@ -9368,11 +9712,11 @@
         var selectedTarget = null;
 
         var container = document.createElement("div");
-        container.style.cssText = "display:flex;flex-direction:column;height:100%;min-height:500px;gap:16px;";
+        container.style.cssText = "display:flex;flex-direction:column;height:100%;min-height:0;gap:12px;box-sizing:border-box;";
 
         // Header row with search bars
         var headerRow = document.createElement("div");
-        headerRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:16px;";
+        headerRow.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;flex:0 0 auto;";
 
         var sourceSearchContainer = document.createElement("div");
         sourceSearchContainer.style.cssText = "display:flex;flex-direction:column;gap:8px;";
@@ -9404,19 +9748,62 @@
 
         // Panels row
         var panelsRow = document.createElement("div");
-        panelsRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:16px;flex:1;overflow:hidden;";
+        panelsRow.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;flex:0 0 auto;align-items:start;overflow:visible;min-width:0;";
 
         var sourcePanel = document.createElement("div");
-        sourcePanel.style.cssText = "border:2px solid #ff6b6b;border-radius:8px;background:#1a1a1a;overflow-y:auto;padding:8px;";
+        sourcePanel.style.cssText = "width:100%;height:48vh;min-height:160px;max-height:calc(100vh - 300px);resize:vertical;box-sizing:border-box;border:2px solid #ff6b6b;border-radius:8px;background:#1a1a1a;overflow:auto;padding:8px;";
         sourcePanel.id = "archiveUpdateSourcePanel";
 
         var targetPanel = document.createElement("div");
-        targetPanel.style.cssText = "border:2px solid #51cf66;border-radius:8px;background:#1a1a1a;overflow-y:auto;padding:8px;";
+        targetPanel.style.cssText = "width:100%;height:48vh;min-height:160px;max-height:calc(100vh - 300px);resize:vertical;box-sizing:border-box;border:2px solid #51cf66;border-radius:8px;background:#1a1a1a;overflow:auto;padding:8px;";
         targetPanel.id = "archiveUpdateTargetPanel";
 
         panelsRow.appendChild(sourcePanel);
         panelsRow.appendChild(targetPanel);
         container.appendChild(panelsRow);
+
+        function restoreArchiveUpdatePanelHeight(panel, storageKey) {
+            try {
+                var savedHeight = parseFloat(localStorage.getItem(storageKey));
+                if (!isFinite(savedHeight) || savedHeight < 1) return;
+                var maxHeight = Math.max(160, window.innerHeight - 300);
+                panel.style.height = Math.round(Math.max(160, Math.min(savedHeight, maxHeight))) + "px";
+            } catch (e) {}
+        }
+        restoreArchiveUpdatePanelHeight(sourcePanel, "archiveUpdateForms.sourcePanelHeight.v1");
+        restoreArchiveUpdatePanelHeight(targetPanel, "archiveUpdateForms.targetPanelHeight.v1");
+
+        var panelSizeObserver = null;
+        var panelSizeSaveTimer = null;
+        var ignorePanelSizeUntil = Date.now() + 500;
+        function saveArchiveUpdatePanelHeights() {
+            try {
+                var sourceHeight = sourcePanel.getBoundingClientRect().height;
+                var targetHeight = targetPanel.getBoundingClientRect().height;
+                if (sourceHeight >= 160) localStorage.setItem("archiveUpdateForms.sourcePanelHeight.v1", String(Math.round(sourceHeight)));
+                if (targetHeight >= 160) localStorage.setItem("archiveUpdateForms.targetPanelHeight.v1", String(Math.round(targetHeight)));
+            } catch (e) {}
+        }
+        function onArchiveUpdateViewportResize() {
+            ignorePanelSizeUntil = Date.now() + 500;
+        }
+        window.addEventListener("resize", onArchiveUpdateViewportResize);
+        window.addEventListener("mouseup", saveArchiveUpdatePanelHeights);
+        if (typeof ResizeObserver !== "undefined") {
+            panelSizeObserver = new ResizeObserver(function() {
+                if (Date.now() < ignorePanelSizeUntil) return;
+                if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
+                panelSizeSaveTimer = setTimeout(saveArchiveUpdatePanelHeights, 250);
+            });
+            panelSizeObserver.observe(sourcePanel);
+            panelSizeObserver.observe(targetPanel);
+        }
+        container.cleanup = function() {
+            if (panelSizeObserver) panelSizeObserver.disconnect();
+            if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
+            window.removeEventListener("resize", onArchiveUpdateViewportResize);
+            window.removeEventListener("mouseup", saveArchiveUpdatePanelHeights);
+        };
 
         // Error message area
         var errorDiv = document.createElement("div");
@@ -11251,11 +11638,13 @@
         ARCHIVE_UPDATE_FORMS_POPUP_REF = createPopup({
             title: "Archive/Update Forms - Select Forms",
             content: guiContent,
-            width: "900px",
-            maxWidth: "95%",
-            height: "70%",
-            maxHeight: "700px",
+            width: "100vw",
+            maxWidth: "100vw",
+            height: "100vh",
+            maxHeight: "100vh",
+            draggable: false,
             onClose: function() {
+                if (guiContent.cleanup) guiContent.cleanup();
                 ARCHIVE_UPDATE_FORMS_POPUP_REF = null;
             }
         });
@@ -11270,6 +11659,7 @@
             log("Archive/Update Forms: confirmed - source=" + selection.source + " target=" + selection.target + " archiveReason='" + selection.archiveReason + "' visibilityReason='" + selection.visibilityReason + "'");
 
             // Close selection popup (but don't cancel)
+            if (guiContent.cleanup) guiContent.cleanup();
             if (ARCHIVE_UPDATE_FORMS_POPUP_REF) {
                 // Remove the onClose handler to prevent it from running
                 var popupEl = ARCHIVE_UPDATE_FORMS_POPUP_REF.element;
@@ -12669,7 +13059,7 @@
         }
     }
 
-    async function aprClickRemovalActionForRow(row, id) {
+    async function aprClickRemovalActionForRow(row, id, archivedOnly) {
         var toggleBtn = row.querySelector("button.dropdown-toggle");
         if (toggleBtn) {
             toggleBtn.click();
@@ -12681,6 +13071,7 @@
             aprLog("clicked delete UI for id " + id);
             return { action: "delete", clicked: true };
         }
+        if (archivedOnly) return { action: "none", clicked: false };
         var archiveLink = row.querySelector("a[href*='archivescheduledactivity/" + id + "']");
         if (aprIsArchiveActionLink(archiveLink)) {
             var archiveHref = archiveLink.getAttribute("href") || "";
@@ -12894,28 +13285,27 @@
                     continue;
                 }
 
-                if (item.archived) {
-                    aprLog("skipping already archived item id " + item.id);
+                var row = aprFindRowByScheduledActivityId(item.id);
+                if (!row) {
+                    aprLog("row not found for id " + item.id + " - may already be deleted");
+                    pItem.status = item.archived ? "Skipped" : "Deleted";
+                    progressContent.updateItem(idx, item.archived ? "Skipped" : "Deleted");
+                    if (!item.archived) deletedCount++;
+                    continue;
+                }
+
+                if (item.archived && row.innerHTML.indexOf("fa-archive") === -1) {
+                    aprLog("archived-item safety check failed for id " + item.id + "; refusing deletion");
                     pItem.status = "Skipped";
                     progressContent.updateItem(idx, "Skipped");
                     continue;
                 }
-
-                var row = aprFindRowByScheduledActivityId(item.id);
-                if (!row) {
-                    aprLog("row not found for id " + item.id + " - may already be deleted");
-                    pItem.status = "Deleted";
-                    progressContent.updateItem(idx, "Deleted");
-                    deletedCount++;
-                    continue;
-                }
-
-                var actionResult = await aprClickRemovalActionForRow(row, item.id);
+                var actionResult = await aprClickRemovalActionForRow(row, item.id, !!item.archived);
                 if (!actionResult.clicked) {
                     aprLog("failed to find delete or archive action for id " + item.id);
-                    pItem.status = "Failed";
-                    progressContent.updateItem(idx, "Failed");
-                    failedCount++;
+                    pItem.status = item.archived ? "Skipped" : "Failed";
+                    progressContent.updateItem(idx, item.archived ? "Skipped" : "Failed");
+                    if (!item.archived) failedCount++;
                     continue;
                 }
 
@@ -13420,7 +13810,8 @@
         if (!item.itemLink) return item;
         try {
             var doc = await fpFetchDocument(item.itemLink);
-            item.prompt = fpFindProperty(doc, "Prompt") || fpFindProperty(doc, "Question") || fpFindProperty(doc, "Text") || fpFindProperty(doc, "Description") || "";
+            item.prompt = fpFindProperty(doc, "Prompt") || "";
+            item.name = fpFindProperty(doc, "Name") || item.name || "";
             item.dataType = fpFindProperty(doc, "Data Type") || fallbackDataType || item.dataType || "";
             item.helpTextHtml = fpFindPropertyHtml(doc, "Help Text");
             item.helpText = fpCleanText(item.helpTextHtml);
@@ -13915,7 +14306,7 @@
                 var tdText = document.createElement("td");
                 tdText.className = "itemText";
                 tdText.style.color = "inherit";
-                tdText.textContent = item.prompt || item.name;
+                tdText.textContent = item.prompt || item.name || "";
                 if (item.helpTextHtml || item.helpText) {
                     var help = document.createElement("div");
                     help.className = "itemHelpText";
@@ -14223,21 +14614,22 @@
     //==========================
     // Methods Library Configuration
 
-    var METHODS_INDEX_URL = "https://raw.githubusercontent.com/vctruong100/Automator/refs/heads/main/index.json";
-    var METHODS_CACHE_KEY = "activityPlanState.methodsLibrary.cache";
-    var METHODS_CACHE_EXPIRY_MS = 1000 * 60 * 60; // 1 hour
-    var METHODS_PRELOAD_BODIES = false;
+    var METHODS_API_REQUEST_TYPE = "ACT_METHOD_LIBRARY_FETCH";
+    var METHODS_CACHE_KEY = "activityPlanState.methodsLibrary.cache.v2";
+    var METHODS_CACHE_EXPIRY_MS = 1000 * 60 * 60; // One hour; refresh still checks the server first.
     var METHODS_BODY_CACHE = {};
     var METHODS_LIBRARY_MODAL_REF = null;
     var STORAGE_METHODS_FAVORITES = "activityPlanState.methodsLibrary.favorites";
     var STORAGE_METHODS_RECENTS = "activityPlanState.methodsLibrary.recents";
-    var STORAGE_METHODS_PINS = "activityPlanState.methodsLibrary.pins";
     var STORAGE_METHODS_LAST_SEARCH = "activityPlanState.methodsLibrary.lastSearch";
     var STORAGE_METHODS_LAST_METHOD = "activityPlanState.methodsLibrary.lastMethod";
     var STORAGE_METHODS_SORT_ORDER = "activityPlanState.methodsLibrary.sortOrder";
+    var STORAGE_METHODS_CATEGORY = "activityPlanState.methodsLibrary.category";
+    var STORAGE_METHODS_MODAL_FULLSCREEN = "activityPlanState.methodsLibrary.modalFullscreen";
     var STORAGE_METHODS_MODAL_SIZE = "activityPlanState.methodsLibrary.modalSize";
     var MAX_RECENTS = 10;
-    var MAX_PINS = 5;
+    var METHODS_MEMORY_FAVORITES = null;
+    var METHODS_MEMORY_PINS = null;
     var BOOTSTRAP_FOCUS_NS = "focusin.bs.modal";
 
     function getMethodsCache() {
@@ -14266,134 +14658,87 @@
         }
     }
 
+    function requestMethodsFromExtensionWorker() {
+        return new Promise(function(resolve, reject) {
+            if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+                reject(new Error("The extension background worker is unavailable."));
+                return;
+            }
+            chrome.runtime.sendMessage({ type: METHODS_API_REQUEST_TYPE }, function(response) {
+                var runtimeError = chrome.runtime.lastError;
+                if (runtimeError) { reject(new Error(runtimeError.message || "The extension request failed.")); return; }
+                if (!response || response.success !== true || !Array.isArray(response.items)) {
+                    reject(new Error(response && response.error ? response.error : "The Method Library service returned an invalid response."));
+                    return;
+                }
+                resolve(response.items);
+            });
+        });
+    }
+
     async function fetchMethodsIndex(forceRefresh) {
-        if (!forceRefresh) {
-            var cached = getMethodsCache();
-            if (cached) {
-                log("Methods Library: using cached index (" + cached.length + " methods)");
-                return { success: true, data: cached };
-            }
-        }
-        log("Methods Library: fetching index from " + METHODS_INDEX_URL);
+        var cached = getMethodsCache();
         try {
-            var response = await fetch(METHODS_INDEX_URL, { cache: forceRefresh ? "no-store" : "default" });
-            if (!response.ok) {
-                return { success: false, error: "HTTP " + response.status + ": " + response.statusText };
-            }
-            var data = await response.json();
-            if (!Array.isArray(data)) {
-                return { success: false, error: "Invalid index format (expected array)" };
+            var received = await requestMethodsFromExtensionWorker();
+            if (received.length > 10000) throw new Error("The Method Library response exceeded the extension safety limit.");
+            var data = [];
+            for (var i = 0; i < received.length; i++) {
+                var item = received[i];
+                if (!item || typeof item.name !== "string" || item.name.length > 200 ||
+                    (item.category !== "method" && item.category !== "edit_check") ||
+                    typeof item.expression !== "string" || item.expression.length > 500000) {
+                    throw new Error("The Method Library response contains an invalid entry.");
+                }
+                data.push({ name: item.name, category: item.category, expression: item.expression });
             }
             setMethodsCache(data);
-            log("Methods Library: fetched " + data.length + " methods");
+            log("Methods Library: received " + data.length + " read-only entries from ACT");
             return { success: true, data: data };
         } catch (e) {
-            log("Methods Library: fetch error - " + String(e));
-            return { success: false, error: String(e) };
+            var message = String(e && e.message ? e.message : e);
+            log("Methods Library: ACT server request failed - " + message);
+            if (cached) return { success: true, data: cached, stale: true, error: message };
+            return { success: false, error: "ACT Method Library is unavailable. " + message };
         }
     }
 
-    async function fetchMethodBody(url) {
-        if (METHODS_BODY_CACHE[url]) {
-            return { success: true, body: METHODS_BODY_CACHE[url] };
-        }
-
-        // Convert relative or GitHub blob URLs to raw.githubusercontent.com format
-        var fetchUrl = url;
-        if (url.indexOf("github.com") !== -1 && url.indexOf("raw.githubusercontent.com") === -1) {
-            // Convert github.com/user/repo/blob/branch/path to raw.githubusercontent.com/user/repo/branch/path
-            fetchUrl = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/");
-        } else if (url.indexOf("http") !== 0) {
-            // Handle relative paths - prepend the base GitHub raw URL
-            var baseUrl = "https://raw.githubusercontent.com/vctruong100/Automator/main/";
-            fetchUrl = baseUrl + url.replace(/^\/+/, "");
-        }
-
-        try {
-            var response = await fetch(fetchUrl);
-            if (!response.ok) {
-                return { success: false, error: "HTTP " + response.status + " for " + fetchUrl };
-            }
-            var text = await response.text();
-            METHODS_BODY_CACHE[url] = text;
-            return { success: true, body: text };
-        } catch (e) {
-            return { success: false, error: String(e) };
-        }
+    function methodKey(method) {
+        return String(method.category || "") + "\u0000" + String(method.name || "");
     }
 
-    function scoreMethod(method, query, searchBody, bodyText) {
+    function scoreMethod(method, query, searchBody) {
         if (!query || query.trim().length === 0) return 100;
         var q = query.toLowerCase().trim();
+        var name = (method.name || "").toLowerCase();
         var score = 0;
-        var title = (method.title || "").toLowerCase();
-        var id = (method.id || "").toLowerCase();
-        var tags = (method.tags || []).map(function(t) { return t.toLowerCase(); });
-
-        if (title.indexOf(q) !== -1) {
+        if (name.indexOf(q) !== -1) {
             score += 50;
-            if (title.indexOf(q) === 0) score += 20;
+            if (name.indexOf(q) === 0) score += 20;
         }
-        if (id.indexOf(q) !== -1) {
-            score += 30;
-            if (id === q) score += 20;
-        }
-        for (var i = 0; i < tags.length; i++) {
-            if (tags[i].indexOf(q) !== -1) {
-                score += 20;
-                break;
-            }
-        }
-        if (searchBody && bodyText) {
-            var body = bodyText.toLowerCase();
-            if (body.indexOf(q) !== -1) {
-                score += 10;
-            }
-        }
+        if (searchBody && (method.expression || "").toLowerCase().indexOf(q) !== -1) score += 10;
         return score;
     }
 
-    function filterAndSortMethods(methods, query, searchBody, bodiesMap, sortOrder, favorites, pins) {
+    function filterAndSortMethods(methods, query, searchBody, sortOrder, favorites) {
         var results = [];
         for (var i = 0; i < methods.length; i++) {
-            var m = methods[i];
-            var bodyText = bodiesMap[m.url] || "";
-            var score = scoreMethod(m, query, searchBody, bodyText);
+            var method = methods[i];
+            var score = scoreMethod(method, query, searchBody);
             if (query && query.trim().length > 0 && score === 0) continue;
-            results.push({ method: m, score: score });
+            results.push({ method: method, score: score, index: i });
         }
-
         results.sort(function(a, b) {
-            // Pinned items always come first
-            var isPinA = pins.indexOf(a.method.id) !== -1;
-            var isPinB = pins.indexOf(b.method.id) !== -1;
-            if (isPinA && !isPinB) return -1;
-            if (!isPinA && isPinB) return 1;
-
-            // Then sort by selected order
+            var favoriteA = favorites.indexOf(methodKey(a.method)) !== -1;
+            var favoriteB = favorites.indexOf(methodKey(b.method)) !== -1;
+            if (favoriteA !== favoriteB) return favoriteA ? -1 : 1;
+            if (sortOrder === "updated") return a.index - b.index;
             if (sortOrder === "title") {
-                var titleA = (a.method.title || "").toLowerCase();
-                var titleB = (b.method.title || "").toLowerCase();
-                if (titleA < titleB) return -1;
-                if (titleA > titleB) return 1;
-                return 0;
-            } else if (sortOrder === "updated") {
-                var dateA = a.method.updated || "";
-                var dateB = b.method.updated || "";
-                if (dateB < dateA) return -1;
-                if (dateB > dateA) return 1;
-                return 0;
-            } else {
-                // Relevance (default)
-                if (b.score !== a.score) return b.score - a.score;
-                var titleA = (a.method.title || "").toLowerCase();
-                var titleB = (b.method.title || "").toLowerCase();
-                if (titleA < titleB) return -1;
-                if (titleA > titleB) return 1;
-                return 0;
+                return (a.method.name || "").localeCompare(b.method.name || "", undefined, { sensitivity: "base" });
             }
+            if (b.score !== a.score) return b.score - a.score;
+            return (a.method.name || "").localeCompare(b.method.name || "", undefined, { sensitivity: "base" });
         });
-        return results.map(function(r) { return r.method; });
+        return results.map(function(entry) { return entry.method; });
     }
 
     function getSavedModalSize() {
@@ -14572,6 +14917,74 @@
         headerBtns.style.alignItems = "center";
         headerBtns.style.gap = "4px";
 
+        var modalIsFullscreen = false;
+        var modalNormalStyles = null;
+        var fullscreenBtn = document.createElement("button");
+        fullscreenBtn.type = "button";
+        fullscreenBtn.textContent = "\u26F6";
+        fullscreenBtn.title = "Toggle Full Screen";
+        fullscreenBtn.setAttribute("aria-label", "Toggle Method Library full screen");
+        fullscreenBtn.style.background = "transparent";
+        fullscreenBtn.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
+        fullscreenBtn.style.border = "none";
+        fullscreenBtn.style.fontSize = "17px";
+        fullscreenBtn.style.cursor = "pointer";
+        fullscreenBtn.style.padding = "4px 8px";
+        fullscreenBtn.style.borderRadius = "4px";
+        fullscreenBtn.onmouseenter = function() { fullscreenBtn.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#333"; };
+        fullscreenBtn.onmouseleave = function() { fullscreenBtn.style.background = "transparent"; };
+
+        function setModalFullscreen(enabled) {
+            enabled = Boolean(enabled);
+            if (enabled === modalIsFullscreen) return;
+            if (enabled) {
+                modalNormalStyles = {
+                    top: modal.style.top, left: modal.style.left, transform: modal.style.transform,
+                    width: modal.style.width, height: modal.style.height, maxWidth: modal.style.maxWidth,
+                    maxHeight: modal.style.maxHeight, minWidth: modal.style.minWidth, minHeight: modal.style.minHeight,
+                    borderRadius: modal.style.borderRadius, resize: modal.style.resize
+                };
+                modalIsFullscreen = true;
+                applyModalFullscreenSize();
+            } else {
+                modalIsFullscreen = false;
+                if (modalNormalStyles) {
+                    Object.keys(modalNormalStyles).forEach(function(key) { modal.style[key] = modalNormalStyles[key]; });
+                }
+                modalNormalStyles = null;
+            }
+            try { localStorage.setItem(STORAGE_METHODS_MODAL_FULLSCREEN, String(modalIsFullscreen)); } catch (e) {}
+            fullscreenBtn.textContent = modalIsFullscreen ? "\u2716\u26F6" : "\u26F6";
+            fullscreenBtn.title = modalIsFullscreen ? "Exit Full Screen" : "Toggle Full Screen";
+            fullscreenBtn.setAttribute("aria-label", modalIsFullscreen ? "Exit Method Library full screen" : "Toggle Method Library full screen");
+        }
+
+        function applyModalFullscreenSize() {
+            if (!modalIsFullscreen) return;
+            modal.style.top = "0";
+            modal.style.left = "0";
+            modal.style.transform = "none";
+            modal.style.width = Math.max(1, window.innerWidth) + "px";
+            modal.style.height = Math.max(1, window.innerHeight) + "px";
+            modal.style.maxWidth = "100vw";
+            modal.style.maxHeight = "100vh";
+            modal.style.minWidth = "0";
+            modal.style.minHeight = "0";
+            modal.style.borderRadius = "0";
+            modal.style.resize = "none";
+        }
+
+        fullscreenBtn.addEventListener("mousedown", function(event) { event.stopPropagation(); });
+        fullscreenBtn.addEventListener("click", function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            setModalFullscreen(!modalIsFullscreen);
+        });
+        var savedFullscreen = false;
+        try { savedFullscreen = localStorage.getItem(STORAGE_METHODS_MODAL_FULLSCREEN) === "true"; } catch (e) {}
+        if (savedFullscreen) setModalFullscreen(true);
+        window.addEventListener("resize", applyModalFullscreenSize);
+
         var closeBtn = document.createElement("button");
         closeBtn.textContent = "✕";
         closeBtn.setAttribute("aria-label", "Close");
@@ -14584,6 +14997,7 @@
         closeBtn.style.borderRadius = "4px";
         closeBtn.onmouseenter = function() { closeBtn.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#333"; };
         closeBtn.onmouseleave = function() { closeBtn.style.background = "transparent"; };
+        headerBtns.appendChild(fullscreenBtn);
         headerBtns.appendChild(closeBtn);
         header.appendChild(headerBtns);
         modal.appendChild(header);
@@ -14614,6 +15028,24 @@
         searchInput.onblur = function() { searchInput.style.borderColor = glass ? THEME_SURFACE_BORDER : "#444"; };
         toolbar.appendChild(searchInput);
 
+        var categorySelect = document.createElement("select");
+        categorySelect.setAttribute("aria-label", "Filter by method type");
+        categorySelect.style.padding = "8px 12px";
+        categorySelect.style.background = glass ? THEME_SURFACE_BG : "#2a2a2a";
+        categorySelect.style.border = glass ? ("1px solid " + THEME_SURFACE_BORDER) : "1px solid #444";
+        categorySelect.style.borderRadius = "6px";
+        categorySelect.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
+        categorySelect.style.fontSize = "14px";
+        categorySelect.style.cursor = "pointer";
+        if (glass) categorySelect.className = "ie-select";
+        [["all", "All types"], ["method", "Methods"], ["edit_check", "Edit Checks"]].forEach(function(entry) {
+            var option = document.createElement("option");
+            option.value = entry[0];
+            option.textContent = entry[1];
+            categorySelect.appendChild(option);
+        });
+        toolbar.appendChild(categorySelect);
+
         var sortSelect = document.createElement("select");
         sortSelect.setAttribute("aria-label", "Sort order");
         sortSelect.style.padding = "8px 12px";
@@ -14626,7 +15058,7 @@
         if (glass) sortSelect.className = "ie-select";
         var sortOpts = [
             { value: "relevance", text: "Sort: Relevance" },
-            { value: "title", text: "Sort: Title" },
+            { value: "title", text: "Sort: Name" },
             { value: "updated", text: "Sort: Updated" }
         ];
         for (var i = 0; i < sortOpts.length; i++) {
@@ -14648,7 +15080,7 @@
         searchBodyCheckbox.type = "checkbox";
         searchBodyCheckbox.setAttribute("aria-label", "Search in body content");
         searchBodyLabel.appendChild(searchBodyCheckbox);
-        searchBodyLabel.appendChild(document.createTextNode("Search body"));
+        searchBodyLabel.appendChild(document.createTextNode("Search expressions"));
         toolbar.appendChild(searchBodyLabel);
 
         var favoritesLabel = document.createElement("label");
@@ -14827,7 +15259,7 @@
         }
 
         function renderList(methods) {
-            listPane.innerHTML = "";
+            listPane.textContent = "";
             if (methods.length === 0) {
                 var empty = document.createElement("div");
                 empty.style.padding = "20px";
@@ -14837,17 +15269,15 @@
                 listPane.appendChild(empty);
                 return;
             }
-
             var favorites = getFavorites();
             var recents = getRecents();
-            var pins = getPins();
-
             for (var i = 0; i < methods.length; i++) {
-                (function(m, idx) {
+                (function(method) {
+                    var key = methodKey(method);
                     var item = document.createElement("div");
                     item.setAttribute("role", "option");
                     item.setAttribute("aria-selected", "false");
-                    item.setAttribute("data-method-id", m.id);
+                    item.setAttribute("data-method-key", key);
                     item.tabIndex = 0;
                     item.style.padding = "10px 14px";
                     item.style.borderBottom = glass ? ("1px solid " + THEME_SURFACE_BORDER) : "1px solid #2a2a2a";
@@ -14855,227 +15285,121 @@
                     item.style.transition = "background 0.1s";
                     item.style.position = "relative";
 
-                    var itemId = document.createElement("div");
-                    itemId.style.fontSize = "11px";
-                    itemId.style.color = glass ? THEME_ACCENT : "#5b43c7";
-                    itemId.style.marginBottom = "2px";
-                    itemId.textContent = m.id || "";
-                    item.appendChild(itemId);
+                    var category = document.createElement("div");
+                    category.textContent = method.category === "edit_check" ? "Edit Check" : "Method";
+                    category.style.fontSize = "10px";
+                    category.style.color = glass ? THEME_ACCENT : "#9b8af5";
+                    category.style.marginBottom = "3px";
+                    item.appendChild(category);
 
-                    var itemTitle = document.createElement("div");
-                    itemTitle.style.fontWeight = "500";
-                    itemTitle.style.fontSize = "13px";
-                    itemTitle.textContent = m.title || "(Untitled)";
-                    item.appendChild(itemTitle);
+                    var title = document.createElement("div");
+                    title.style.fontWeight = "500";
+                    title.style.fontSize = "13px";
+                    title.textContent = method.name || "(Untitled)";
+                    item.appendChild(title);
 
-                    if (m.tags && m.tags.length > 0) {
-                        var itemTags = document.createElement("div");
-                        itemTags.style.fontSize = "11px";
-                        itemTags.style.color = glass ? THEME_TEXT_MUTED : "#666";
-                        itemTags.style.marginTop = "4px";
-                        itemTags.textContent = m.tags.join(", ");
-                        item.appendChild(itemTags);
-                    }
-
-                    // Badges container
                     var badges = document.createElement("div");
                     badges.style.display = "flex";
-                    badges.style.gap = "4px";
+                    badges.style.gap = "6px";
                     badges.style.marginTop = "4px";
                     badges.style.fontSize = "10px";
+                    var isFavorite = favorites.indexOf(key) !== -1;
+                    var isRecent = recents.indexOf(key) !== -1;
+                    if (isFavorite) { var favoriteBadge = document.createElement("span"); favoriteBadge.textContent = "Favorite"; favoriteBadge.style.color = "#f4d36c"; badges.appendChild(favoriteBadge); }
+                    if (isRecent && !isFavorite) { var recentBadge = document.createElement("span"); recentBadge.textContent = "Recent"; recentBadge.style.color = "#888"; badges.appendChild(recentBadge); }
+                    if (badges.children.length) item.appendChild(badges);
 
-                    var isFav = favorites.indexOf(m.id) !== -1;
-                    var isRecent = recents.indexOf(m.id) !== -1;
-                    var isPinned = pins.indexOf(m.id) !== -1;
-
-                    if (isPinned) {
-                        var pinBadge = document.createElement("span");
-                        pinBadge.textContent = "📌 Pinned";
-                        pinBadge.style.color = "#f39c12";
-                        badges.appendChild(pinBadge);
-                    }
-                    if (isFav) {
-                        var favBadge = document.createElement("span");
-                        favBadge.textContent = "★ Favorite";
-                        favBadge.style.color = "#ffd700";
-                        badges.appendChild(favBadge);
-                    }
-                    if (isRecent && !isPinned) {
-                        var recentBadge = document.createElement("span");
-                        recentBadge.textContent = "🕒 Recent";
-                        recentBadge.style.color = "#888";
-                        badges.appendChild(recentBadge);
-                    }
-
-                    if (badges.children.length > 0) {
-                        item.appendChild(badges);
-                    }
-
-                    // Action buttons (show on hover)
                     var actions = document.createElement("div");
-                    actions.style.position = "absolute";
-                    actions.style.top = "8px";
-                    actions.style.right = "8px";
-                    actions.style.display = "none";
-                    actions.style.gap = "4px";
-
-                    var favBtn = document.createElement("button");
-                    favBtn.textContent = isFav ? "★" : "☆";
-                    favBtn.title = isFav ? "Remove from favorites" : "Add to favorites";
-                    favBtn.style.background = "transparent";
-                    favBtn.style.border = "none";
-                    favBtn.style.color = isFav ? "#ffd700" : "#888";
-                    favBtn.style.fontSize = "16px";
-                    favBtn.style.cursor = "pointer";
-                    favBtn.style.padding = "2px 6px";
-                    favBtn.onclick = function(e) {
-                        e.stopPropagation();
-                        toggleFavorite(m.id);
+                    actions.style.position = "absolute"; actions.style.top = "8px"; actions.style.right = "8px"; actions.style.display = "none"; actions.style.gap = "4px"; actions.style.zIndex = "2";
+                    var favoriteButton = document.createElement("button");
+                    favoriteButton.textContent = isFavorite ? "★" : "☆";
+                    favoriteButton.title = isFavorite ? "Remove from favorites" : "Add to favorites";
+                    favoriteButton.setAttribute("aria-label", favoriteButton.title);
+                    favoriteButton.setAttribute("aria-pressed", isFavorite ? "true" : "false");
+                    favoriteButton.style.cssText = "background:transparent;border:0;color:" + (isFavorite ? "#ffd700" : "#888") + ";font-size:16px;cursor:pointer;padding:2px 6px;";
+                    favoriteButton.type = "button";
+                    favoriteButton.addEventListener("click", function(event) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        var result = toggleFavorite(key);
                         doSearch();
-                    };
-                    actions.appendChild(favBtn);
-
-                    var pinBtn = document.createElement("button");
-                    pinBtn.textContent = isPinned ? "📌" : "📍";
-                    pinBtn.title = isPinned ? "Unpin" : "Pin to top";
-                    pinBtn.style.background = "transparent";
-                    pinBtn.style.border = "none";
-                    pinBtn.style.color = isPinned ? "#f39c12" : "#888";
-                    pinBtn.style.fontSize = "14px";
-                    pinBtn.style.cursor = "pointer";
-                    pinBtn.style.padding = "2px 6px";
-                    pinBtn.onclick = function(e) {
-                        e.stopPropagation();
-                        var result = togglePin(m.id);
-                        if (!result.success) {
-                            updateStatus(result.message, true);
-                            setTimeout(function() { doSearch(); }, 2000);
-                        } else {
-                            doSearch();
-                        }
-                    };
-                    actions.appendChild(pinBtn);
-
+                        updateStatus(result.favorited ? (result.persisted ? "Favorite moved to the top of this list." : "Favorite moved to the top for this session; browser storage is unavailable.") : (result.persisted ? "Favorite removed." : "Favorite removed for this session; browser storage is unavailable."), !result.persisted);
+                    });
+                    actions.appendChild(favoriteButton);
                     item.appendChild(actions);
-
-                    item.onmouseenter = function() {
-                        if (selectedMethod !== m) item.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#252525";
-                        actions.style.display = "flex";
-                    };
-                    item.onmouseleave = function() {
-                        if (selectedMethod !== m) item.style.background = "transparent";
-                        actions.style.display = "none";
-                    };
-                    item.onclick = function() { selectMethod(m, item); };
-                    item.onkeydown = function(e) {
-                        if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            selectMethod(m, item);
-                        }
-                    };
-
+                    item.onmouseenter = function() { if (selectedMethod !== method) item.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#252525"; actions.style.display = "flex"; };
+                    item.onmouseleave = function() { if (selectedMethod !== method) item.style.background = "transparent"; actions.style.display = "none"; };
+                    item.onclick = function() { selectMethod(method, item); };
+                    item.onkeydown = function(event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectMethod(method, item); } };
                     listPane.appendChild(item);
-                })(methods[i], i);
+                })(methods[i]);
             }
         }
 
-        async function selectMethod(m, itemEl) {
-            selectedMethod = m;
-            currentBodyText = "";
-
-            // Track as recent and save as last method
-            addRecent(m.id);
-            saveLastMethod(m.id);
-
+        function selectMethod(method, itemElement) {
+            selectedMethod = method;
+            currentBodyText = method.expression || "";
+            var key = methodKey(method);
+            addRecent(key);
+            saveLastMethod(key);
             var items = listPane.querySelectorAll("[role='option']");
-            for (var i = 0; i < items.length; i++) {
-                items[i].setAttribute("aria-selected", "false");
-                items[i].style.background = "transparent";
+            for (var i = 0; i < items.length; i++) { items[i].setAttribute("aria-selected", "false"); items[i].style.background = "transparent"; }
+            if (itemElement) {
+                itemElement.setAttribute("aria-selected", "true");
+                itemElement.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#2a2a2a";
+                itemElement.scrollIntoView({ block: "nearest", behavior: "smooth" });
             }
-            if (itemEl) {
-                itemEl.setAttribute("aria-selected", "true");
-                itemEl.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#2a2a2a";
-                itemEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-            }
-
-            previewTitle.textContent = (m.id || "") + " — " + (m.title || "(Untitled)");
-            var metaParts = [];
-            if (m.tags && m.tags.length > 0) metaParts.push("Tags: " + m.tags.join(", "));
-            if (m.updated) metaParts.push("Updated: " + m.updated);
-            previewMeta.textContent = metaParts.join("  •  ");
-
-            previewBody.textContent = "Loading...";
-
-            if (m.url) {
-                var result = await fetchMethodBody(m.url);
-                if (result.success) {
-                    currentBodyText = result.body;
-                    previewBody.textContent = result.body;
-                } else {
-                    previewBody.textContent = "Error loading method: " + result.error;
-                }
-            } else {
-                previewBody.textContent = "(No URL specified)";
-            }
+            previewTitle.textContent = method.name || "(Untitled)";
+            previewMeta.textContent = method.category === "edit_check" ? "Edit Check" : "Method";
+            previewBody.textContent = currentBodyText || "(No formal expression)";
         }
 
         function doSearch() {
             var query = searchInput.value;
-            var searchBody = searchBodyCheckbox.checked;
+            var searchExpression = searchBodyCheckbox.checked;
             var sortOrder = sortSelect.value;
+            var selectedCategory = categorySelect.value;
             var showOnlyFavorites = favoritesCheckbox.checked;
-
-            // Save session state
             saveLastSearch(query);
             saveSortOrder(sortOrder);
-
+            try { localStorage.setItem(STORAGE_METHODS_CATEGORY, selectedCategory); } catch (e) {}
             var favorites = getFavorites();
-            var pins = getPins();
-
-            var methodsToFilter = allMethods;
-            if (showOnlyFavorites) {
-                methodsToFilter = allMethods.filter(function(m) {
-                    return favorites.indexOf(m.id) !== -1;
-                });
-            }
-
-            var filtered = filterAndSortMethods(methodsToFilter, query, searchBody, METHODS_BODY_CACHE, sortOrder, favorites, pins);
+            var methodsToFilter = allMethods.filter(function(method) { return selectedCategory === "all" || method.category === selectedCategory; });
+            if (showOnlyFavorites) methodsToFilter = methodsToFilter.filter(function(method) { return favorites.indexOf(methodKey(method)) !== -1; });
+            var filtered = filterAndSortMethods(methodsToFilter, query, searchExpression, sortOrder, favorites);
             renderList(filtered);
-            updateStatus(filtered.length + " of " + allMethods.length + " methods");
+            updateStatus(filtered.length + " of " + methodsToFilter.length + " matching " + (selectedCategory === "all" ? "items" : selectedCategory === "method" ? "methods" : "edit checks"));
         }
 
         async function loadIndex(forceRefresh) {
-            updateStatus("Loading methods index...");
+            updateStatus("Connecting to ACT Method Library...");
             var result = await fetchMethodsIndex(forceRefresh);
-            if (!result.success) {
-                updateStatus("Error: " + result.error, true);
-                renderList([]);
-                return;
-            }
+            if (!result.success) { updateStatus(result.error, true); renderList([]); return; }
             allMethods = result.data;
-
-            if (METHODS_PRELOAD_BODIES) {
-                updateStatus("Preloading method bodies...");
-                for (var i = 0; i < allMethods.length; i++) {
-                    if (allMethods[i].url) {
-                        await fetchMethodBody(allMethods[i].url);
-                    }
-                }
-            }
-
             searchInput.value = getLastSearch();
-            sortSelect.value = getSortOrder();
-
+            var savedSort = getSortOrder();
+            sortSelect.value = ["relevance", "title", "updated"].indexOf(savedSort) !== -1 ? savedSort : "relevance";
+            try {
+                var savedCategory = localStorage.getItem(STORAGE_METHODS_CATEGORY) || "all";
+                categorySelect.value = ["all", "method", "edit_check"].indexOf(savedCategory) !== -1 ? savedCategory : "all";
+            } catch (e) { categorySelect.value = "all"; }
+            searchInput.disabled = false; searchInput.readOnly = false; searchInput.style.pointerEvents = "auto"; searchInput.tabIndex = 0;
             doSearch();
+            if (result.stale) updateStatus("ACT server unavailable; showing the last synchronized copy. " + result.error, true);
+            setTimeout(function() {
+                var backdrops = document.querySelectorAll(".modal-backdrop");
+                for (var i = 0; i < backdrops.length; i++) backdrops[i].style.display = "none";
+                searchInput.focus(); searchInput.select();
+            }, 150);
         }
 
         searchInput.oninput = doSearch;
         searchBodyCheckbox.onchange = doSearch;
+        categorySelect.onchange = doSearch;
         sortSelect.onchange = doSearch;
         favoritesCheckbox.onchange = doSearch;
 
         refreshBtn.onclick = function() {
-            METHODS_BODY_CACHE = {};
             loadIndex(true);
         };
 
@@ -15100,6 +15424,7 @@
             modal.remove();
             METHODS_LIBRARY_MODAL_REF = null;
             document.removeEventListener("keydown", keyHandler);
+            window.removeEventListener("resize", applyModalFullscreenSize);
         }
 
         closeBtn.onclick = closeModal;
@@ -15115,8 +15440,8 @@
             if (e.key === "Enter" && document.activeElement === searchInput) {
                 var firstItem = listPane.querySelector("[role='option']");
                 if (firstItem) {
-                    var methodId = firstItem.getAttribute("data-method-id");
-                    var method = allMethods.find(function(m) { return m.id === methodId; });
+                    var selectedKey = firstItem.getAttribute("data-method-key");
+                    var method = allMethods.find(function(entry) { return methodKey(entry) === selectedKey; });
                     if (method) {
                         selectMethod(method, firstItem);
                     }
@@ -15145,8 +15470,8 @@
                 }
 
                 var nextItem = items[nextIndex];
-                var methodId = nextItem.getAttribute("data-method-id");
-                var method = allMethods.find(function(m) { return m.id === methodId; });
+                var selectedKey = nextItem.getAttribute("data-method-key");
+                var method = allMethods.find(function(entry) { return methodKey(entry) === selectedKey; });
                 if (method) {
                     selectMethod(method, nextItem);
                 }
@@ -15175,7 +15500,7 @@
         var dragStartX = 0, dragStartY = 0, modalStartX = 0, modalStartY = 0;
 
         header.onmousedown = function(e) {
-            if (e.target === closeBtn) return;
+            if (headerBtns.contains(e.target)) return;
             isDragging = true;
             var rect = modal.getBoundingClientRect();
             dragStartX = e.clientX;
@@ -15208,19 +15533,26 @@
     }
 
     function getFavorites() {
+        if (METHODS_MEMORY_FAVORITES !== null) return METHODS_MEMORY_FAVORITES.slice();
         try {
             var raw = localStorage.getItem(STORAGE_METHODS_FAVORITES);
             if (!raw) return [];
-            return JSON.parse(raw);
+            var parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed.filter(function(value) { return typeof value === "string"; }) : [];
         } catch (e) {
             return [];
         }
     }
 
     function saveFavorites(favs) {
+        METHODS_MEMORY_FAVORITES = favs.slice();
         try {
             localStorage.setItem(STORAGE_METHODS_FAVORITES, JSON.stringify(favs));
-        } catch (e) {}
+            return true;
+        } catch (e) {
+            log("Methods Library: browser storage unavailable; keeping favorites for this page session only - " + String(e));
+            return false;
+        }
     }
 
     function toggleFavorite(methodId) {
@@ -15231,8 +15563,8 @@
         } else {
             favs.push(methodId);
         }
-        saveFavorites(favs);
-        return favs;
+        var persisted = saveFavorites(favs);
+        return { favorites: favs, favorited: idx === -1, persisted: persisted };
     }
 
     function getRecents() {
@@ -15258,37 +15590,6 @@
         try {
             localStorage.setItem(STORAGE_METHODS_RECENTS, JSON.stringify(recents));
         } catch (e) {}
-    }
-
-    function getPins() {
-        try {
-            var raw = localStorage.getItem(STORAGE_METHODS_PINS);
-            if (!raw) return [];
-            return JSON.parse(raw);
-        } catch (e) {
-            return [];
-        }
-    }
-
-    function savePins(pins) {
-        try {
-            localStorage.setItem(STORAGE_METHODS_PINS, JSON.stringify(pins));
-        } catch (e) {}
-    }
-
-    function togglePin(methodId) {
-        var pins = getPins();
-        var idx = pins.indexOf(methodId);
-        if (idx !== -1) {
-            pins.splice(idx, 1);
-        } else {
-            if (pins.length >= MAX_PINS) {
-                return { success: false, message: "Maximum " + MAX_PINS + " pins allowed" };
-            }
-            pins.push(methodId);
-        }
-        savePins(pins);
-        return { success: true, pins: pins };
     }
 
     function getLastSearch() {
@@ -15321,7 +15622,8 @@
 
     function getSortOrder() {
         try {
-            return localStorage.getItem(STORAGE_METHODS_SORT_ORDER) || "relevance";
+            var order = localStorage.getItem(STORAGE_METHODS_SORT_ORDER) || "relevance";
+            return ["title", "updated"].indexOf(order) !== -1 ? order : "relevance";
         } catch (e) {
             return "relevance";
         }
@@ -15361,6 +15663,20 @@
 
     function mfeNormalizeText(text) {
         return String(text || "").replace(/\s+/g, " ").trim();
+    }
+
+    function mfeExpressionContainsQuery(expression, query) {
+        var parts = String(query || "").trim().split(/\s+/);
+        if (!parts.length || !parts[0]) return false;
+        var escapedParts = parts.map(function(part) {
+            return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        });
+        try {
+            // Treat query whitespace as flexible so phrases can span code lines or indentation.
+            return new RegExp(escapedParts.join("\\s+"), "i").test(String(expression || ""));
+        } catch (e) {
+            return false;
+        }
     }
 
     function mfeGetMethodIdFromHref(href) {
@@ -15822,7 +16138,8 @@
         var search = document.createElement("input");
         search.className = "mfe-search";
         search.type = "text";
-        search.placeholder = "Search methods...";
+        search.placeholder = "Search methods or #expression...";
+        search.setAttribute("aria-label", "Search methods by name, ID, or formal expression");
         var methodList = document.createElement("div");
         methodList.className = "mfe-method-list";
         listPane.appendChild(search);
@@ -16761,12 +17078,28 @@
         }
 
         function renderMethods() {
-            var q = (search.value || "").toLowerCase().trim();
+            var rawQuery = (search.value || "").trim();
+            var expressionSearch = rawQuery.charAt(0) === "#";
+            var expressionQuery = expressionSearch ? rawQuery.slice(1).trim() : "";
+            var q = rawQuery.toLowerCase();
             methodList.innerHTML = "";
+            if (expressionSearch && !expressionQuery) {
+                var hint = document.createElement("div");
+                hint.style.cssText = "padding:12px 10px;color:#94a3b8;font-size:12px;";
+                hint.textContent = "Type a keyword after # to search formal expressions";
+                methodList.appendChild(hint);
+                return;
+            }
             for (var i = 0; i < methods.length; i++) {
                 var method = methods[i];
                 var hay = (method.name + " " + method.id).toLowerCase();
-                if (q && hay.indexOf(q) === -1) continue;
+                if (expressionSearch) {
+                    var expressionMatches = mfeExpressionContainsQuery(method.editedExpression, expressionQuery) ||
+                        mfeExpressionContainsQuery(method.originalExpression, expressionQuery);
+                    if (!expressionMatches) continue;
+                } else if (q && hay.indexOf(q) === -1) {
+                    continue;
+                }
                 var item = document.createElement("div");
                 item.className = "mfe-method";
                 if (selected && selected.id === method.id) item.className += " mfe-selected";
@@ -16786,6 +17119,12 @@
                 item.appendChild(meta);
                 (function(m) { item.onclick = function() { selectMethod(m); }; })(method);
                 methodList.appendChild(item);
+            }
+            if (!methodList.children.length) {
+                var empty = document.createElement("div");
+                empty.style.cssText = "padding:12px 10px;color:#94a3b8;font-size:12px;";
+                empty.textContent = "No matching methods";
+                methodList.appendChild(empty);
             }
         }
 
@@ -19848,6 +20187,11 @@
         try {
             var saved = localStorage.getItem(STORAGE_PANEL_HOTKEY);
             if (saved) {
+                // F4 was an unwanted default for some users; migrate it to the intended F2 default.
+                if (saved.toUpperCase() === "F4") {
+                    localStorage.setItem(STORAGE_PANEL_HOTKEY, "F2");
+                    return "F2";
+                }
                 return saved;
             }
         } catch (err) {
@@ -19926,7 +20270,7 @@
         var sections = [];
         sections.push({ id: "start", title: "Getting Started", kind: "cards", items: [
             { label: "Menus", desc: "Features are grouped into dropdown menus on the panel. Click a menu to open it, then click a button to run that feature. The menu closes by itself; Esc or a click elsewhere also closes it. If a menu has nothing to show, it says why when opened." },
-            { label: "Show or hide the panel", desc: "Press " + hotkey + " or click the round lightning button to hide or show the panel. The \u2715 in the panel header also hides it. The lightning button always sits just outside the panel." },
+            { label: "Show or hide the panel", desc: "Press " + hotkey + " to hide or show the panel. Configure the shortcut in Settings." },
             { label: "Dock and resize", desc: "The \u2194 / \u2195 button in the panel header switches between the right-side dock and the bottom dock. Drag the panel's inner edge to resize it; the size is remembered." },
             { label: "Customize (\u2699 Settings)", desc: "Reorder the menus or hide ones you don't use, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
             { label: "Status and logs", desc: "The status line shows what the automator is doing right now, and the log below it records each step. Use Hide Logs and Clear Logs in the Misc. menu to manage it." },
@@ -21466,8 +21810,10 @@
     var STORAGE_ANS_INDEX = "activityPlanState.ans.index";
     var STORAGE_ANS_CURRENT = "activityPlanState.ans.current";
     var STORAGE_ANS_CURRENT_VOLUNTEER = "activityPlanState.ans.currentVolunteer";
+    var STORAGE_ANS_ACTIVATION_RETRY = "activityPlanState.ans.activationRetry";
     var STORAGE_ANS_REUSE_SUBJECT = "activityPlanState.ans.reuseSubject";
     var STORAGE_ANS_ICF_SUBJECT = "activityPlanState.ans.icfSubject";
+    var STORAGE_ANS_GENDER = "activityPlanState.ans.gender";
     var ADD_NEW_SUBJECT_POPUP_REF = null;
 
     function clearAddExistingSubjectData() {
@@ -22792,8 +23138,10 @@
             localStorage.removeItem(STORAGE_ANS_INDEX);
             localStorage.removeItem(STORAGE_ANS_CURRENT);
             localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER);
+            localStorage.removeItem(STORAGE_ANS_ACTIVATION_RETRY);
             localStorage.removeItem(STORAGE_ANS_REUSE_SUBJECT);
             localStorage.removeItem(STORAGE_ANS_ICF_SUBJECT);
+            localStorage.removeItem(STORAGE_ANS_GENDER);
             localStorage.removeItem("activityPlanState.cohortAdd.editDoneMap");
         } catch (e) {}
         ADD_NEW_SUBJECT_POPUP_REF = null;
@@ -22862,6 +23210,15 @@
         try { localStorage.setItem(STORAGE_ANS_QUEUE, JSON.stringify(queue || [])); } catch (e) {}
     }
 
+    function ansGetRequestedGender() {
+        try {
+            var value = String(localStorage.getItem(STORAGE_ANS_GENDER) || "randomize").toLowerCase();
+            return value === "male" || value === "female" ? value : "randomize";
+        } catch (e) {
+            return "randomize";
+        }
+    }
+
     function ansGetIndex() {
         try {
             var raw = parseInt(localStorage.getItem(STORAGE_ANS_INDEX) || "0", 10);
@@ -22883,6 +23240,76 @@
 
     function ansSetCurrent(item) {
         try { localStorage.setItem(STORAGE_ANS_CURRENT, JSON.stringify(item || null)); } catch (e) {}
+    }
+
+    function ansGetActivationRetryState(current, volunteerId, queueIndex) {
+        var path = "";
+        try {
+            var expectedUrl = new URL(String(current && current.cohortHref || ""), location.origin);
+            if (expectedUrl.origin !== location.origin) return { count: 0, phase: "", path: "" };
+            path = expectedUrl.pathname.replace(/\/+$/, "");
+        } catch (e) {
+            return { count: 0, phase: "", path: "" };
+        }
+        var currentPath = (location.pathname || "").replace(/\/+$/, "");
+        if (!path || currentPath !== path) return { count: 0, phase: "", path: path };
+        try {
+            var raw = localStorage.getItem(STORAGE_ANS_ACTIVATION_RETRY);
+            var saved = raw ? JSON.parse(raw) : null;
+            if (saved && String(saved.volunteerId) === String(volunteerId) && Number(saved.queueIndex) === Number(queueIndex) && saved.path === path) {
+                return { count: Math.max(0, Number(saved.count) || 0), phase: String(saved.phase || ""), path: path };
+            }
+        } catch (e2) {}
+        return { count: 0, phase: "", path: path };
+    }
+
+    function ansScheduleActivationRefresh(current, volunteerId, queueIndex, phase, reason) {
+        var maxRefreshes = 2;
+        if (isPaused() || getRunMode() !== RUNMODE_ADD_NEW_SUBJECT) return false;
+        var retryState = ansGetActivationRetryState(current, volunteerId, queueIndex);
+        if (!retryState.path || (location.pathname || "").replace(/\/+$/, "") !== retryState.path) {
+            log("ANS: activation refresh refused because the current page does not match the selected cohort");
+            return false;
+        }
+        if (retryState.count >= maxRefreshes) {
+            log("ANS: activation refresh limit reached for volunteerId=" + String(volunteerId) + "; leaving workflow state for review");
+            return false;
+        }
+        var nextState = {
+            volunteerId: String(volunteerId),
+            queueIndex: Number(queueIndex),
+            path: retryState.path,
+            count: retryState.count + 1,
+            // Once Activate Volunteer was searched, never repeat Activate Plan
+            // after a reload; only continue looking for the pending action.
+            phase: phase === "retryPlan" || retryState.phase === "retryPlan"
+                ? "retryPlan"
+                : (retryState.phase === "waitingForVolunteer" || phase === "waitingForVolunteer" ? "waitingForVolunteer" : "findSubjectRow")
+        };
+        try {
+            localStorage.setItem(STORAGE_ANS_ACTIVATION_RETRY, JSON.stringify(nextState));
+            var persisted = JSON.parse(localStorage.getItem(STORAGE_ANS_ACTIVATION_RETRY) || "null");
+            if (!persisted || String(persisted.volunteerId) !== String(volunteerId) || Number(persisted.queueIndex) !== Number(queueIndex) || persisted.path !== retryState.path || Number(persisted.count) !== nextState.count) {
+                log("ANS: activation refresh state could not be verified; will not reload");
+                return false;
+            }
+        } catch (storageErr) {
+            log("ANS: activation refresh state could not be saved; will not reload - " + String(storageErr));
+            return false;
+        }
+        var cohortLabel = current && current.cohortName ? current.cohortName : "selected cohort";
+        ansUpdateProgress("Refreshing cohort to continue activation (" + nextState.count + "/" + maxRefreshes + ")", cohortLabel + ": " + reason + ". The selected subject and queue position are being preserved.");
+        log("ANS: scheduling same-cohort refresh " + nextState.count + "/" + maxRefreshes + " for volunteerId=" + String(volunteerId) + " phase=" + nextState.phase + " reason=" + reason);
+        window.setTimeout(function() {
+            var latestRetry = ansGetActivationRetryState(current, volunteerId, queueIndex);
+            if (isPaused() || getRunMode() !== RUNMODE_ADD_NEW_SUBJECT || ansGetIndex() !== Number(queueIndex) || latestRetry.count !== nextState.count || latestRetry.path !== retryState.path) {
+                log("ANS: activation refresh cancelled because workflow state changed before reload");
+                return;
+            }
+            log("ANS: refreshing current cohort page to resume activation");
+            window.location.reload();
+        }, 800);
+        return true;
     }
 
     function ansNormalizeText(value) {
@@ -22949,6 +23376,8 @@
         for (var i = 0; i < queue.length; i++) {
             if (ansIsScreeningQueueItem(queue[i])) return true;
         }
+        if (observer) observer.disconnect();
+        if (observer) observer.disconnect();
         return false;
     }
 
@@ -23094,9 +23523,42 @@
         var planByCohort = {};
         var planMap = {};
         for (var p = 0; p < plans.length; p++) planMap[plans[p].id] = plans[p];
+        var requestedGender = "randomize";
 
         var root = document.createElement("div");
         root.style.cssText = "display:grid;grid-template-columns:320px 1fr;gap:14px;min-height:520px;color:#fff;";
+
+        var genderFieldset = document.createElement("fieldset");
+        genderFieldset.style.cssText = "grid-column:1 / span 2;display:flex;align-items:center;gap:16px;margin:0;padding:8px 12px;border:1px solid #34495e;border-radius:7px;background:#111922;";
+        var genderLegend = document.createElement("legend");
+        genderLegend.textContent = "Gender";
+        genderLegend.style.cssText = "padding:0 5px;font-size:13px;font-weight:700;color:#dbeafe;";
+        genderFieldset.appendChild(genderLegend);
+        var genderOptions = [
+            { value: "randomize", label: "Randomize" },
+            { value: "male", label: "Male" },
+            { value: "female", label: "Female" }
+        ];
+        for (var gi = 0; gi < genderOptions.length; gi++) {
+            (function(option) {
+                var optionLabel = document.createElement("label");
+                optionLabel.style.cssText = "display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;";
+                var radio = document.createElement("input");
+                radio.type = "radio";
+                radio.name = "ansRequestedGender";
+                radio.value = option.value;
+                radio.checked = option.value === "randomize";
+                radio.style.cssText = "margin:0;accent-color:#238636;cursor:pointer;";
+                radio.addEventListener("change", function() {
+                    if (radio.checked) requestedGender = option.value;
+                });
+                optionLabel.appendChild(radio);
+                var optionText = document.createElement("span");
+                optionText.textContent = option.label;
+                optionLabel.appendChild(optionText);
+                genderFieldset.appendChild(optionLabel);
+            })(genderOptions[gi]);
+        }
 
         var left = document.createElement("div");
         left.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;";
@@ -23216,24 +23678,55 @@
                         row.dataset.cohortId = cohort.id;
                         row.style.cssText = "display:grid;grid-template-columns:22px minmax(160px,1fr) minmax(190px,1.2fr);align-items:center;gap:8px;padding:8px;border:1px solid #2c3e50;border-radius:6px;background:#17212b;";
                         var radio = document.createElement("input");
-                        radio.type = "radio";
-                        radio.name = "ans_epoch_" + ep.id;
+                        radio.type = "checkbox";
+                        radio.setAttribute("aria-label", "Include " + cohort.name + " in Add New Subject");
                         radio.checked = selectedCohortByEpoch[ep.id] === cohort.id;
-                        radio.style.cursor = "pointer";
+                        radio.style.cssText = "width:16px;height:16px;cursor:pointer;accent-color:#2ea043;";
                         var label = document.createElement("div");
                         label.textContent = cohort.name;
                         label.style.cssText = "font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
                         var drop = document.createElement("div");
-                        drop.textContent = planByCohort[cohort.id] ? planMap[planByCohort[cohort.id]].name : "Drop activity plan here";
-                        drop.style.cssText = "min-height:30px;display:flex;align-items:center;padding:6px 8px;border:1px dashed #58718a;border-radius:5px;background:#101820;color:" + (planByCohort[cohort.id] ? "#dff6ff" : "#88a") + ";font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                        var assignedPlan = planByCohort[cohort.id] ? planMap[planByCohort[cohort.id]] : null;
+                        drop.style.cssText = "min-height:30px;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 6px;border:1px dashed #58718a;border-radius:5px;background:#101820;color:" + (assignedPlan ? "#dff6ff" : "#88a") + ";font-size:12px;";
+                        var dropLabel = document.createElement("span");
+                        dropLabel.textContent = assignedPlan ? assignedPlan.name : "Drop activity plan here";
+                        dropLabel.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                        drop.appendChild(dropLabel);
+                        if (assignedPlan) {
+                            var clearPlanBtn = document.createElement("button");
+                            clearPlanBtn.type = "button";
+                            clearPlanBtn.textContent = "\u00D7";
+                            clearPlanBtn.title = "Remove activity plan from " + cohort.name;
+                            clearPlanBtn.setAttribute("aria-label", clearPlanBtn.title);
+                            clearPlanBtn.style.cssText = "flex:0 0 auto;padding:1px 6px;border:1px solid #704343;border-radius:4px;background:#352020;color:#ff9b9b;font-size:16px;line-height:18px;cursor:pointer;";
+                            clearPlanBtn.addEventListener("click", function(e3) {
+                                e3.preventDefault();
+                                e3.stopPropagation();
+                                delete planByCohort[cohort.id];
+                                renderEpochs();
+                                refreshStatus();
+                            });
+                            drop.appendChild(clearPlanBtn);
+                        }
                         function selectThis() {
                             selectedCohortByEpoch[ep.id] = cohort.id;
                             radio.checked = true;
                             refreshStatus();
                         }
-                        radio.addEventListener("change", selectThis);
+                        radio.addEventListener("change", function() {
+                            if (radio.checked) {
+                                selectThis();
+                            } else if (selectedCohortByEpoch[ep.id] === cohort.id) {
+                                delete selectedCohortByEpoch[ep.id];
+                                refreshStatus();
+                            }
+                            renderEpochs();
+                        });
                         row.addEventListener("click", function(e2) {
-                            if (e2.target !== drop) selectThis();
+                            if (e2.target !== drop && e2.target !== radio && !drop.contains(e2.target)) {
+                                selectThis();
+                                renderEpochs();
+                            }
                         });
                         drop.addEventListener("dragover", function(e2) {
                             e2.preventDefault();
@@ -23279,6 +23772,11 @@
                 alert("Select at least one cohort and drop an activity plan onto it.");
                 return;
             }
+            try { localStorage.setItem(STORAGE_ANS_GENDER, requestedGender); } catch (genderStorageErr) {
+                log("ANS: could not persist gender preference; using Randomize for this run - " + String(genderStorageErr));
+                requestedGender = "randomize";
+                try { localStorage.setItem(STORAGE_ANS_GENDER, "randomize"); } catch (ignoreGenderStorageErr) {}
+            }
             ansSetQueue(queue);
             ansSetIndex(0);
             ansSetCurrent(queue[0]);
@@ -23288,6 +23786,7 @@
             } catch (e) {}
             setRunMode(RUNMODE_ADD_NEW_SUBJECT);
             setCohortGuard("");
+            log("ANS: requested volunteer gender=" + requestedGender);
             log("ANS: confirmed queue count=" + queue.length + " screeningReuse=" + String(queue.length > 1 && !!queue[0].createReusableSubject));
             for (var qi = 0; qi < queue.length; qi++) {
                 log("ANS: queue " + (qi + 1) + "/" + queue.length + " epoch=" + queue[qi].epochName + " cohort=" + queue[qi].cohortName + " plan=" + queue[qi].activityPlanName + " createReusable=" + String(!!queue[qi].createReusableSubject) + " useReusable=" + String(!!queue[qi].useReusableSubject));
@@ -23301,6 +23800,7 @@
         footer.appendChild(cancelBtn);
         footer.appendChild(confirmBtn);
 
+        root.appendChild(genderFieldset);
         root.appendChild(left);
         root.appendChild(right);
         root.appendChild(footer);
@@ -23583,27 +24083,55 @@
     }
 
     async function ansOpenVolunteerSearch(container) {
-        var choice = container ? container.querySelector("a.select2-choice") : null;
-        if (choice) {
-            choice.click();
-            await sleep(200);
+        if (!container || !document.documentElement.contains(container)) return { drop: null, input: null };
+        var choice = container.querySelector("a.select2-choice");
+        var focusser = container.querySelector("input.select2-focusser");
+        var expectedSearchPrefix = focusser && focusser.id ? focusser.id : "";
+
+        function getOpenDropdown() {
+            var candidates = document.querySelectorAll("#select2-drop.select2-drop-active, .select2-drop.select2-drop-active");
+            for (var i = 0; i < candidates.length; i++) {
+                var candidate = candidates[i];
+                var candidateInput = candidate.querySelector("input.select2-input");
+                if (!candidateInput) continue;
+                if (expectedSearchPrefix && candidateInput.id && candidateInput.id.indexOf(expectedSearchPrefix) !== 0) continue;
+                var style = window.getComputedStyle(candidate);
+                if (style.display === "none" || style.visibility === "hidden") continue;
+                return { drop: candidate, input: candidateInput };
+            }
+            return null;
         }
-        var focusser = container ? container.querySelector("input.select2-focusser") : null;
-        if (focusser) {
-            focusser.focus();
-            focusser.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
-            focusser.click();
-            await sleep(200);
+
+        var opened = getOpenDropdown();
+        if (opened) {
+            opened.input.focus();
+            return opened;
         }
-        var drop = document.querySelector("#select2-drop.select2-drop-active") || (container ? container.querySelector(".select2-drop") : null);
-        if (!drop && choice) {
-            choice.click();
-            await sleep(300);
-            drop = document.querySelector("#select2-drop.select2-drop-active") || (container ? container.querySelector(".select2-drop") : null);
+
+        // Select2 v3 toggles on the choice click. Do not mix a click, an
+        // ArrowDown, and a focusser click: that sequence can reopen then close it.
+        for (var attempt = 0; attempt < 3; attempt++) {
+            if (attempt === 0 && choice) {
+                choice.click();
+            } else if (focusser) {
+                focusser.focus();
+                focusser.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
+                focusser.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
+            } else if (choice) {
+                choice.click();
+            }
+            var waited = 0;
+            while (waited < 1000) {
+                opened = getOpenDropdown();
+                if (opened) {
+                    opened.input.focus();
+                    return opened;
+                }
+                await sleep(100);
+                waited += 100;
+            }
         }
-        var input = drop ? drop.querySelector("input.select2-input") : null;
-        if (!input) input = await waitForSelector("#select2-drop.select2-drop-active input.select2-input", 1500);
-        return { drop: drop, input: input };
+        return { drop: null, input: null };
     }
 
     async function ansSelectVolunteerBySearch(modal, searchTerm, label) {
@@ -23672,8 +24200,145 @@
         throw new Error("Could not confirm reusable subject selection.");
     }
 
+    function ansGetGenderFromVolunteerResultText(text) {
+        var match = String(text || "").match(/\b\d+\s*([MF])\b/i);
+        if (!match) return "";
+        return match[1].toLowerCase() === "m" ? "male" : "female";
+    }
+
+    function ansGetSelectableVolunteerResults(drop) {
+        if (!drop) return [];
+        var nodes = drop.querySelectorAll("li.select2-result-selectable:not(.select2-disabled)");
+        var options = [];
+        for (var i = 0; i < nodes.length; i++) {
+            var label = nodes[i].querySelector(".select2-result-label") || nodes[i];
+            var info = label.querySelector(".select2-info");
+            var text = ansNormalizeText(info ? info.textContent : label.textContent);
+            if (text) options.push({ node: nodes[i], label: label, text: text });
+        }
+        return options;
+    }
+
+    function ansGetFirstVolunteerResultForGender(options, requestedGender) {
+        for (var i = 0; i < options.length; i++) {
+            var optionGender = ansGetGenderFromVolunteerResultText(options[i].text);
+            if (requestedGender === "randomize" || optionGender === requestedGender) return options[i];
+        }
+        return null;
+    }
+
+    async function ansWaitForStableVolunteerResults(initialDrop, timeoutMs, baselineSignature, didMutateResults) {
+        var waited = 0;
+        var previousSignature = null;
+        var stableCount = 0;
+        var responseObserved = false;
+        while (waited < timeoutMs) {
+            var drop = document.querySelector("#select2-drop.select2-drop-active") || initialDrop;
+            var searching = !!(drop && drop.querySelector(".select2-searching"));
+            var moreResults = drop && drop.querySelector(".select2-more-results");
+            if (moreResults && /load|search/i.test(ansNormalizeText(moreResults.textContent))) searching = true;
+            if (searching || (typeof didMutateResults === "function" && didMutateResults())) responseObserved = true;
+            var options = ansGetSelectableVolunteerResults(drop);
+            var noResults = !!(drop && drop.querySelector(".select2-no-results"));
+            var signature = options.map(function(option) { return option.text; }).join("\u001f") || (noResults ? "<no-results>" : "");
+            if (baselineSignature !== signature) responseObserved = true;
+            if (searching || !signature || !responseObserved) {
+                stableCount = 0;
+                previousSignature = signature;
+            } else if (signature === previousSignature) {
+                stableCount++;
+                if (stableCount >= 2) return { drop: drop, options: options, noResults: noResults, responseObserved: responseObserved };
+            } else {
+                previousSignature = signature;
+                stableCount = 0;
+            }
+            await sleep(250);
+            waited += 250;
+        }
+        var finalDrop = document.querySelector("#select2-drop.select2-drop-active") || initialDrop;
+        return { drop: finalDrop, options: ansGetSelectableVolunteerResults(finalDrop), noResults: !!(finalDrop && finalDrop.querySelector(".select2-no-results")), responseObserved: responseObserved };
+    }
+
+    async function ansActivateAndConfirmVolunteerResult(modal, container, searchInput, option, requestedGender) {
+        var targetId = extractVolunteerIdFromChosenText(option && option.text || "");
+        if (!targetId) throw new Error("The first eligible Volunteer result did not contain a parseable ID.");
+        var select = modal ? modal.querySelector("select#volunteer, select[name='volunteer']") : null;
+        if (!select) select = document.querySelector("select#volunteer, select[name='volunteer']");
+        var previousValue = String(select && select.value || "");
+
+        function selectionIsCommitted() {
+            var chosenEl = container.querySelector(".select2-chosen") || container.querySelector('[id^="select2-chosen-"]');
+            var chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
+            var chosenId = extractVolunteerIdFromChosenText(chosenText);
+            var selectedValue = String(select && select.value || "");
+            var matchesTarget = selectedValue === targetId || chosenId === targetId;
+            var changed = selectedValue !== previousValue || chosenId === targetId;
+            if (!matchesTarget || !changed) return null;
+            var actualText = chosenText || option.text;
+            var actualGender = ansGetGenderFromVolunteerResultText(actualText) || ansGetGenderFromVolunteerResultText(option.text);
+            if (requestedGender && requestedGender !== "randomize" && actualGender !== requestedGender) {
+                throw new Error("Selected Volunteer gender did not match " + requestedGender + ": " + actualText);
+            }
+            return { volunteerId: targetId, chosenText: actualText };
+        }
+
+        var dispatched = false;
+        try {
+            if (window.jQuery) {
+                window.jQuery(option.node).trigger("mouseup");
+                dispatched = true;
+            }
+        } catch (jqErr) {
+            log("ANS: jQuery result mouseup failed - " + String(jqErr));
+        }
+
+        async function waitForSelection(timeoutMs) {
+            var waited = 0;
+            while (waited < timeoutMs) {
+                var result = selectionIsCommitted();
+                if (result) return result;
+                await sleep(150);
+                waited += 150;
+            }
+            return null;
+        }
+
+        var confirmed = await waitForSelection(1200);
+        if (!confirmed) {
+            try {
+                option.node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, view: window }));
+                option.node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, view: window, button: 0 }));
+                option.node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, view: window, button: 0 }));
+                dispatched = true;
+            } catch (mouseErr) {
+                log("ANS: native result mouse events failed - " + String(mouseErr));
+            }
+            confirmed = await waitForSelection(1800);
+        }
+        if (!confirmed && searchInput) {
+            try {
+                option.node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, view: window }));
+                searchInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
+                searchInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
+                dispatched = true;
+            } catch (keyErr) {
+                log("ANS: result Enter fallback failed - " + String(keyErr));
+            }
+            confirmed = await waitForSelection(1800);
+        }
+        if (!confirmed) {
+            var currentValue = String(select && select.value || "");
+            var currentChosen = container.querySelector(".select2-chosen");
+            log("ANS: Volunteer result activation unconfirmed targetId=" + targetId + " currentValue=" + currentValue + " chosen='" + ansNormalizeText(currentChosen && currentChosen.textContent || "") + "' eventsDispatched=" + String(dispatched));
+            return null;
+        }
+        return confirmed;
+    }
+
     async function ansSelectRandomVolunteer(modal) {
         log("ANS: preparing volunteer source");
+        var requestedGender = ansGetRequestedGender();
+        log("ANS: selecting new volunteer with gender preference=" + requestedGender);
         var searchSel = await ansWaitForEnabledElement("select#cohortAssignmentSearch", 12000);
         if (searchSel && searchSel.value !== "AllVolunteers") {
             searchSel.value = "AllVolunteers";
@@ -23696,52 +24361,130 @@
             var s2drop = opened.drop;
             var s2input = opened.input;
             if (!s2input) throw new Error("Volunteer search input was not found.");
+            var resultList = s2drop ? s2drop.querySelector(".select2-results") : null;
+            var baselineSignature = ansGetSelectableVolunteerResults(s2drop).map(function(option) { return option.text; }).join("\u001f");
+            var resultMutationSeen = false;
+            var resultsObserver = null;
+            if (resultList && typeof MutationObserver !== "undefined") {
+                resultsObserver = new MutationObserver(function() { resultMutationSeen = true; });
+                resultsObserver.observe(resultList, { childList: true, subtree: true, characterData: true });
+            }
             s2input.value = letter;
             s2input.dispatchEvent(new Event("input", { bubbles: true }));
             s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: letter, keyCode: letter.toUpperCase().charCodeAt(0) }));
             await sleep(500);
-            var resultWaited = 0;
-            var hasSelectableResult = false;
-            while (resultWaited < 4000) {
-                s2drop = document.querySelector("#select2-drop.select2-drop-active") || s2drop;
-                var noResults = s2drop && s2drop.querySelector(".select2-no-results");
-                var loading = s2drop && s2drop.querySelector(".select2-searching, .select2-more-results");
-                var selectable = s2drop ? s2drop.querySelector(".select2-result-selectable:not(.select2-disabled)") : null;
-                if (selectable) {
-                    hasSelectableResult = true;
-                    break;
-                }
-                if (noResults && !loading) break;
-                await sleep(250);
-                resultWaited += 250;
-            }
-            if (!hasSelectableResult) {
-                log("ANS: no selectable volunteer result for letter '" + letter + "', trying next letter");
+            var resultState = await ansWaitForStableVolunteerResults(s2drop, 6000, baselineSignature, function() { return resultMutationSeen; });
+            if (resultsObserver) resultsObserver.disconnect();
+            s2drop = resultState.drop;
+            if (!resultState.responseObserved) {
+                log("ANS: Select2 did not show evidence of refreshed results for letter '" + letter + "'; refusing to select possibly stale options");
                 continue;
             }
-            var waited = 0;
-            while (waited < 5000) {
-                s2input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-                s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
-                await sleep(400);
-                var chosenEl = s2container.querySelector(".select2-chosen") || s2container.querySelector('[id^="select2-chosen-"]');
-                var chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
-                var cls = s2container.getAttribute("class") || "";
-                if (cls.indexOf("select2-allowclear") !== -1 && cls.indexOf("select2-dropdown-open") === -1 && chosenText && chosenText.toLowerCase() !== "search") {
-                    var volId = extractVolunteerIdFromChosenText(chosenText);
-                    if (volId) {
-                        localStorage.setItem(STORAGE_ANS_CURRENT_VOLUNTEER, volId);
-                        setLastVolunteerId(volId);
-                        appendSelectedVolunteerId(volId);
-                    }
-                    log("ANS: volunteer selected " + chosenText + " parsedId=" + String(volId));
-                    return true;
-                }
-                waited += 400;
+            if (!resultState.options.length) {
+                log("ANS: no stable selectable volunteer result for letter '" + letter + "'; noResults=" + String(resultState.noResults) + "; trying next letter");
+                continue;
             }
-            log("ANS: volunteer result for letter '" + letter + "' did not confirm, trying next letter");
+            var matchingOption = ansGetFirstVolunteerResultForGender(resultState.options, requestedGender);
+            if (!matchingOption) {
+                log("ANS: no " + requestedGender + " volunteer in stable results for letter '" + letter + "'; trying another letter");
+                continue;
+            }
+            var targetVolunteerId = extractVolunteerIdFromChosenText(matchingOption.text);
+            if (!targetVolunteerId) {
+                log("ANS: first eligible result has no parseable Volunteer ID; refusing to select it text='" + matchingOption.text + "'");
+                continue;
+            }
+            log("ANS: clicking first eligible volunteer result after search letter='" + letter + "' text='" + matchingOption.text + "'");
+            // This ClinSpark Select2 build delegates result selection to mouseup;
+            // HTMLElement.click() alone only emits click and leaves the dropdown open.
+            var volunteerSelect = modal ? (modal.querySelector("select#volunteer, select[name='volunteer']") || null) : null;
+            if (!volunteerSelect) volunteerSelect = document.querySelector("select#volunteer, select[name='volunteer']");
+            var previousVolunteerValue = String(volunteerSelect && volunteerSelect.value || "");
+            var selectionEventSent = false;
+            try {
+                if (window.jQuery) {
+                    window.jQuery(matchingOption.node).trigger("mouseup");
+                    selectionEventSent = true;
+                }
+            } catch (jqSelectErr) {
+                log("ANS: jQuery Select2 mouseup dispatch failed - " + String(jqSelectErr));
+            }
+            await sleep(120);
+            if (!selectionEventSent || String(volunteerSelect && volunteerSelect.value || "") !== targetVolunteerId) {
+                try {
+                    matchingOption.node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, view: window }));
+                    matchingOption.node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, view: window, button: 0 }));
+                    matchingOption.node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, view: window, button: 0 }));
+                    selectionEventSent = true;
+                } catch (mouseSelectErr) {
+                    log("ANS: native Select2 mouse event dispatch failed - " + String(mouseSelectErr));
+                }
+            }
+            var chosenText = "";
+            var volId = "";
+            var confirmed = false;
+            var confirmWait = 0;
+            while (confirmWait < 6000) {
+                await sleep(250);
+                var chosenEl = s2container.querySelector(".select2-chosen") || s2container.querySelector('[id^="select2-chosen-"]');
+                chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
+                var cls = s2container.getAttribute("class") || "";
+                var currentVolunteerValue = String(volunteerSelect && volunteerSelect.value || "");
+                var chosenVolunteerId = extractVolunteerIdFromChosenText(chosenText);
+                var isCommittedTarget = currentVolunteerValue === targetVolunteerId || chosenVolunteerId === targetVolunteerId;
+                var hasChangedFromPrevious = currentVolunteerValue !== previousVolunteerValue || chosenVolunteerId === targetVolunteerId;
+                if (selectionEventSent && isCommittedTarget && hasChangedFromPrevious) {
+                    volId = targetVolunteerId;
+                    var chosenGender = ansGetGenderFromVolunteerResultText(chosenText || matchingOption.text);
+                    if (requestedGender !== "randomize" && chosenGender !== requestedGender) {
+                        throw new Error("Volunteer selection did not match requested gender " + requestedGender + ". Selected: " + (chosenText || matchingOption.text));
+                    }
+                    confirmed = true;
+                    break;
+                }
+                confirmWait += 250;
+            }
+            if (!confirmed) {
+                log("ANS: Select2 did not commit target Volunteer ID=" + targetVolunteerId + " after mouseup; current value=" + String(volunteerSelect && volunteerSelect.value || "") + " chosen='" + chosenText + "'");
+                // Keyboard selection is the final fallback: move the pointer over the
+                // intended row so Select2 highlights it, then activate its own Enter handler.
+                try {
+                    matchingOption.node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, view: window }));
+                    s2input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
+                    s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
+                } catch (keySelectErr) {
+                    log("ANS: Select2 keyboard fallback failed - " + String(keySelectErr));
+                }
+                var fallbackWait = 0;
+                while (fallbackWait < 3000) {
+                    await sleep(250);
+                    chosenEl = s2container.querySelector(".select2-chosen") || s2container.querySelector('[id^="select2-chosen-"]');
+                    chosenText = chosenEl ? ansNormalizeText(chosenEl.textContent) : "";
+                    currentVolunteerValue = String(volunteerSelect && volunteerSelect.value || "");
+                    chosenVolunteerId = extractVolunteerIdFromChosenText(chosenText);
+                    if (currentVolunteerValue === targetVolunteerId || chosenVolunteerId === targetVolunteerId) {
+                        volId = targetVolunteerId;
+                        var fallbackGender = ansGetGenderFromVolunteerResultText(chosenText || matchingOption.text);
+                        if (requestedGender !== "randomize" && fallbackGender !== requestedGender) {
+                            throw new Error("Volunteer selection did not match requested gender " + requestedGender + ". Selected: " + (chosenText || matchingOption.text));
+                        }
+                        confirmed = true;
+                        break;
+                    }
+                    fallbackWait += 250;
+                }
+            }
+            if (!confirmed) {
+                log("ANS: result activation failed; aborting rather than saving an uncertain selection");
+                throw new Error("Could not confirm the selected volunteer in the dropdown.");
+            }
+            localStorage.setItem(STORAGE_ANS_CURRENT_VOLUNTEER, volId);
+            setLastVolunteerId(volId);
+            appendSelectedVolunteerId(volId);
+            log("ANS: volunteer selected " + chosenText + " parsedId=" + String(volId) + " gender=" + ansGetGenderFromVolunteerResultText(chosenText));
+            return true;
         }
-        throw new Error("Could not select an available volunteer after trying all random letters.");
+        throw new Error("Could not select an available " + (requestedGender === "randomize" ? "volunteer" : requestedGender + " volunteer") + " after trying all available random letters.");
     }
 
     async function processAddNewSubjectOnCohortPage() {
@@ -23843,23 +24586,64 @@
             await sleep(400);
             waited += 400;
         }
-        if (!targetRow) throw new Error("Could not find the newly added volunteer row for activation.");
-        var actionBtn = getRowActionButton(targetRow);
-        if (!actionBtn) throw new Error("Could not find row Actions button for activation.");
-        actionBtn.click();
-        await sleep(300);
-        var planLink = getMenuLinkActivatePlan(targetRow);
-        if (planLink) {
-            planLink.click();
-            await clickBootboxOk(5000);
-            await sleep(800);
+        if (!targetRow) {
+            if (ansScheduleActivationRefresh(current, targetVolId, idx, "findSubjectRow", "the newly added subject row did not appear")) return;
+            throw new Error("Could not find the newly added volunteer row for activation after waiting and refresh retries.");
         }
-        var found = await waitForActivateVolunteerById(targetVolId, 45000);
+        var activationRetry = ansGetActivationRetryState(current, targetVolId, idx);
+        if (activationRetry.phase !== "waitingForVolunteer") {
+            var actionBtn = getRowActionButton(targetRow);
+            if (!actionBtn) {
+                if (ansScheduleActivationRefresh(current, targetVolId, idx, "findSubjectRow", "the subject row actions were not ready")) return;
+                throw new Error("Could not find row Actions button for activation after waiting and refresh retries.");
+            }
+            if (!isRowActionMenuOpen(targetRow, actionBtn)) {
+                actionBtn.click();
+                await sleep(300);
+            }
+            var planLink = getMenuLinkActivatePlan(targetRow);
+            if (planLink) {
+                planLink.click();
+                await clickBootboxOk(5000);
+                await sleep(800);
+            }
+        }
+        var found = await waitForActivateVolunteerById(targetVolId, 45000, true);
+        var disabledPlanRetries = 0;
+        while (found && found.disabled && disabledPlanRetries < 2) {
+            disabledPlanRetries++;
+            log("ANS: disabled Activate Volunteer action detected after refresh; retrying Activate Plan " + String(disabledPlanRetries) + "/2 for volunteerId=" + String(targetVolId));
+            var retryRow = findCohortRowByVolunteerId(targetVolId) || found.row || targetRow;
+            var retryActionButton = getRowActionButton(retryRow);
+            if (!retryActionButton) {
+                log("ANS: cannot retry Activate Plan because the subject row Actions button is unavailable");
+                break;
+            }
+            if (!isRowActionMenuOpen(retryRow, retryActionButton)) {
+                retryActionButton.click();
+                await sleep(300);
+            }
+            var retryPlanLink = getMenuLinkActivatePlan(retryRow);
+            if (!retryPlanLink || isCohortActionDisabled(retryPlanLink)) {
+                log("ANS: cannot retry Activate Plan because no enabled Activate Plan action is available");
+                break;
+            }
+            retryPlanLink.click();
+            var retryPlanConfirmed = await clickBootboxOk(5000);
+            if (!retryPlanConfirmed) log("ANS: Activate Plan retry confirmation was not observed; checking current action state");
+            await sleep(800);
+            found = await waitForActivateVolunteerById(targetVolId, 15000, true);
+        }
         if (found && found.link) {
             found.link.click();
             await clickBootboxOk(5000);
             await sleep(800);
         } else {
+            if (found && found.disabled) {
+                if (ansScheduleActivationRefresh(current, targetVolId, idx, "retryPlan", "Activate Volunteer remained disabled after retrying Activate Plan")) return;
+                throw new Error("Activate Volunteer remained disabled after retrying Activate Plan for volunteerId=" + String(targetVolId) + ". The workflow is paused for review.");
+            }
+            if (ansScheduleActivationRefresh(current, targetVolId, idx, "waitingForVolunteer", "Activate Volunteer is not yet available")) return;
             throw new Error("Activate Volunteer link was not found for volunteerId=" + String(targetVolId) + ". The subject may not have been saved into this cohort.");
         }
         if (current && current.isScreeningEpoch) {
@@ -23882,7 +24666,10 @@
         ansSetIndex(idx + 1);
         setCohortGuard("");
         clearSelectedVolunteerIds();
-        try { localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER); } catch (e2) {}
+        try {
+            localStorage.removeItem(STORAGE_ANS_CURRENT_VOLUNTEER);
+            localStorage.removeItem(STORAGE_ANS_ACTIVATION_RETRY);
+        } catch (e2) {}
         if (idx + 1 >= queue.length) {
             if (ansQueueHasScreening(queue)) {
                 var icfSubject = ansGetIcfSubject() || ansGetReuseSubject();
@@ -26029,10 +26816,8 @@
 
             // Read status cell innerHTML once, reuse for archive + visibility checks
             var statusHtml = (cellCount > statusCellIndex) ? cells[statusCellIndex].innerHTML : "";
-            if (statusHtml.indexOf("fa-archive") !== -1) {
-                skippedArchived++;
-                continue;
-            }
+            var isArchived = statusHtml.indexOf("fa-archive") !== -1;
+            if (isArchived) skippedArchived++;
 
             // Inline timepoint/example-time extraction and parsing
             var timepointRaw = "";
@@ -26094,7 +26879,9 @@
                 visibilityAlreadySet: visibilityAlreadySet,
                 autoPopulated: true,
                 editHref: editLinkMap[i] || "",
-                saRowIndex: i
+                saRowIndex: i,
+                archived: isArchived,
+                scheduledActivityId: bplGetScheduledActivityIdFromRow(rows[i], editLinkMap[i] || "")
             });
         }
         log("BPL: enhanced scan complete - " + result.saTableItems.length + " items collected, " + skippedArchived + " archived skipped, " + skippedDuplicate + " duplicates skipped");
@@ -26543,6 +27330,8 @@
                 if (autoData) {
                     autoData.editHref = saItem.editHref || autoData.editHref || "";
                     autoData.saRowIndex = saItem.saRowIndex;
+                    autoData.archived = !!saItem.archived;
+                    autoData.scheduledActivityId = saItem.scheduledActivityId || autoData.scheduledActivityId || "";
                     autoData.timepointRaw = saItem.timepointRaw || autoData.timepointRaw || "";
                     autoData.timepointCleaned = saItem.timepointCleaned || autoData.timepointCleaned || "";
                     autoData.timepointDisplay = saItem.timepointDisplay || autoData.timepointDisplay || "";
@@ -26611,7 +27400,8 @@
                 value: matchedFormVal || saItem.form,
                 text: matchedFormText,
                 index: newIndex,
-                autoPopulated: true
+                autoPopulated: true,
+                archived: !!saItem.archived
             });
             mergedSegmentFormMap[matchedSegVal] = existingForms;
             var tpDays = 0, tpHours = 0, tpMinutes = 0, tpSeconds = 0;
@@ -26653,6 +27443,8 @@
                 modified: false,
                 editHref: saItem.editHref || "",
                 saRowIndex: saItem.saRowIndex,
+                archived: !!saItem.archived,
+                scheduledActivityId: saItem.scheduledActivityId || "",
                 originalValues: {
                     days: tpDays,
                     hours: tpHours,
@@ -26828,7 +27620,7 @@
                         studyEvents: []
                     };
                 }
-                if (fEntry.archiveRequested) {
+                if (fEntry.archived || fd.archived || fEntry.archiveRequested) {
                     continue;
                 }
                 var isExistingForm = fEntry.autoPopulated || fd.autoPopulated;
@@ -26882,6 +27674,7 @@
                 var fEntry = fList[fi];
                 var fk = sv + "|" + fEntry.value + "|" + fEntry.index;
                 var fd = formDataStore[fk];
+                if (fEntry.archived || (fd && fd.archived)) continue;
                 if (!fd) {
                     continue;
                 }
@@ -28149,6 +28942,13 @@
                 return;
             }
             var isAutoPopulatedForm = data.autoPopulated || false;
+            if (data.archived) {
+                var archivedNotice = document.createElement("div");
+                archivedNotice.style.cssText = "padding:10px;background:#3a2817;border:1px solid #d98222;border-radius:4px;color:#ffc477;font-size:12px;line-height:1.45;";
+                archivedNotice.textContent = "Archived forms are read-only. They can be reordered or marked for deletion, but their schedule and time settings cannot be edited.";
+                timeBody.appendChild(archivedNotice);
+                return;
+            }
             var isModifiedAutoForm = isAutoPopulatedForm && data.modified;
             if (isAutoPopulatedForm) {
                 var autoBanner = document.createElement("div");
@@ -28579,6 +29379,7 @@
                         for (var ci = 0; ci < forms.length; ci++) {
                             var fk = getFormDataKey(segVal, forms[ci].value, forms[ci].index);
                             var d = formDataStore[fk] || getDefaultFormData();
+                            if (forms[ci].archived || d.archived) continue;
                             copiedAllForms.push({
                                 formValue: forms[ci].value,
                                 formText: forms[ci].text,
@@ -28595,6 +29396,7 @@
                                 preReference: d.preReference || false
                             });
                         }
+                        if (!copiedAllForms.length) { showCopyToast("No copyable forms in this segment", e); return; }
                         log("BPL: copied all " + copiedAllForms.length + " forms from segment " + segVal);
                         showCopyToast("Copied " + copiedAllForms.length + " form" + (copiedAllForms.length !== 1 ? "s" : "") + "!", e);
                     };
@@ -28997,6 +29799,8 @@
                         var fData2 = formDataStore[fKey] || getDefaultFormData();
                         var fEvents = fData2.studyEvents || [];
                         var isAutoPopulated = fEntry.autoPopulated || fData2.autoPopulated || false;
+                        var isArchivedForm = !!(fEntry.archived || fData2.archived);
+                        if (isArchivedForm && bplHideArchived) continue;
                         if (isAutoPopulated && bplHideExisting) {
                             continue;
                         }
@@ -29012,7 +29816,10 @@
                         var isModifiedAuto = isAutoPopulated && fData2.modified;
                         var rowBorderColor = "#444";
                         var rowBg = "#2a2a2a";
-                        if (isAutoPopulated) {
+                        if (isArchivedForm) {
+                            rowBorderColor = "#d98222";
+                            rowBg = "#302417";
+                        } else if (isAutoPopulated) {
                             if (isModifiedAuto) {
                                 rowBorderColor = "#2d8a2d";
                                 rowBg = "#1a2a1a";
@@ -29039,6 +29846,10 @@
                         if (fEntry.archiveRequested) {
                             rowBorderColor = "#b45cff";
                             rowBg = "#352044";
+                        }
+                        if (isArchivedForm) {
+                            rowBorderColor = fEntry.archiveRequested ? "#b45cff" : "#d98222";
+                            rowBg = fEntry.archiveRequested ? "#352044" : (isSelected ? "#4a351e" : "#302417");
                         }
                         var autoPopIndicatorStyle = "";
                         if (isAutoPopulated) {
@@ -29330,8 +30141,9 @@
                         }
                         var copyFormBtn = document.createElement("button");
                         copyFormBtn.textContent = "\u{1F4CB}";
-                        copyFormBtn.title = "Copy this form instance";
-                        copyFormBtn.style.cssText = "padding:2px 5px;border-radius:3px;border:1px solid #555;background:#333;color:#fff;font-size:10px;cursor:pointer;flex-shrink:0;";
+                        copyFormBtn.title = isArchivedForm ? "Archived forms cannot be copied" : "Copy this form instance";
+                        copyFormBtn.disabled = isArchivedForm;
+                        copyFormBtn.style.cssText = "padding:2px 5px;border-radius:3px;border:1px solid " + (isArchivedForm ? "#444" : "#555") + ";background:" + (isArchivedForm ? "#242424" : "#333") + ";color:" + (isArchivedForm ? "#666" : "#fff") + ";font-size:10px;cursor:" + (isArchivedForm ? "not-allowed" : "pointer") + ";flex-shrink:0;";
                         copyFormBtn.addEventListener("click", (function(sv, fv, ft, fk) {
                             return function(e) {
                                 e.stopPropagation();
@@ -29378,10 +30190,17 @@
                         inlineTimeWrap.style.cssText = "width:86px;min-width:86px;max-width:86px;display:block;flex:0 0 86px;";
                         var inlineTimeInput = document.createElement("input");
                         inlineTimeInput.type = "text";
+                        if (isArchivedForm) inlineTimeInput.disabled = true;
                         inlineTimeInput.placeholder = "HH:MM";
                         inlineTimeInput.setAttribute("aria-label", "Apply Time Calculation for " + fEntry.text);
                         inlineTimeInput.title = "Enter minutes or HH:MM, then press Enter or leave the field to apply.";
                         inlineTimeInput.style.cssText = "width:100%;height:24px;padding:2px 6px;border-radius:4px;border:1px solid #555;background:#191919;color:#fff;font-size:11px;box-sizing:border-box;outline:none;";
+                        if (isArchivedForm) {
+                            inlineTimeInput.style.setProperty("background", "#191919", "important");
+                            inlineTimeInput.style.setProperty("color", "#fff", "important");
+                            inlineTimeInput.style.setProperty("-webkit-text-fill-color", "#fff", "important");
+                            inlineTimeInput.style.setProperty("opacity", "1", "important");
+                        }
                         inlineTimeInput.addEventListener("click", function(e) { e.stopPropagation(); });
                         inlineTimeInput.addEventListener("mousedown", function(e) { e.stopPropagation(); });
                         var applyInlineTimeValue = (function(fk, input) {
@@ -29542,6 +30361,14 @@
             renderCenterPanel(centerSearch.value);
         });
         legendRow.appendChild(collapseAllBtn);
+
+        var bplHideArchived = true;
+        var hideArchivedBtn = document.createElement("button");
+        hideArchivedBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #d98222;background:#302417;color:#ffc477;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;";
+        function updateHideArchivedButton() { hideArchivedBtn.textContent = bplHideArchived ? "Unhide Archived" : "Hide Archived"; hideArchivedBtn.title = bplHideArchived ? "Show archived forms" : "Hide archived forms"; }
+        hideArchivedBtn.addEventListener("click", function() { bplHideArchived = !bplHideArchived; try { localStorage.setItem("bplHideArchived", bplHideArchived ? "true" : "false"); } catch (e) {} updateHideArchivedButton(); renderCenterPanel(centerSearch.value); });
+        updateHideArchivedButton();
+        legendRow.appendChild(hideArchivedBtn);
 
         var hideExistingBtn = document.createElement("button");
         hideExistingBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#aaa;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;";
@@ -29786,6 +30613,8 @@
                         var existingData = formDataStore[alreadyExistsKey];
                         existingData.editHref = saItem.editHref || existingData.editHref || "";
                         existingData.saRowIndex = saItem.saRowIndex;
+                        existingData.archived = !!saItem.archived;
+                        existingData.scheduledActivityId = saItem.scheduledActivityId || existingData.scheduledActivityId || "";
                         existingData.timepointRaw = saItem.timepointRaw || existingData.timepointRaw || "";
                         existingData.timepointCleaned = saItem.timepointCleaned || existingData.timepointCleaned || "";
                         existingData.timepointDisplay = saItem.timepointDisplay || existingData.timepointDisplay || "";
@@ -29836,7 +30665,8 @@
                     value: matchedFormVal || saItem.form,
                     text: resolvedFormText,
                     index: newIndex,
-                    autoPopulated: true
+                    autoPopulated: true,
+                    archived: !!saItem.archived
                 });
                 segmentFormMap[matchedSegVal] = existingForms;
 
@@ -29878,6 +30708,8 @@
                     modified: false,
                     editHref: saItem.editHref || "",
                     saRowIndex: saItem.saRowIndex,
+                    archived: !!saItem.archived,
+                    scheduledActivityId: saItem.scheduledActivityId || "",
                     originalValues: {
                         days: tpDays,
                         hours: tpHours,
@@ -30166,7 +30998,8 @@
             var archiveItems = bplCollectArchiveItems(segments, segmentFormMap, formDataStore, segmentCheckboxStates);
             var archiveReason = (archiveReasonInput.value || "").trim();
             log("BPL: confirm clicked, " + mappedItems.length + " new items to add, " + updateItems.length + " items to update, " + archiveItems.length + " existing items to archive");
-            if (archiveItems.length > 0 && !archiveReason) { confirmErrorDiv.style.display="block"; confirmErrorDiv.textContent="Archive reason is required. Enter it in the 'Archive reason' field beside Auto Paste All before confirming."; archiveReasonHint.textContent="Enter a reason here before Confirm"; archiveReasonHint.style.display="inline"; archiveReasonInput.style.borderColor="#ff6b6b"; archiveReasonInput.focus(); return; }
+            var hasActiveArchiveItems = archiveItems.some(function(item) { return !item.archived; });
+            if (hasActiveArchiveItems && !archiveReason) { confirmErrorDiv.style.display="block"; confirmErrorDiv.textContent="Archive reason is required. Enter it in the 'Archive reason' field beside Auto Paste All before confirming."; archiveReasonHint.textContent="Enter a reason here before Confirm."; archiveReasonHint.style.display="inline"; archiveReasonInput.style.borderColor="#ff6b6b"; archiveReasonInput.focus(); return; }
             if (updateItems.length === 0 && mappedItems.length === 0 && archiveItems.length === 0) {
                 log("BPL: nothing to process (no new items and no modified items)");
                 confirmErrorDiv.style.display = "block";
@@ -30570,6 +31403,14 @@
         return match ? match[1] : null;
     }
 
+    function bplGetScheduledActivityIdFromRow(row, editHref) {
+        var id = bplGetScheduledActivityId(editHref);
+        if (id || !row) return id;
+        var deleteLink = row.querySelector("a[onclick*='deleteScheduledActivity(']");
+        var match = deleteLink ? String(deleteLink.getAttribute("onclick") || "").match(/deleteScheduledActivity\s*\(\s*['\"]?(\d+)/) : null;
+        return match ? match[1] : null;
+    }
+
     function bplGetArchivePriority(item) {
         if (item && item.visibilityAlreadySet) return 0;
         if (item && !item.refActivity) return 1;
@@ -30600,10 +31441,10 @@
                 var key = bplGetFormDataKey(seg.value, entry.value, entry.index);
                 var data = formDataStore[key] || {};
                 if (!entry.archiveRequested || !(entry.autoPopulated || data.autoPopulated)) continue;
-                var id = bplGetScheduledActivityId(data.editHref || entry.editHref);
-                if (!id || data.archived) continue;
+                var id = data.scheduledActivityId || bplGetScheduledActivityId(data.editHref || entry.editHref);
+                if (!id) continue;
                 var originalRefActivity = data.originalValues && data.originalValues.refActivity !== undefined ? !!data.originalValues.refActivity : !!data.refActivity;
-                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, originalRefActivity:originalRefActivity, saRowIndex:data.saRowIndex });
+                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:!!data.archived, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, originalRefActivity:originalRefActivity, saRowIndex:data.saRowIndex });
             }
         }
         return bplSortArchiveItems(result);
@@ -30645,7 +31486,8 @@
     }
 
     async function bplExecuteArchiveItemsNow(items, reason, keepPendingCleanup) {
-        if (!items || !items.length || !reason) return [];
+        if (!items || !items.length) return [];
+        reason = reason || "Remove already archived PLAP form";
         for (var ri=0;ri<items.length;ri++)items[ri].archiveReason=reason;
         if (BPL_PROGRESS_POPUP_REF) { try { BPL_PROGRESS_POPUP_REF.close(); } catch (e) {} BPL_PROGRESS_POPUP_REF=null; } BPL_CANCELLED=false;
         var results=await aprExecuteDeletion(items, reason);
@@ -30686,7 +31528,7 @@
         return true;
     }
 
-    function bplStartConfirmedWorkflow(updateItems,mappedItems,archiveItems,reason){if(BPL_POPUP_REF){try{BPL_POPUP_REF.close();}catch(e){}BPL_POPUP_REF=null;}BPL_CANCELLED=false;BPL_PENDING_ARCHIVE_ITEMS=archiveItems||[];BPL_PENDING_ARCHIVE_REASON=reason||"";BPL_ARCHIVE_DEFERRED=mappedItems.length>0;if(updateItems.length>0&&mappedItems.length>0)startBPLUpdateThenAddProcess(updateItems,mappedItems);else if(updateItems.length>0)startBPLUpdateProcess(updateItems);else if(mappedItems.length>0)startBPLAddProcess(mappedItems);else bplExecutePendingArchive();}
+    function bplStartConfirmedWorkflow(updateItems,mappedItems,archiveItems,reason){if(BPL_POPUP_REF){try{BPL_POPUP_REF.close();}catch(e){}BPL_POPUP_REF=null;}BPL_CANCELLED=false;BPL_PENDING_ARCHIVE_ITEMS=archiveItems||[];BPL_PENDING_ARCHIVE_REASON=reason||((archiveItems||[]).length?"Remove already archived PLAP form":"");BPL_ARCHIVE_DEFERRED=mappedItems.length>0;if(updateItems.length>0&&mappedItems.length>0)startBPLUpdateThenAddProcess(updateItems,mappedItems);else if(updateItems.length>0)startBPLUpdateProcess(updateItems);else if(mappedItems.length>0)startBPLAddProcess(mappedItems);else bplExecutePendingArchive();}
 
     async function startBPLUpdateProcess(updateItems) {
         log("BPL Update: starting update process for " + updateItems.length + " modified items");
@@ -48307,6 +49149,18 @@
         return s;
     }
 
+    function isRunFormElementVisible(el) {
+        if (!el || !document.documentElement.contains(el)) return false;
+        try {
+            var style = window.getComputedStyle(el);
+            if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+            return !!(el.getClientRects && el.getClientRects().length);
+        } catch (e) {
+            var inlineStyle = el.getAttribute("style") || "";
+            return inlineStyle.indexOf("display: none") === -1;
+        }
+    }
+
     // Check whether a visible item group (itemGroupData_*) contains at least one
     function groupHasActionableItems(groupDiv) {
         if (!groupDiv) {
@@ -48316,7 +49170,7 @@
         if (!gid || gid.length === 0) {
             return false;
         }
-        var table = groupDiv.querySelector("table#collectTable_" + String(gid));
+        var table = String(groupDiv.tagName || "").toLowerCase() === "table" ? groupDiv : groupDiv.querySelector("table#collectTable_" + String(gid));
         if (!table) {
             return false;
         }
@@ -48324,10 +49178,7 @@
         var i = 0;
         while (i < rows.length) {
             var tr = rows[i];
-            var styleAttr = tr.getAttribute("style") || "";
-            var hiddenInline = styleAttr.indexOf("display: none") !== -1;
-            var visibleInline = styleAttr.indexOf("display: table-row") !== -1 || styleAttr.trim().length === 0;
-            if (visibleInline && !hiddenInline) {
+            if (isRunFormElementVisible(tr)) {
                 var td = tr.querySelector("td.itemControl");
                 var actionable = hasActionableControl(td);
                 if (actionable) {
@@ -48348,10 +49199,7 @@
         while (i < groups.length) {
             var g = groups[i];
             var gid = parseItemGroupId(g);
-            var styleAttr = g.getAttribute("style") || "";
-            var visibleInherit = styleAttr.indexOf("display: inherit") !== -1;
-            var visibleEmpty = styleAttr.trim().length === 0;
-            var visibleGroup = visibleInherit || visibleEmpty;
+            var visibleGroup = isRunFormElementVisible(g);
             var already = processedGroups[gid] === true;
             if (visibleGroup && !already) {
                 var hasAny = groupHasActionableItems(g) || !!g.querySelector("button[onclick^=\"return unlockDeviceItems(\"]");
@@ -48361,15 +49209,29 @@
             }
             i = i + 1;
         }
+        // Some ClinSpark modal variants render the collectTable without the usual
+        // itemGroupData wrapper. Fall back to visible tables so valid fields aren't
+        // skipped and the handoff doesn't immediately save an untouched form.
+        var tables = formEl.querySelectorAll("table[id^=\"collectTable_\"]");
+        var ti = 0;
+        while (ti < tables.length) {
+            var table = tables[ti];
+            var tableId = parseItemGroupId(table);
+            if (tableId && processedGroups[tableId] !== true && isRunFormElementVisible(table) && groupHasActionableItems(table)) {
+                return table;
+            }
+            ti++;
+        }
         return null;
     }
 
     // Fill actionable item rows one-by-one inside a collectTable container
-    async function fillItemControlsOneByOneV2(containerEl) {
+    async function fillItemControlsOneByOneV2(containerEl, options) {
         if (!containerEl) {
             return;
         }
         var filledIds = {};
+        var rowFillAttempts = {};
         var safety = 0;
         var safetyMax = 500;
         while (safety < safetyMax) {
@@ -48393,22 +49255,24 @@
                     i = i + 1;
                     continue;
                 }
-                var styleAttr = tr.getAttribute("style") || "";
-                var hiddenInline = styleAttr.indexOf("display: none") !== -1;
-                var visibleInline = styleAttr.indexOf("display: table-row") !== -1 || styleAttr.trim().length === 0;
-                if (!visibleInline || hiddenInline) {
+                if (!isRunFormElementVisible(tr)) {
                     i = i + 1;
                     continue;
                 }
                 var td = tr.querySelector("td.itemControl");
                 var rowId = getItemRowId(tr);
                 var alreadyFilled = filledIds[rowId] === true;
-                var actionable = !alreadyFilled && hasActionableControl(td);
+                var actionable = !alreadyFilled && (options && options.preserveExistingValues ? hasUnfilledActionableControl(td) : hasActionableControl(td));
                 if (actionable) {
                     log("Run Form V2: filling single rowId=" + String(rowId));
-                    await fillSingleItemControl(td);
-                    await fillAuditAnnotationIfPresent(tr);
-                    if (rowId && rowId.length > 0) {
+                    await fillSingleItemControl(td, options);
+                    await fillAuditAnnotationIfPresent(tr, options);
+                    var stillUnfilled = !!(options && options.preserveExistingValues && hasUnfilledActionableControl(td));
+                    if (stillUnfilled) {
+                        rowFillAttempts[rowId] = (rowFillAttempts[rowId] || 0) + 1;
+                        log("Run Form V2: row remains incomplete after attempt " + String(rowFillAttempts[rowId]) + " rowId=" + String(rowId));
+                    }
+                    if (rowId && rowId.length > 0 && (!stillUnfilled || rowFillAttempts[rowId] >= 3)) {
                         filledIds[rowId] = true;
                     }
                     progressed = true;
@@ -48429,13 +49293,10 @@
             var atr = auditSweepRows[asi];
             var aRowId = getItemRowId(atr);
             if (!filledIds[aRowId]) {
-                var aStyle = atr.getAttribute("style") || "";
-                var aVisible = aStyle.indexOf("display: table-row") !== -1 || aStyle.trim().length === 0;
-                var aHidden = aStyle.indexOf("display: none") !== -1;
-                if (aVisible && !aHidden) {
+                if (isRunFormElementVisible(atr)) {
                     var hasAuditInput = atr.querySelector("input.auditReasonForChange.collectInput");
                     if (hasAuditInput) {
-                        await fillAuditAnnotationIfPresent(atr);
+                        await fillAuditAnnotationIfPresent(atr, options);
                     }
                 }
             }
@@ -48443,19 +49304,39 @@
         }
     }
 
+    function getUnfilledVisibleRunFormRows(root) {
+        var incomplete = [];
+        if (!root) return incomplete;
+        var rows = root.querySelectorAll("tr[id^=\"itemDataCollectRow_\"]");
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            if (!isRunFormElementVisible(row)) continue;
+            var control = row.querySelector("td.itemControl");
+            if (hasUnfilledActionableControl(control)) {
+                var label = getText(row.querySelector("td.itemText")) || getItemRowId(row) || "Unknown field";
+                incomplete.push(label);
+            }
+        }
+        return incomplete;
+    }
+
     // Process a single item group directly (no Collect click)
 
-    async function processItemGroupDirectV2(groupDiv) {
+    async function processItemGroupDirectV2(groupDiv, options) {
         var gid = parseItemGroupId(groupDiv);
         if (!gid || gid.length === 0) {
             log("Run Form V2: direct path missing gid");
             return;
         }
 
-        var didAdd = await handleRepeatingItemGroupAddNew(groupDiv);
-        if (didAdd) {
-            log("Run Form V2: Add New flow completed for gid=" + String(gid));
-            return;
+        if (options && options.preserveExistingValues) {
+            log("Run Form V2: preserve-existing mode; skipping Add New for repeating group gid=" + String(gid));
+        } else {
+            var didAdd = await handleRepeatingItemGroupAddNew(groupDiv);
+            if (didAdd) {
+                log("Run Form V2: Add New flow completed for gid=" + String(gid));
+                return;
+            }
         }
 
         var unlockBtn = groupDiv.querySelector("button[onclick^=\"return unlockDeviceItems(\"]");
@@ -48476,7 +49357,7 @@
             }
         }
 
-        var table = groupDiv.querySelector("table#collectTable_" + String(gid));
+        var table = String(groupDiv.tagName || "").toLowerCase() === "table" ? groupDiv : groupDiv.querySelector("table#collectTable_" + String(gid));
         var waited = 0;
         var maxWait = 12000;
 
@@ -48492,7 +49373,7 @@
         }
 
         log("Run Form V2: filling table gid=" + String(gid));
-        await fillItemControlsOneByOneV2(table);
+        await fillItemControlsOneByOneV2(table, options);
     }
 
 
@@ -48507,13 +49388,21 @@
         var safety = 0;
         var safetyMax = 500;
         while (safety < safetyMax) {
-            var modal = document.querySelector("#ajaxModal, .modal");
+            var modal = document.getElementById(MODAL_ID);
+            if (!modal || !isModalOpen(modal)) modal = document.querySelector(".modal.in, .modal.show") || document.querySelector(".modal");
             var formEl = null;
             if (modal) {
                 formEl = modal.querySelector("form#modalInput");
             }
             if (!formEl) {
                 formEl = document.querySelector("form#modalInput");
+            }
+            if (!formEl && modal) {
+                var modalTableFallback = modal.querySelector("table[id^=\"collectTable_\"]");
+                if (modalTableFallback) {
+                    formEl = modal;
+                    log("Run Form V2: using visible modal collectTable fallback because form#modalInput is absent");
+                }
             }
             if (!formEl) {
                 log("Run Form V2: form#modalInput not found");
@@ -48526,7 +49415,7 @@
             }
             var gid = parseItemGroupId(nextGroup);
             log("Run Form V2: processing itemGroup gid=" + String(gid));
-            await processItemGroupDirectV2(nextGroup);
+            await processItemGroupDirectV2(nextGroup, options);
             processedGroups[gid] = true;
             await sleep(DELAY_V2_GROUP_RESCAN_MS);
             safety = safety + 1;
@@ -48592,10 +49481,11 @@
     // Extract the numeric item group id from element id.
     function parseItemGroupId(groupDiv) {
         var idAttr = groupDiv.id + "";
-        var m = idAttr.match(/itemGroupData_(\d+)/);
+        var m = idAttr.match(/itemGroupData_(\d+)|collectTable_(\d+)/);
         if (m && m[1]) {
             return m[1];
         }
+        if (m && m[2]) return m[2];
         return "";
     }
 
@@ -48608,7 +49498,7 @@
 
     // Fill or interact with a single item control (text, number, checkbox, radio, time).
 
-    async function fillSingleItemControl(controlTd) {
+    async function fillSingleItemControl(controlTd, options) {
         if (!controlTd) {
             return;
         }
@@ -48621,6 +49511,25 @@
         if (timeBtn) {
             log("Run Form: clicking Current Time");
             timeBtn.click();
+            if (!(options && options.preserveExistingValues)) return;
+            // The date/time widget sometimes handles Current Time asynchronously.
+            // Verify its underlying selects before treating the row as complete.
+            await sleep(180);
+            var timingSelects = controlTd.querySelectorAll("div.timingSelects select.collectInput");
+            var timingComplete = timingSelects.length > 0;
+            for (var tsi = 0; tsi < timingSelects.length; tsi++) {
+                if (!String(timingSelects[tsi].value || "").trim()) timingComplete = false;
+            }
+            if (timingComplete) {
+                log("Run Form: Current Time populated all timing fields");
+                return;
+            }
+            if (timingSelects.length) {
+                var timingSet = setMissingTimingFieldsToCurrentDateTime(controlTd, timingSelects);
+                if (timingSet) return;
+                log("Run Form: date/time remains incomplete after Current Time and fallback; preserving existing values");
+                return;
+            }
             return;
         }
         var radios = controlTd.querySelectorAll("div.radio-list input[type=\"radio\"]");
@@ -48759,72 +49668,82 @@
             return;
         }
 
-        var s2container = null;
-
-        s2container = controlTd.querySelector("div.select2-container.collectInput");
-
-        if (!s2container) {
-            var spanWrap = controlTd.querySelector("span");
-            if (spanWrap) {
-                s2container = spanWrap.querySelector("div.select2-container.collectInput");
+        var select2Safety = 0;
+        var select2Limit = 20;
+        var handledSelect2 = {};
+        while (select2Safety < select2Limit) {
+            var s2containers = controlTd.querySelectorAll("div.select2-container.collectInput, div.select2-container");
+            var s2container = null;
+            var s2containerKey = "";
+            for (var ci = 0; ci < s2containers.length; ci++) {
+                var chosenEl = s2containers[ci].querySelector(".select2-chosen");
+                var chosenText = String(chosenEl && chosenEl.textContent || "").trim();
+                var chosenPlaceholder = !chosenText || /^(?:-|select\b|enter\s+the\s+reason\b)/i.test(chosenText);
+                var candidateKey = String(s2containers[ci].id || "select2-index-" + ci);
+                if (!handledSelect2[candidateKey] && (!(options && options.preserveExistingValues) || chosenPlaceholder)) {
+                    s2container = s2containers[ci];
+                    s2containerKey = candidateKey;
+                    break;
+                }
             }
-        }
-
-        if (!s2container) {
-            s2container = controlTd.querySelector("div.select2-container");
-        }
-
-        if (s2container) {
-
+            if (!s2container) break;
             var choice = s2container.querySelector("a.select2-choice");
+            if (!choice) {
+                log("Run Form: select2 choice missing; skipping one dropdown");
+                break;
+            }
             choice.click();
             log("Run Form: select2 open (arrow)");
-
             await sleep(200);
-
             var drop = document.querySelector(".select2-drop-active");
-
             if (!drop) {
                 log("Run Form: no .select2-drop-active; retrying");
                 choice.click();
                 await sleep(300);
                 drop = document.querySelector(".select2-drop-active");
             }
-
             if (!drop) {
                 log("Run Form: still no active drop — ABORT");
-                return;
+                break;
             }
-
             var results = drop.querySelectorAll("li.select2-result-selectable div.select2-result-label");
-
-            if (results.length === 0) {
-                log("Run Form: no results in .select2-drop-active");
-                return;
-            }
-
             var valid = [];
-            var i = 0;
-            while (i < results.length) {
-                var t = (results[i].textContent + "").trim();
-                if (t.length > 0 && t !== "-") {
-                    valid.push(results[i]);
-                }
-                i++;
+            for (var ri = 0; ri < results.length; ri++) {
+                var resultText = String(results[ri].textContent || "").trim();
+                if (resultText && resultText !== "-") valid.push(results[ri]);
             }
-
-            if (valid.length === 0) {
-                log("Run Form: only '-' placeholder found");
-                return;
+            if (!valid.length) {
+                log("Run Form: no usable Select2 options");
+                break;
             }
-
             var pick = valid[Math.floor(Math.random() * valid.length)];
-            pick.closest("li").click();
-
-            log("Run Form: Select2 picked: " + pick.textContent.trim());
+            var pickLi = pick.closest("li");
+            if (!pickLi) {
+                log("Run Form: Select2 option has no result row");
+                break;
+            }
+            pickLi.click();
+            log("Run Form: Select2 picked: " + String(pick.textContent || "").trim());
+            handledSelect2[s2containerKey] = true;
             await sleep(150);
+            select2Safety++;
+        }
+        if (select2Safety > 0) return;
 
-            return;
+        var nativeSelects = controlTd.querySelectorAll("select.collectInput");
+        for (var nsi = 0; nsi < nativeSelects.length; nsi++) {
+            var nativeSelect = nativeSelects[nsi];
+            if (options && options.preserveExistingValues && String(nativeSelect.value || "").trim()) continue;
+            var nativeOptions = [];
+            for (var noi = 0; noi < nativeSelect.options.length; noi++) {
+                var nativeOption = nativeSelect.options[noi];
+                if (String(nativeOption.value || "").trim() && String(nativeOption.textContent || "").trim() !== "-") nativeOptions.push(nativeOption);
+            }
+            if (!nativeOptions.length) continue;
+            nativeSelect.value = nativeOptions[Math.floor(Math.random() * nativeOptions.length)].value;
+            nativeSelect.dispatchEvent(new Event("input", { bubbles: true }));
+            nativeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+            log("Run Form: native select picked value=" + String(nativeSelect.value));
         }
 
 
@@ -48833,8 +49752,113 @@
         log("Run Form: itemControl has no known actionable inputs; skipping");
     }
 
+    // Complete only missing pieces of a ClinSpark split date/time widget. Prefer
+    // the current local date/time and never overwrite a component already entered.
+    function setMissingTimingFieldsToCurrentDateTime(controlTd, selects) {
+        var now = new Date();
+        var targets = {
+            dd: String(now.getDate()).padStart(2, "0"),
+            MM: String(now.getMonth() + 1).padStart(2, "0"),
+            yyyy: String(now.getFullYear()),
+            HH: String(now.getHours()).padStart(2, "0"),
+            mm: String(now.getMinutes()).padStart(2, "0"),
+            ss: String(now.getSeconds()).padStart(2, "0")
+        };
+        var byPart = {};
+        for (var i = 0; i < selects.length; i++) {
+            var select = selects[i];
+            var part = String(select.name || select.id || "").match(/_(dd|MM|yyyy|HH|mm|ss)$/);
+            if (part) byPart[part[1]] = select;
+        }
+        var requiredParts = ["dd", "MM", "yyyy", "HH", "mm", "ss"];
+        var dateParts = ["dd", "MM", "yyyy"];
+        for (var pi = 0; pi < requiredParts.length; pi++) {
+            var key = requiredParts[pi];
+            var field = byPart[key];
+            if (!field) continue;
+            var current = String(field.value || "").trim();
+            if (current) {
+                targets[key] = current;
+                continue;
+            }
+            var matchingOption = false;
+            for (var oi = 0; oi < field.options.length; oi++) {
+                if (String(field.options[oi].value || "").trim() === targets[key]) {
+                    matchingOption = true;
+                    break;
+                }
+            }
+            if (!matchingOption) {
+                log("Run Form: current date/time component unavailable in dropdown part=" + key + " value=" + targets[key]);
+                return false;
+            }
+        }
+        // If the existing date is partial, choose a valid day for that month/year.
+        var dayField = byPart.dd;
+        if (dayField && !String(dayField.value || "").trim()) {
+            var monthNum = parseInt(targets.MM, 10);
+            var yearNum = parseInt(targets.yyyy, 10);
+            if (monthNum >= 1 && monthNum <= 12 && yearNum > 0) {
+                var maxDay = new Date(yearNum, monthNum, 0).getDate();
+                var dayNum = Math.min(parseInt(targets.dd, 10), maxDay);
+                targets.dd = String(dayNum).padStart(2, "0");
+            }
+        }
+        for (var di = 0; di < dateParts.length; di++) {
+            var datePart = dateParts[di];
+            var existing = byPart[datePart];
+            if (!existing) continue;
+            var existingValue = String(existing.value || "").trim();
+            if (existingValue && existingValue !== targets[datePart]) {
+                // Existing user-entered components take precedence; only fill blanks.
+                targets[datePart] = existingValue;
+            }
+        }
+        var dayNumFinal = parseInt(targets.dd, 10);
+        var monthNumFinal = parseInt(targets.MM, 10);
+        var yearNumFinal = parseInt(targets.yyyy, 10);
+        if (dayNumFinal && monthNumFinal && yearNumFinal && new Date(yearNumFinal, monthNumFinal - 1, dayNumFinal).getDate() !== dayNumFinal) {
+            log("Run Form: existing date components are invalid; refusing to alter populated values");
+            return false;
+        }
+        for (var si = 0; si < requiredParts.length; si++) {
+            var selectPart = requiredParts[si];
+            var targetSelect = byPart[selectPart];
+            if (!targetSelect || String(targetSelect.value || "").trim()) continue;
+            var targetValue = targets[selectPart];
+            var exists = false;
+            for (var oi2 = 0; oi2 < targetSelect.options.length; oi2++) {
+                if (String(targetSelect.options[oi2].value || "").trim() === targetValue) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                log("Run Form: cannot safely set missing date/time component part=" + selectPart);
+                return false;
+            }
+            try {
+                if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+                    window.jQuery(targetSelect).select2("val", targetValue);
+                } else {
+                    targetSelect.value = targetValue;
+                }
+                targetSelect.dispatchEvent(new Event("input", { bubbles: true }));
+                targetSelect.dispatchEvent(new Event("change", { bubbles: true }));
+            } catch (setErr) {
+                log("Run Form: date/time component update failed part=" + selectPart + " error=" + String(setErr));
+                return false;
+            }
+        }
+        for (var vi = 0; vi < selects.length; vi++) {
+            if (!String(selects[vi].value || "").trim()) return false;
+        }
+        log("Run Form: completed missing date/time fields using current time without overwriting populated fields");
+        return true;
+    }
+
     // After filling an item value, fill Audit and Annotation inputs on the same row if present.
-    async function fillAuditAnnotationIfPresent(tr) {
+    async function fillAuditAnnotationIfPresent(tr, options) {
         if (!tr) {
             return;
         }
@@ -48842,9 +49866,14 @@
         if (!auditInput) {
             return;
         }
+        var preserveExisting = !!(options && options.preserveExistingValues);
+        if (preserveExisting && String(auditInput.value || "").trim()) {
+            var existingAnnotation = tr.querySelector("input.annotationInput.collectInput");
+            if (!existingAnnotation || String(existingAnnotation.value || "").trim()) return;
+        }
         log("Run Form: audit/annotation inputs detected on row");
-        var auditSet = false;
-        if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+        var auditSet = preserveExisting && !!String(auditInput.value || "").trim();
+        if (!auditSet && window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
             try {
                 var jqAudit = window.jQuery("#" + auditInput.id);
                 if (jqAudit.length > 0) {
@@ -48876,7 +49905,7 @@
             log("Run Form: audit set via direct input assignment");
         }
         var annotationInput = tr.querySelector("input.annotationInput.collectInput");
-        if (annotationInput) {
+        if (annotationInput && (!preserveExisting || !String(annotationInput.value || "").trim())) {
             annotationInput.value = "Test";
             var annotEvt = new Event("input", { bubbles: true });
             annotationInput.dispatchEvent(annotEvt);
@@ -49003,7 +50032,57 @@
             return true;
         }
 
+        if (controlTd.querySelector("div.select2-container.collectInput, div.select2-container, select.collectInput")) {
+            return true;
+        }
+
         return false;
+    }
+
+    // In preserve-existing mode, Run Form only visits controls that still look empty.
+    function hasUnfilledActionableControl(controlTd) {
+        if (!controlTd || controlTd.querySelector("span.novalue")) return false;
+
+        var radios = controlTd.querySelectorAll("div.radio-list input[type=\"radio\"]");
+        if (radios.length) return !controlTd.querySelector("div.radio-list input[type=\"radio\"]:checked");
+
+        var checkbox = controlTd.querySelector("input[type=\"checkbox\"]");
+        if (checkbox) return !checkbox.checked;
+
+        var textarea = controlTd.querySelector("textarea.collectInput.text");
+        if (textarea) return !String(textarea.value || "").trim();
+
+        var textInput = controlTd.querySelector("input.collectInput.text");
+        if (textInput) return !String(textInput.value || "").trim();
+
+        var integerInput = controlTd.querySelector("input.collectInput.integer");
+        if (integerInput) return !String(integerInput.value || "").trim();
+
+        var decimalInput = controlTd.querySelector("input.collectInput.decimal");
+        if (decimalInput) return !String(decimalInput.value || "").trim();
+
+        var selects = controlTd.querySelectorAll("select.collectInput");
+        if (selects.length) {
+            for (var si = 0; si < selects.length; si++) {
+                if (!String(selects[si].value || "").trim()) return true;
+            }
+        } else {
+            var select2s = controlTd.querySelectorAll("div.select2-container.collectInput, div.select2-container");
+            for (var s2i = 0; s2i < select2s.length; s2i++) {
+                var chosen = select2s[s2i].querySelector(".select2-chosen");
+                var chosenText = String(chosen && chosen.textContent || "").trim();
+                var isPlaceholder = !chosenText || /^(?:-|select\b|enter\s+the\s+reason\b)/i.test(chosenText);
+                if (isPlaceholder) return true;
+            }
+        }
+
+        var timeButton = controlTd.querySelector("div.timeSetButtons button[id$=\"_currentTime\"].btn.btn-xs.dark");
+        if (timeButton) {
+            var existingValue = controlTd.querySelector("input.collectInput, textarea.collectInput, select.collectInput");
+            return !String(existingValue && existingValue.value || "").trim();
+        }
+
+        return hasActionableControl(controlTd);
     }
 
     // Try multiple strategies to select a radio option reliably.
@@ -49958,6 +51037,31 @@
         return btn;
     }
 
+    function isRowActionMenuOpen(row, actionBtn) {
+        if (!row || !actionBtn) return false;
+        if (actionBtn.getAttribute("aria-expanded") === "true") return true;
+        var menu = row.querySelector("ul.dropdown-menu");
+        if (!menu) return false;
+        if (menu.classList.contains("open") || menu.classList.contains("in")) return true;
+        try {
+            return window.getComputedStyle(menu).display !== "none" && window.getComputedStyle(menu).visibility !== "hidden";
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function isCohortActionDisabled(action) {
+        var node = action;
+        while (node && node.nodeType === 1) {
+            if (node.disabled === true || node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true" || node.classList.contains("disabled")) {
+                return true;
+            }
+            if (node.tagName === "UL") break;
+            node = node.parentElement;
+        }
+        return false;
+    }
+
 
     // Find 'Activate Plan' link in a row's dropdown menu.
     function getMenuLinkActivatePlan(row) {
@@ -49973,14 +51077,14 @@
         while (i < links.length) {
             var a = links[i];
             var txt = (a.textContent + "").trim().toLowerCase();
-            var disabled = a.parentElement && a.parentElement.classList.contains('disabled');
+            var disabled = isCohortActionDisabled(a);
             var isPlan = txt.indexOf('activate plan') !== -1;
             if (isPlan && !disabled) {
                 return a;
             }
             var onclick = a.getAttribute('onclick') + "";
             var hasOn = onclick.indexOf('activatePlan(') !== -1;
-            if (hasOn) {
+            if (hasOn && !disabled) {
                 return a;
             }
             i = i + 1;
@@ -49990,7 +51094,7 @@
 
 
     // Find 'Activate Volunteer' link in a row's dropdown menu.
-    function getMenuLinkActivateVolunteer(row) {
+    function getMenuLinkActivateVolunteer(row, includeDisabled) {
         if (!row) {
             return null;
         }
@@ -49999,7 +51103,7 @@
             return null;
         }
         var idLink = menu.querySelector('li a[id^="cohortAssignmentActivateSubjectLink_"]');
-        if (idLink) {
+        if (idLink && (includeDisabled || !isCohortActionDisabled(idLink))) {
             return idLink;
         }
         var links = menu.querySelectorAll('a');
@@ -50007,14 +51111,14 @@
         while (i < links.length) {
             var a = links[i];
             var txt = (a.textContent + "").trim().toLowerCase();
-            var disabled = a.parentElement && a.parentElement.classList.contains('disabled');
+            var disabled = isCohortActionDisabled(a);
             var isVol = txt.indexOf('activate volunteer') !== -1;
-            if (isVol && !disabled) {
+            if (isVol && (includeDisabled || !disabled)) {
                 return a;
             }
             var onclick = a.getAttribute('onclick') + "";
             var hasOn = onclick.indexOf('activateVolunteer(') !== -1;
-            if (hasOn) {
+            if (hasOn && (includeDisabled || !disabled)) {
                 return a;
             }
             i = i + 1;
@@ -50023,9 +51127,10 @@
     }
 
     // Wait for Activate Volunteer link to become available for an id.
-    async function waitForActivateVolunteerById(volId, timeoutMs) {
+    async function waitForActivateVolunteerById(volId, timeoutMs, returnDisabledState) {
         var start = Date.now();
         var attempts = 0;
+        var disabledAction = null;
         while (Date.now() - start < timeoutMs) {
             if (isPaused()) {
                 log("Activation: paused; stopping search for volunteerId=" + String(volId));
@@ -50035,17 +51140,14 @@
             if (row) {
                 var actionBtn = getRowActionButton(row);
                 if (actionBtn) {
-                    actionBtn.click();
-                    await sleep(250);
-                    var linkById = row.querySelector('ul.dropdown-menu li a[id^="cohortAssignmentActivateSubjectLink_"]');
-                    var link = null;
-                    if (linkById) {
-                        link = linkById;
+                    if (!isRowActionMenuOpen(row, actionBtn)) {
+                        actionBtn.click();
+                        await sleep(250);
                     }
-                    if (!link) {
-                        link = getMenuLinkActivateVolunteer(row);
-                    }
-                    if (link) {
+                    var link = getMenuLinkActivateVolunteer(row, true);
+                    if (link && isCohortActionDisabled(link)) {
+                        disabledAction = { row: row, link: link };
+                    } else if (link) {
                         log("Activate Volunteer link found after attempts=" + String(attempts));
                         return { row: row, actionBtn: actionBtn, link: link };
                     }
@@ -50058,7 +51160,16 @@
             }
             await sleep(600);
         }
-        log("Activation: row not found for volunteerId=" + String(volId) + " after " + String(timeoutMs) + "ms; skipping");
+        if (disabledAction) {
+            log("Activation: Activate Volunteer action remained disabled for volunteerId=" + String(volId) + " after " + String(timeoutMs) + "ms");
+            // Only Add New Subject consumes the disabled state as a retry signal.
+            // Other activation workflows retain their established null-on-timeout contract.
+            if (returnDisabledState === true) {
+                return { row: disabledAction.row, link: null, disabled: true, disabledLink: disabledAction.link };
+            }
+            return null;
+        }
+        log("Activation: Activate Volunteer action not available for volunteerId=" + String(volId) + " after " + String(timeoutMs) + "ms; skipping");
         return null;
     }
 
@@ -50902,55 +52013,29 @@
                 searchSel.dispatchEvent(evt2);
                 log("Search set to AllVolunteers");
             }
-            var s2container = modal.querySelector('#s2id_volunteer');
+            var s2container = await ansWaitForVolunteerSelect2(modal, 12000);
             if (!s2container) {
-                s2container = modal.querySelector('.select2-container.form-control.select2');
-            }
-            if (!s2container) {
-                log("Select2 container not found");
-                return;
-            }
-            var s2choice = s2container.querySelector('a.select2-choice');
-            if (s2choice) {
-                s2choice.click();
-                await sleep(150);
-            }
-            var focusser = s2container.querySelector('input.select2-focusser');
-            if (focusser) {
-                focusser.focus();
-                var kd = new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 });
-                focusser.dispatchEvent(kd);
-                focusser.click();
-                await sleep(150);
-            }
-            var s2drop = document.querySelector('#select2-drop.select2-drop-active');
-            if (!s2drop) {
-                s2drop = s2container.querySelector('.select2-drop');
-            }
-            if (!s2drop) {
-                s2choice = s2container.querySelector('a.select2-choice');
-                if (s2choice) {
-                    s2choice.click();
+                log("Volunteer Select2 container did not become ready; cancelling attempt");
+                var missingContainerCancel = getModalCancelButton(modal);
+                if (missingContainerCancel) {
+                    missingContainerCancel.click();
+                    await waitUntilHidden("#ajaxModal, .modal", 5000);
                 }
-                s2drop = await waitForSelector('#select2-drop.select2-drop-active', 2000);
-                if (!s2drop) {
-                    s2drop = s2container.querySelector('.select2-drop');
+                attempts++;
+                continue;
+            }
+            var openedSearch = await ansOpenVolunteerSearch(s2container);
+            var s2drop = openedSearch.drop;
+            var s2input = openedSearch.input;
+            if (!s2drop || !s2input) {
+                log("Volunteer Select2 search did not open; cancelling attempt");
+                var missingDropCancel = getModalCancelButton(modal);
+                if (missingDropCancel) {
+                    missingDropCancel.click();
+                    await waitUntilHidden("#ajaxModal, .modal", 5000);
                 }
-            }
-            if (!s2drop) {
-                log("Select2 drop not found");
-                return;
-            }
-            var s2input = s2drop.querySelector('input.select2-input');
-            if (!s2input) {
-                s2input = await waitForSelector('#select2-drop.select2-drop-active input.select2-input', 2000);
-            }
-            if (!s2input) {
-                s2input = s2container.querySelector('input.select2-input');
-            }
-            if (!s2input) {
-                log("Select2 input not found");
-                return;
+                attempts++;
+                continue;
             }
             var letter = pickRandomUnusedLetter(letters, usedLetters);
             if (!letter) {
@@ -50959,57 +52044,49 @@
             }
             usedLetters.push(letter);
             setUsedLetters(usedLetters);
-            s2input.value = letter;
-            var inpEvt = new Event("input", { bubbles: true });
-            s2input.dispatchEvent(inpEvt);
-            var keyEvt = new KeyboardEvent("keyup", { bubbles: true, key: letter, keyCode: letter.toUpperCase().charCodeAt(0) });
-            s2input.dispatchEvent(keyEvt);
-            log("Typed random letter=" + String(letter) + " (used: " + JSON.stringify(usedLetters) + ")");
-            var selectionConfirmed = false;
-            var confirmWait = 0;
-            var confirmMax = 12000;
-            while (confirmWait < confirmMax) {
-                var enterDown = new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 });
-                s2input.dispatchEvent(enterDown);
-                var enterUp = new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 });
-                s2input.dispatchEvent(enterUp);
-                await sleep(400);
-                var containerClass = s2container.getAttribute("class") + "";
-                var hasAllow = containerClass.indexOf("select2-allowclear") !== -1;
-                var notOpen = containerClass.indexOf("select2-dropdown-open") === -1;
-                var chosenEl = null;
-                chosenEl = s2container.querySelector('.select2-chosen');
-                if (!chosenEl) {
-                    chosenEl = s2container.querySelector('[id^="select2-chosen-"]');
-                }
-                var chosenText = "";
-                if (chosenEl) {
-                    chosenText = (chosenEl.textContent + "").trim();
-                }
-                var notSearch = chosenText.trim().toLowerCase() !== "search";
-                if (hasAllow && notOpen && notSearch) {
-                    selectionConfirmed = true;
-                    var volIdParsed = extractVolunteerIdFromChosenText(chosenText);
-                    if (volIdParsed) {
-                        currentVolunteerId = volIdParsed;
-                        appendSelectedVolunteerId(currentVolunteerId);
-                        log("Appended selected id=" + String(currentVolunteerId) + "; listLen=" + String(getSelectedVolunteerIds().length));
-                    }
-                    log("Selection confirmed; chosenText=" + chosenText + "; parsedId=" + String(currentVolunteerId));
-                    break;
-                }
-                confirmWait = confirmWait + 400;
+            var baselineOptions = ansGetSelectableVolunteerResults(s2drop);
+            var baselineSignature = baselineOptions.map(function(option) { return option.text; }).join("\u001f");
+            var resultList = s2drop.querySelector(".select2-results") || s2drop;
+            var resultsMutated = false;
+            var resultObserver = null;
+            if (typeof MutationObserver !== "undefined" && resultList) {
+                resultObserver = new MutationObserver(function() { resultsMutated = true; });
+                resultObserver.observe(resultList, { childList: true, subtree: true, characterData: true, attributes: true });
             }
-            if (!selectionConfirmed) {
+            s2input.focus();
+            s2input.value = letter;
+            s2input.dispatchEvent(new Event("input", { bubbles: true }));
+            s2input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: letter, keyCode: letter.toUpperCase().charCodeAt(0) }));
+            log("Typed random letter=" + String(letter) + " (used: " + JSON.stringify(usedLetters) + ")");
+            var resultState = await ansWaitForStableVolunteerResults(s2drop, 12000, baselineSignature, function() { return resultsMutated; });
+            if (resultObserver) resultObserver.disconnect();
+            var firstVolunteerOption = ansGetFirstVolunteerResultForGender(resultState.options, "randomize");
+            if (!resultState.responseObserved || !firstVolunteerOption) {
+                log("Volunteer results did not become ready; responseObserved=" + String(resultState.responseObserved) + " optionCount=" + String(resultState.options.length) + " noResults=" + String(resultState.noResults));
                 var cancelBtn0 = getModalCancelButton(modal);
                 if (cancelBtn0) {
                     cancelBtn0.click();
                     await waitUntilHidden("#ajaxModal, .modal", 5000);
                 }
                 attempts = attempts + 1;
-                log("Selection not confirmed; trying next random letter");
+                log("Volunteer results unavailable; trying next random letter");
                 continue;
             }
+            log("Volunteer results ready count=" + String(resultState.options.length) + "; selecting first result='" + firstVolunteerOption.text + "'");
+            var confirmedVolunteer = await ansActivateAndConfirmVolunteerResult(modal, s2container, s2input, firstVolunteerOption, "randomize");
+            if (!confirmedVolunteer) {
+                var cancelUnconfirmed = getModalCancelButton(modal);
+                if (cancelUnconfirmed) {
+                    cancelUnconfirmed.click();
+                    await waitUntilHidden("#ajaxModal, .modal", 5000);
+                }
+                attempts++;
+                log("Volunteer selection not confirmed by exact ID; trying next random letter");
+                continue;
+            }
+            currentVolunteerId = confirmedVolunteer.volunteerId;
+            appendSelectedVolunteerId(currentVolunteerId);
+            log("Selection confirmed by exact ID=" + String(currentVolunteerId) + "; chosenText=" + confirmedVolunteer.chosenText + "; listLen=" + String(getSelectedVolunteerIds().length));
             var saveBtn = await waitForSelector('button#actionButton.btn.green[type="button"]', 5000);
             if (!saveBtn) {
                 saveBtn = document.querySelector('button#actionButton');
@@ -52742,6 +53819,28 @@
         return false;
     }
 
+    function getExistingIcfBarcodeFromModal(modalEl) {
+        var root = modalEl || document;
+        function isBarcodePlaceholder(value) {
+            return !value || /^(?:-|please\s+scan\b|scan\s+or\s+click\b|select\b)/i.test(String(value).trim());
+        }
+        var hidden = root.querySelector("input#informedConsentVersionHidden");
+        if (hidden) {
+            var hiddenValue = String(hidden.value || "").trim();
+            if (!isBarcodePlaceholder(hiddenValue)) return hiddenValue;
+        }
+        var staticValue = root.querySelector("#informedConsentVersionStatic");
+        if (staticValue) {
+            var displayedValue = String(staticValue.textContent || "").trim();
+            if (!isBarcodePlaceholder(displayedValue)) return displayedValue;
+        }
+        var icon = root.querySelector("i#" + BARCODE_ICON_ID + ".fa-barcode");
+        var row = icon && icon.closest("tr");
+        var rowHidden = row && row.querySelector("input[type='hidden'][name^='itemData_']");
+        var rowValue = String(rowHidden && rowHidden.value || "").trim();
+        return isBarcodePlaceholder(rowValue) ? "" : rowValue;
+    }
+
     function applyIcfBarcodeToFormFields(modalEl, value) {
         var root = modalEl || document;
         var hidden = root.querySelector("input#informedConsentVersionHidden");
@@ -52853,7 +53952,7 @@
         log("ICF: fillTextareaFieldsInModal filled " + String(filled) + " field(s)");
     }
 
-    async function fillIcfAuditDropdownIfVisible(modalEl) {
+    async function fillIcfAuditDropdownIfVisible(modalEl, preserveExistingValues) {
         if (!modalEl) return;
         var containers = modalEl.querySelectorAll(".select2-container.auditReasonForChange, select.auditReasonForChange, select[id$='_auditRecord']");
         for (var i = 0; i < containers.length; i++) {
@@ -52867,6 +53966,16 @@
                 var containerId = (container.id || "").replace(/^s2id_/, "");
                 hidden = containerId ? modalEl.querySelector("input#" + CSS.escape(containerId) + ", select#" + CSS.escape(containerId)) : null;
                 if (!hidden) hidden = modalEl.querySelector("input.auditReasonForChange.collectInput[id$='_auditRecord']");
+            }
+            if (preserveExistingValues) {
+                var currentAuditTextEl = container.querySelector(".select2-chosen");
+                var currentAuditText = String(currentAuditTextEl && currentAuditTextEl.textContent || "").trim();
+                var currentAuditValue = String(hidden && hidden.value || "").trim();
+                var auditPlaceholder = !currentAuditText || /^(?:-|select\b|enter\s+the\s+reason\b)/i.test(currentAuditText);
+                if ((currentAuditValue && !auditPlaceholder) || (!auditPlaceholder && currentAuditText)) {
+                    log("ICF: preserving existing visible Audit value=" + (currentAuditText || currentAuditValue));
+                    continue;
+                }
             }
             var desired = "Data clarification";
             var optionExists = true;
@@ -53055,9 +54164,10 @@
             modalEl = getDataCollectionModalElement();
         }
 
-        log("ICF: modal is open; checking for Add New button");
+        log("ICF: modal is open; checking for an existing barcode before Add New");
+        var existingBarcodeBeforeAddNew = getExistingIcfBarcodeFromModal(modalEl);
         var barcodeIcon = document.getElementById(BARCODE_ICON_ID);
-        if (!barcodeIcon) {
+        if (!existingBarcodeBeforeAddNew && !barcodeIcon) {
             var addNewBtn = null;
             if (modalEl) {
                 addNewBtn = modalEl.querySelector('a.btn.btn-default.blue.pull-right[onclick*="maybeAddNew"]');
@@ -53086,49 +54196,60 @@
             return;
         }
 
-        log("ICF: beginning background barcode retrieval");
-        var fetchResult = await backgroundFetchIcfBarcode(location.hostname);
-        if (fetchResult.error && fetchResult.error.length > 0 && (!fetchResult.barcode || fetchResult.barcode.length === 0)) {
-            log("ICF: barcode retrieval failed: " + String(fetchResult.error));
-            showWarningPopup("Run ICF Barcode", "Failed to retrieve ICF barcode.\n\n" + String(fetchResult.error));
-            return;
-        }
-        var barcodeValue = fetchResult.barcode;
-        if (!barcodeValue || barcodeValue.length === 0) {
-            log("ICF: barcode is empty after retrieval");
-            showWarningPopup("Run ICF Barcode", "No valid ICF barcode was found on the Administration Studies page.");
-            return;
-        }
-        log("ICF: barcode retrieved=" + String(barcodeValue));
-        setIcBarcode(barcodeValue);
+        var barcodeValue = getExistingIcfBarcodeFromModal(modalEl);
+        var barcodeAlreadyPresent = !!barcodeValue;
+        if (barcodeAlreadyPresent) {
+            log("ICF: existing form barcode detected=" + String(barcodeValue) + "; skipping barcode lookup and input popup");
+            setIcBarcode(barcodeValue);
+        } else {
+            log("ICF: no existing form barcode; beginning background barcode retrieval");
+            var fetchResult = await backgroundFetchIcfBarcode(location.hostname);
+            if (fetchResult.error && fetchResult.error.length > 0 && (!fetchResult.barcode || fetchResult.barcode.length === 0)) {
+                log("ICF: barcode retrieval failed: " + String(fetchResult.error));
+                showWarningPopup("Run ICF Barcode", "Failed to retrieve ICF barcode.\n\n" + String(fetchResult.error));
+                return;
+            }
+            barcodeValue = fetchResult.barcode;
+            if (!barcodeValue || barcodeValue.length === 0) {
+                log("ICF: barcode is empty after retrieval");
+                showWarningPopup("Run ICF Barcode", "No valid ICF barcode was found on the Administration Studies page.");
+                return;
+            }
+            log("ICF: barcode retrieved=" + String(barcodeValue));
+            setIcBarcode(barcodeValue);
 
-        log("ICF: opening barcode input UI");
-        var inputOpened = await openBarcodeInput(modalEl);
-        if (!inputOpened) {
-            log("ICF: failed to open barcode input");
-            showWarningPopup("Run ICF Barcode", "Failed to open the barcode input UI. The barcode icon or input field was not found.");
-            return;
+            log("ICF: opening barcode input UI");
+            var inputOpened = await openBarcodeInput(modalEl);
+            if (!inputOpened) {
+                log("ICF: failed to open barcode input");
+                showWarningPopup("Run ICF Barcode", "Failed to open the barcode input UI. The barcode icon or input field was not found.");
+                return;
+            }
+
+            log("ICF: setting barcode value in modal");
+            var setOk = await setBarcodeValueInModal(modalEl, barcodeValue);
+            if (!setOk) {
+                log("ICF: failed to set barcode value");
+                showWarningPopup("Run ICF Barcode", "Failed to set barcode value or confirm the input popup.");
+                return;
+            }
         }
 
-        log("ICF: setting barcode value in modal");
-        var setOk = await setBarcodeValueInModal(modalEl, barcodeValue);
-        if (!setOk) {
-            log("ICF: failed to set barcode value");
-            showWarningPopup("Run ICF Barcode", "Failed to set barcode value or confirm the input popup.");
-            return;
-        }
-
-        log("ICF: filling textarea fields");
+        log("ICF: filling remaining form fields");
         modalEl = getDataCollectionModalElement();
-        applyIcfBarcodeToFormFields(modalEl, barcodeValue);
-        await fillIcfAuditDropdownIfVisible(modalEl);
-        var runFormResult = await runFormAfterIcfBarcode();
+        if (!barcodeAlreadyPresent) applyIcfBarcodeToFormFields(modalEl, barcodeValue);
+        await fillIcfAuditDropdownIfVisible(modalEl, true);
+        // ICF handoff should complete blanks without overwriting entered values or
+        // adding a new repeat-group row before the current form has been filled.
+        var runFormResult = await runFormAfterIcfBarcode(true);
         if (runFormResult === true) {
             log("ICF: Run Form completed after barcode; in-place ICF flow finished");
             return;
         }
-        if (runFormResult === false) {
-            log("ICF: Run Form after barcode failed; leaving the modal open for review");
+        if (runFormResult !== true) {
+            // Never fall through to the legacy direct-save path after a failed or
+            // unavailable Run Form handoff; doing so could submit blank required fields.
+            log("ICF: Run Form after barcode did not complete; leaving the modal open for review");
             return;
         }
         modalEl = getDataCollectionModalElement();
@@ -53564,22 +54685,35 @@
         return false;
     }
 
-    async function runFormAfterIcfBarcode() {
+    async function runFormAfterIcfBarcode(preserveExistingValues) {
         var modalEl = getDataCollectionModalElement();
         if (!modalEl || !isModalOpen(modalEl)) {
             log("ICF: Run Form handoff skipped because the ICF modal is not open");
             return null;
         }
         var formEl = modalEl.querySelector("form#modalInput") || document.querySelector("form#modalInput");
-        if (!formEl) {
-            log("ICF: Run Form handoff skipped because form#modalInput was not found");
+        var hasCollectTable = !!modalEl.querySelector("table[id^=\"collectTable_\"]");
+        if (!formEl && !hasCollectTable) {
+            log("ICF: Run Form handoff skipped because neither form#modalInput nor a collectTable was found");
             return null;
         }
         var selectedMode = "randomIr";
         RUN_FORM_V2_START_TS = Date.now();
         setFormValueMode(selectedMode);
-        log("ICF: barcode complete; starting Run Form automatically with Random In Range");
+        log("ICF: barcode complete; starting Run Form automatically with Random In Range preserveExistingValues=" + String(!!preserveExistingValues));
         await runFormAutomationV2({
+            preserveExistingValues: !!preserveExistingValues,
+            beforeSave: async function() {
+                if (!preserveExistingValues) return true;
+                var currentModal = getDataCollectionModalElement();
+                var incomplete = getUnfilledVisibleRunFormRows(currentModal || formEl);
+                if (incomplete.length) {
+                    log("ICF: refusing to save; visible fields remain incomplete: " + incomplete.join(" | "));
+                    showWarningPopup("Run ICF Barcode", "Run Form could not complete these visible fields, so the form was left open instead of being saved:\n\n" + incomplete.slice(0, 8).join("\n") + (incomplete.length > 8 ? "\n…and " + String(incomplete.length - 8) + " more" : ""));
+                    return false;
+                }
+                return true;
+            },
             save: async function() {
                 var saveResult = await saveAndCloseModal(getDataCollectionModalElement());
                 if (!saveResult.success) throw new Error(saveResult.error || "ICF modal save failed");
@@ -53771,7 +54905,7 @@
                     if ((hasSubjectLink || hasDataCells) && !isLoading) return rows;
                 }
             }
-            await sleep(200);
+            await sleep(100);
         }
         return null;
     }
@@ -59746,17 +60880,94 @@
     var DTS_PROGRESS_POPUP_REF = null;
     var DTS_SUMMARY_POPUP_REF = null;
     var DTS_REPORT_PATH = "/secure/study/report/list";
-    var DTS_REPORT_TYPE_VALUE = "clinicalCSV";
-    var DTS_REPORT_TYPE_LABEL = "Clinical Data Text (Delimited)";
-    var DTS_REPORT_DIV_ID = "reportDiv_16";
-    var DTS_SELECT_ID = "transferReportType_16";
-    var DTS_GENERATE_BTN_ID = "reportGenerateButton_16";
+    var DTS_REPORT_CONFIG_KEY = "activityPlanState.dts.reportConfig";
+    var DTS_REPORT_DEFINITIONS = [
+        {
+            id: 16,
+            name: "Transfer Data",
+            reportDivId: "reportDiv_16",
+            generateButtonId: "reportGenerateButton_16",
+            rowMatchKeywords: ["transfer", "clinical", "csv", "delimited", "excel", "odm", "xpt"],
+            defaultConfig: { reportType: "clinicalCSV", includeNonCRF: false, onlyRandomizedSubjects: false },
+            fields: [
+                { key: "reportType", type: "select", label: "Report Type", selectId: "transferReportType_16", options: [
+                    { value: "clinicalExcel", label: "Clinical Data Excel" },
+                    { value: "odmXml", label: "Clinical Data ODM XML" },
+                    { value: "clinicalCSV", label: "Clinical Data Text (Delimited)" },
+                    { value: "clinicalXpt", label: "Clinical Data XPT" },
+                    { value: "codeList", label: "Code List" },
+                    { value: "sdtmMappingSpecs", label: "Data Transfer Mapping Specification" }
+                ] },
+                { key: "includeNonCRF", type: "boolean", label: "Include Non-CRF" },
+                { key: "onlyRandomizedSubjects", type: "boolean", label: "Only Randomized Subjects" }
+            ]
+        },
+        {
+            id: 4,
+            name: "Laboratory Data",
+            reportDivId: "reportDiv_4",
+            generateButtonId: "reportGenerateButton_4",
+            rowMatchKeywords: ["laboratory data", "laboratory", "lab data"],
+            defaultConfig: { reportType: "pdf", includeSignOff: false, onlyRandomized: true, includePhi: false },
+            fields: [
+                { key: "reportType", type: "select", label: "Report Type", selectId: "reportType_4", options: [
+                    { value: "ascii", label: "CDISC ASCII" },
+                    { value: "xlsx", label: "CDISC Excel" },
+                    { value: "xml", label: "CDISC XML" },
+                    { value: "xpt", label: "CDISC XPT" },
+                    { value: "pdf", label: "PDF" }
+                ] },
+                { key: "includeSignOff", type: "boolean", label: "Include Lab Review Details", selectId: "includeSignOff_4", helpText: "Note: this is not part of the CDISC specification." },
+                { key: "onlyRandomized", type: "boolean", label: "Only Randomized Subjects", selectId: "onlyRandomized_4", helpText: "Has no effect when choosing specific subjects." },
+                { key: "includePhi", type: "boolean", label: "Include Subject PHI", selectId: "includePhi_4", helpText: "Includes subject DOB and initials." }
+            ]
+        }
+    ];
     var DTS_RESULT_TAB_ID = "resultTab";
     var DTS_RESULT_TBODY_ID = "reportRequestsTbody";
     var DTS_STUDY_CHANGER_ID = "studyIdChanger";
 
     var STORAGE_DTS_STATE = "activityPlanState.dts.state";
     var RUNMODE_DTS = "dtsDownload";
+
+    function dtsGetReportDefinition(reportId) {
+        for (var i = 0; i < DTS_REPORT_DEFINITIONS.length; i++) {
+            if (DTS_REPORT_DEFINITIONS[i].id == reportId) return DTS_REPORT_DEFINITIONS[i];
+        }
+        return DTS_REPORT_DEFINITIONS[0];
+    }
+
+    function dtsLoadReportConfig() {
+        try {
+            var saved = JSON.parse(localStorage.getItem(DTS_REPORT_CONFIG_KEY) || "null");
+            return saved && typeof saved === "object" ? saved : null;
+        } catch (e) { return null; }
+    }
+
+    function dtsSaveReportConfig(reportId, config) {
+        try { localStorage.setItem(DTS_REPORT_CONFIG_KEY, JSON.stringify({ reportId: reportId, config: config || {} })); } catch (e) {}
+    }
+
+    function dtsApplyReportConfig(reportDef, config) {
+        var reportDiv = reportDef && document.getElementById(reportDef.reportDivId);
+        if (!reportDiv) return false;
+        var values = Object.assign({}, reportDef.defaultConfig, config || {});
+        var ok = true;
+        for (var fi = 0; fi < reportDef.fields.length; fi++) {
+            var field = reportDef.fields[fi];
+            var select = field.selectId ? reportDiv.querySelector("select#" + field.selectId) : null;
+            if (!select) select = reportDiv.querySelector("select[name='" + field.key + "_" + reportDef.id + "'], select[name='" + field.key + "']");
+            if (!select) { log("DTS: report field not found: " + field.key + " in report " + reportDef.id); ok = false; continue; }
+            var value = field.type === "boolean" ? (values[field.key] ? "true" : "false") : String(values[field.key] == null ? "" : values[field.key]);
+            var available = false;
+            for (var oi = 0; oi < select.options.length; oi++) if (select.options[oi].value === value) { available = true; break; }
+            if (!available) { log("DTS: report value not available for " + field.key + ": " + value); ok = false; continue; }
+            select.value = value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+            try { if (window.jQuery && select.id) window.jQuery("#" + select.id).trigger("change"); } catch (e) {}
+        }
+        return ok;
+    }
 
     function dtsGetReportUrl() {
         var host = location.hostname;
@@ -59890,10 +61101,88 @@
         return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
     }
 
-    function dtsCreateStudySelectionPanel(studies, onConfirm) {
+    function dtsCreateStudySelectionPanel(studies, savedConfig, onConfirm) {
         var glass = isGlassTheme();
         var container = document.createElement("div");
         container.style.cssText = "display:flex;flex-direction:column;gap:12px;padding:4px;";
+
+        var selectedReportId = savedConfig && savedConfig.reportId != null ? savedConfig.reportId : 16;
+        var currentReportDef = dtsGetReportDefinition(selectedReportId);
+        if (!currentReportDef) { selectedReportId = 16; currentReportDef = dtsGetReportDefinition(16); }
+        var savedForReport = savedConfig && Number(savedConfig.reportId) === Number(selectedReportId) ? savedConfig.config : null;
+        var currentConfig = Object.assign({}, currentReportDef.defaultConfig, savedForReport || {});
+        var reportSelect = document.createElement("select");
+        reportSelect.setAttribute("aria-label", "Report");
+        reportSelect.style.cssText = "padding:8px;border-radius:6px;border:1px solid " + (glass ? "rgba(255,255,255,0.2)" : "#444") + ";background:" + (glass ? "rgba(15,10,40,0.5)" : "#222") + ";color:#fff;font-size:13px;";
+        for (var rdi = 0; rdi < DTS_REPORT_DEFINITIONS.length; rdi++) {
+            var reportOption = document.createElement("option");
+            reportOption.value = String(DTS_REPORT_DEFINITIONS[rdi].id);
+            reportOption.textContent = DTS_REPORT_DEFINITIONS[rdi].name;
+            reportSelect.appendChild(reportOption);
+        }
+        reportSelect.value = String(selectedReportId);
+        var configArea = document.createElement("div");
+        configArea.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:10px;border:1px solid " + (glass ? "rgba(255,255,255,0.15)" : "#333") + ";border-radius:8px;background:" + (glass ? "rgba(15,10,40,0.35)" : "#111") + ";";
+        var configTitle = document.createElement("div");
+        configTitle.textContent = "Report Configuration";
+        configTitle.style.cssText = "font-size:12px;font-weight:700;color:" + (glass ? "#ddd" : "#aaa") + ";";
+        configArea.appendChild(reportSelect);
+        configArea.appendChild(configTitle);
+        var configFields = document.createElement("div");
+        configFields.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+        configArea.appendChild(configFields);
+        function renderReportFields() {
+            configFields.innerHTML = "";
+            for (var fi = 0; fi < currentReportDef.fields.length; fi++) {
+                (function(field) {
+                    var fieldWrap = document.createElement("label");
+                    fieldWrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;color:" + (glass ? "#ddd" : "#ccc") + ";font-size:12px;";
+                    var fieldLabel = document.createElement("span");
+                    fieldLabel.textContent = field.label;
+                    var fieldSelect = document.createElement("select");
+                    fieldSelect.style.cssText = "min-width:150px;max-width:58%;padding:6px;border-radius:5px;border:1px solid " + (glass ? "rgba(255,255,255,0.2)" : "#444") + ";background:" + (glass ? "rgba(15,10,40,0.5)" : "#222") + ";color:#fff;font-size:12px;";
+                    var options = field.type === "boolean" ? [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] : field.options;
+                    var currentValue = field.type === "boolean" ? (currentConfig[field.key] ? "true" : "false") : String(currentConfig[field.key] == null ? "" : currentConfig[field.key]);
+                    for (var oi = 0; oi < options.length; oi++) {
+                        var option = document.createElement("option");
+                        option.value = options[oi].value;
+                        option.textContent = options[oi].label;
+                        fieldSelect.appendChild(option);
+                    }
+                    fieldSelect.value = currentValue;
+                    fieldSelect.addEventListener("change", function() {
+                        currentConfig[field.key] = field.type === "boolean" ? fieldSelect.value === "true" : fieldSelect.value;
+                        dtsSaveReportConfig(selectedReportId, currentConfig);
+                    });
+                    fieldWrap.appendChild(fieldLabel);
+                    fieldWrap.appendChild(fieldSelect);
+                    if (field.helpText) {
+                        var help = document.createElement("div");
+                        help.textContent = field.helpText;
+                        help.style.cssText = "font-size:11px;color:" + (glass ? "rgba(255,255,255,0.5)" : "#888") + ";line-height:1.35;flex-basis:100%;";
+                        fieldWrap.style.flexWrap = "wrap";
+                        fieldWrap.appendChild(help);
+                    }
+                    configFields.appendChild(fieldWrap);
+                })(currentReportDef.fields[fi]);
+            }
+            if (!currentReportDef.fields.length) {
+                var noOptions = document.createElement("div");
+                noOptions.textContent = "No additional options for this report.";
+                noOptions.style.cssText = "font-size:12px;color:" + (glass ? "#888" : "#777") + ";font-style:italic;";
+                configFields.appendChild(noOptions);
+            }
+        }
+        reportSelect.addEventListener("change", function() {
+            dtsSaveReportConfig(selectedReportId, currentConfig);
+            selectedReportId = Number(reportSelect.value);
+            currentReportDef = dtsGetReportDefinition(selectedReportId);
+            var saved = dtsLoadReportConfig();
+            currentConfig = Object.assign({}, currentReportDef.defaultConfig, saved && Number(saved.reportId) === selectedReportId ? saved.config || {} : {});
+            renderReportFields();
+        });
+        renderReportFields();
+        container.appendChild(configArea);
 
         var topBar = document.createElement("div");
         topBar.style.cssText = "display:flex;gap:8px;margin-bottom:2px;";
@@ -59978,7 +61267,8 @@
             }
             if (selected.length === 0) return;
             if (DTS_REPORT_POPUP_REF) { try { DTS_REPORT_POPUP_REF.close(); } catch(e) {} DTS_REPORT_POPUP_REF = null; }
-            onConfirm(selected);
+            dtsSaveReportConfig(selectedReportId, currentConfig);
+            onConfirm(selected, currentReportDef, Object.assign({}, currentConfig));
         });
 
         footer.appendChild(confirmBtn);
@@ -60128,13 +61418,16 @@
 
         log("DTS: found " + studies.length + " studies");
 
-        var selectionContent = dtsCreateStudySelectionPanel(studies, function(selected) {
-            log("DTS: user confirmed " + selected.length + " studies");
+        var savedConfig = dtsLoadReportConfig();
+        var selectionContent = dtsCreateStudySelectionPanel(studies, savedConfig, function(selected, reportDef, reportConfig) {
+            log("DTS: user confirmed " + selected.length + " studies for report " + reportDef.name);
             var initialState = {
                 phase: "generate",
                 studyIndex: 0,
                 step: "select_study",
                 selectedStudies: selected,
+                reportId: reportDef.id,
+                reportConfig: reportConfig,
                 results: selected.map(function(s) { return { value: s.value, text: s.text, status: "Pending", error: null, genTime: null }; }),
                 startTime: Date.now()
             };
@@ -60144,8 +61437,8 @@
         });
 
         DTS_REPORT_POPUP_REF = createPopup({
-            title: "Download DTS Report",
-            description: "Select studies to download Clinical Data Text (Delimited) reports",
+            title: "Download Report",
+            description: "Select studies and a report to generate/download",
             content: selectionContent,
             width: "520px",
             height: "auto",
@@ -60183,6 +61476,8 @@
 
     async function dtsRunStateMachine(state) {
         var reportUrl = dtsGetReportUrl();
+        var reportDef = dtsGetReportDefinition(state.reportId == null ? 16 : state.reportId);
+        state.reportId = reportDef.id;
 
         var progressUI = dtsCreateProgressPanel(state.selectedStudies);
         dtsCreateProgressPopup(state, progressUI);
@@ -60319,70 +61614,48 @@
                         }
                         await sleep(400);
 
-                        var reportDiv = document.getElementById(DTS_REPORT_DIV_ID);
+                        var reportDiv = document.getElementById(reportDef.reportDivId);
                         if (!reportDiv) {
                             result.status = "Failed";
-                            result.error = "reportDiv_16 not found on Reports page";
+                            result.error = reportDef.reportDivId + " not found on Reports page";
                             progressUI.updateStatus(study.value, "Failed", result.error);
-                            log("DTS: [generate] " + study.text + " — reportDiv_16 not found");
+                            log("DTS: [generate] " + study.text + " — " + reportDef.reportDivId + " not found");
                             state.studyIndex++;
                             state.step = "select_study";
                             dtsSaveState(state);
                             continue;
                         }
 
-                        var formBody = reportDiv.querySelector(".form-body");
-                        var typeSelect = reportDiv.querySelector("#" + DTS_SELECT_ID);
-                        if (!typeSelect) typeSelect = reportDiv.querySelector("select[id='" + DTS_SELECT_ID + "']");
-                        if (!typeSelect) {
+                        var configApplied = dtsApplyReportConfig(reportDef, state.reportConfig);
+                        if (!configApplied) {
                             result.status = "Failed";
-                            result.error = "transferReportType_16 select not found in reportDiv_16";
+                            result.error = "One or more configuration fields were missing or unsupported for " + reportDef.name;
                             progressUI.updateStatus(study.value, "Failed", result.error);
-                            log("DTS: [generate] " + study.text + " — transferReportType_16 not found");
+                            log("DTS: [generate] " + study.text + " — report configuration could not be fully applied");
                             state.studyIndex++;
                             state.step = "select_study";
                             dtsSaveState(state);
                             continue;
                         }
-
-                        var hasClinicalsCSV = false;
-                        var opts = typeSelect.querySelectorAll("option");
-                        for (var oi = 0; oi < opts.length; oi++) {
-                            if (opts[oi].value === DTS_REPORT_TYPE_VALUE) { hasClinicalsCSV = true; break; }
-                        }
-                        if (!hasClinicalsCSV) {
-                            result.status = "Failed";
-                            result.error = "Option 'clinicalCSV' not found in transferReportType_16";
-                            progressUI.updateStatus(study.value, "Failed", result.error);
-                            log("DTS: [generate] " + study.text + " — clinicalCSV option not found");
-                            state.studyIndex++;
-                            state.step = "select_study";
-                            dtsSaveState(state);
-                            continue;
-                        }
-
-                        typeSelect.value = DTS_REPORT_TYPE_VALUE;
-                        typeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-                        try { if (window.jQuery) window.jQuery("#" + DTS_SELECT_ID).trigger("change"); } catch(e) {}
                         await sleep(300);
 
                         progressUI.updateStatus(study.value, "Generating Report");
                         result.genTime = Date.now();
 
-                        var generateBtn = reportDiv.querySelector("#" + DTS_GENERATE_BTN_ID);
-                        if (!generateBtn) generateBtn = document.getElementById(DTS_GENERATE_BTN_ID);
+                        var generateBtn = reportDiv.querySelector("#" + reportDef.generateButtonId);
+                        if (!generateBtn) generateBtn = document.getElementById(reportDef.generateButtonId);
                         if (!generateBtn) {
                             result.status = "Failed";
-                            result.error = "Generate button (reportGenerateButton_16) not found";
+                            result.error = "Generate button (" + reportDef.generateButtonId + ") not found";
                             progressUI.updateStatus(study.value, "Failed", result.error);
-                            log("DTS: [generate] " + study.text + " — generate button not found");
+                            log("DTS: [generate] " + study.text + " — " + reportDef.generateButtonId + " not found");
                             state.studyIndex++;
                             state.step = "select_study";
                             dtsSaveState(state);
                             continue;
                         }
 
-                        log("DTS: [generate] clicking Generate for: " + study.text);
+                        log("DTS: [generate] clicking Generate for " + reportDef.name + ": " + study.text);
                         generateBtn.click();
                         await sleep(800);
 
@@ -60539,27 +61812,24 @@
 
                         var rows = tbody.querySelectorAll("tr");
                         var targetRow = null;
-                        var genTimeThreshold = dResult.genTime ? (dResult.genTime - 120000) : 0;
-
                         for (var ri = 0; ri < rows.length; ri++) {
                             var rowText = (rows[ri].textContent || "").toLowerCase();
-                            var hasTransfer = rowText.indexOf("transfer") !== -1;
-                            var hasClinical = rowText.indexOf("clinical") !== -1 || rowText.indexOf("csv") !== -1 || rowText.indexOf("delimited") !== -1;
-                            if (hasTransfer || hasClinical) {
+                            var keywords = reportDef.rowMatchKeywords || [];
+                            var matchesSelectedReport = false;
+                            for (var ki = 0; ki < keywords.length; ki++) {
+                                if (rowText.indexOf(keywords[ki].toLowerCase()) !== -1) { matchesSelectedReport = true; break; }
+                            }
+                            if (matchesSelectedReport) {
                                 targetRow = rows[ri];
                                 break;
                             }
                         }
-                        if (!targetRow && rows.length > 0) {
-                            targetRow = rows[0];
-                            log("DTS: [download] " + dStudy.text + " — using first row as fallback");
-                        }
 
                         if (!targetRow) {
                             dResult.status = "Failed";
-                            dResult.error = "No report rows found in results table";
+                            dResult.error = "No results row matched the selected report: " + reportDef.name;
                             progressUI.updateStatus(dStudy.value, "Failed", dResult.error);
-                            log("DTS: [download] " + dStudy.text + " — no rows in results table");
+                            log("DTS: [download] " + dStudy.text + " — no row matched " + reportDef.name);
                             state.studyIndex++;
                             state.step = "select_study";
                             dtsSaveState(state);
@@ -60711,6 +61981,7 @@
         var maxHeight = options.maxHeight || "90%";
         var onClose = options.onClose || null;
         var hideClose = !!options.hideClose;
+        var draggable = options.draggable !== false;
 
         var popupId = "clinsparkPopup_" + Date.now();
         var existing = document.getElementById(popupId);
@@ -60768,7 +62039,7 @@
         } else {
             headerBar.style.borderRadius = THEME_RADIUS + "px " + THEME_RADIUS + "px 0 0";
         }
-        headerBar.style.cursor = "move";
+        headerBar.style.cursor = draggable ? "move" : "default";
         headerBar.style.userSelect = "none";
 
         var titleContainer = document.createElement("div");
@@ -60906,7 +62177,7 @@
         }
 
         headerBar.addEventListener("mousedown", function(e) {
-            if (e.target === closeBtn || closeBtn.contains(e.target)) {
+            if (!draggable || e.target === closeBtn || closeBtn.contains(e.target)) {
                 return;
             }
             isDragging = true;
@@ -61105,110 +62376,13 @@
         updatePanelLauncherVisibility();
     }
 
-    function getOrCreatePanelLauncher() {
-        if (!document.body) {
-            return null;
-        }
-        var existing = document.getElementById(PANEL_LAUNCHER_ID);
-        if (existing) {
-            return existing;
-        }
-
-        var launcher = document.createElement("button");
-        launcher.id = PANEL_LAUNCHER_ID;
-        launcher.type = "button";
-        launcher.title = "Toggle ClinSpark Test Automator panel";
-        launcher.setAttribute("aria-label", "Toggle ClinSpark Test Automator panel");
-        launcher.setAttribute("data-aps-panel-launcher", "1");
-        launcher.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="28" height="28" focusable="false"><path fill="#38bdf8" d="M13 2L4 14h7l-1 8 10-13h-7l0-7z"></path></svg>';
-        launcher.style.position = "fixed";
-        launcher.style.right = "18px";
-        launcher.style.bottom = "18px";
-        launcher.style.width = "48px";
-        launcher.style.height = "48px";
-        launcher.style.borderRadius = "14px";
-        launcher.style.border = "1px solid rgba(56,189,248,0.55)";
-        launcher.style.background = "linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%)";
-        launcher.style.color = "#ffffff";
-        launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
-        launcher.style.cursor = "pointer";
-        launcher.style.display = "flex";
-        launcher.style.alignItems = "center";
-        launcher.style.justifyContent = "center";
-        launcher.style.fontFamily = "Arial, Helvetica, sans-serif";
-        launcher.style.fontSize = "14px";
-        launcher.style.fontWeight = "800";
-        launcher.style.letterSpacing = "0";
-        launcher.style.lineHeight = "1";
-        launcher.style.padding = "0";
-        launcher.style.zIndex = String(PANEL_Z_INDEX + 5);
-        launcher.style.transition = "transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease";
-        launcher.style.userSelect = "none";
-        launcher.style.WebkitUserSelect = "none";
-        launcher.style.outline = "none";
-
-        function lift() {
-            launcher.style.transform = "translateY(-2px)";
-            launcher.style.boxShadow = "0 18px 38px rgba(15, 23, 42, 0.38)";
-        }
-        function settle() {
-            launcher.style.transform = "translateY(0)";
-            launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
-        }
-        launcher.addEventListener("mouseenter", lift);
-        launcher.addEventListener("mouseleave", settle);
-        launcher.addEventListener("focus", lift);
-        launcher.addEventListener("blur", settle);
-        launcher.addEventListener("click", function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            var panel = document.getElementById(PANEL_ID);
-            var shouldHide = panel && !getPanelHidden();
-            if (shouldHide) {
-                setPanelHidden(true);
-                applyPanelHiddenState(panel);
-                log("Panel launcher: panel hidden");
-            } else {
-                setPanelHidden(false);
-                if (panel) {
-                    applySidePanelLayout(panel, panel.querySelector("[data-aps-panel-body='1']"));
-                } else {
-                    makePanel();
-                }
-                log("Panel launcher: panel opened");
-            }
-            updatePanelLauncherVisibility();
-        });
-
-        document.body.appendChild(launcher);
-        return launcher;
-    }
-
     function updatePanelLauncherVisibility() {
-        var launcher = getOrCreatePanelLauncher();
-        if (!launcher) {
-            return;
+        // The floating launcher is retired. Remove an instance left by an older
+        // content-script run, but leave the panel's configured hotkey intact.
+        var obsoleteLaunchers = document.querySelectorAll('[id="' + PANEL_LAUNCHER_ID + '"]');
+        for (var i = 0; i < obsoleteLaunchers.length; i++) {
+            if (obsoleteLaunchers[i].parentNode) obsoleteLaunchers[i].parentNode.removeChild(obsoleteLaunchers[i]);
         }
-        var panel = document.getElementById(PANEL_ID);
-        var hidden = getPanelHidden() || !panel;
-        var rightOffset = 18;
-        var bottomOffset = 18;
-        if (panel && !hidden) {
-            var rect = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
-            var dock = getPanelDock();
-            if (dock === "bottom" && rect) {
-                bottomOffset = Math.min(Math.max(Math.round(rect.height) + 18, 18), Math.max((window.innerHeight || 800) - 64, 18));
-            } else if (rect) {
-                rightOffset = Math.min(Math.max(Math.round(rect.width) + 18, 18), Math.max((window.innerWidth || 1280) - 64, 18));
-            }
-        }
-        launcher.style.right = String(rightOffset) + "px";
-        launcher.style.bottom = String(bottomOffset) + "px";
-        launcher.style.display = "flex";
-        launcher.style.pointerEvents = "auto";
-        launcher.style.opacity = "1";
-        launcher.title = hidden ? "Open ClinSpark Test Automator panel" : "Hide ClinSpark Test Automator panel";
-        launcher.setAttribute("aria-label", hidden ? "Open ClinSpark Test Automator panel" : "Hide ClinSpark Test Automator panel");
     }
 
     function normalizeKeyForMatch(e) {

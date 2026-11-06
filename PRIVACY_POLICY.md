@@ -18,6 +18,8 @@ The extension runs only on these ClinSpark domains:
 
 The automation scripts interact with ClinSpark pages in the user's browser to support authorized workflow automation. Any page data accessed by the scripts remains within the user's browser session and the ClinSpark application.
 
+The Search Methods feature also makes an anonymous, credential-free read request to the ACT Master Schedule Method Library endpoint. It receives only method names, method categories, and formal expressions. It does not send ClinSpark page data, account identifiers, or authentication cookies. The extension cannot use this endpoint to access or change other ACT server data.
+
 ## Remote Code
 
 The extension does not load or execute remote code. Updates are delivered through Chrome Web Store extension updates.

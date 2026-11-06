@@ -352,6 +352,29 @@
     // Annotated CRF selectors are not yet known; id/selectors are TODO placeholders.
     var DTS_REPORT_DEFINITIONS = [
         {
+            id: 4,
+            name: "Laboratory Data",
+            reportDivId: "reportDiv_4",
+            reportFormId: "reportForm_4",
+            generateButtonId: "reportGenerateButton_4",
+            rowMatchKeywords: ["laboratory data", "laboratory", "lab data"],
+            defaultConfig: { reportType: "pdf", includeSignOff: false, onlyRandomized: true, includePhi: false },
+            fields: [
+                { key: "reportType", type: "select", label: "Report Type", selectId: "reportType_4",
+                  options: [
+                      { value: "ascii", label: "CDISC ASCII" },
+                      { value: "xlsx", label: "CDISC Excel" },
+                      { value: "xml", label: "CDISC XML" },
+                      { value: "xpt", label: "CDISC XPT" },
+                      { value: "pdf", label: "PDF" }
+                  ]
+                },
+                { key: "includeSignOff", type: "boolean", label: "Include Lab Review Details", selectId: "includeSignOff_4", helpText: "Note: this is not part of the CDISC specification." },
+                { key: "onlyRandomized", type: "boolean", label: "Only Randomized Subjects", selectId: "onlyRandomized_4", helpText: "Has no effect when choosing specific subjects." },
+                { key: "includePhi", type: "boolean", label: "Include Subject PHI", selectId: "includePhi_4", helpText: "Includes subject DOB and initials." }
+            ]
+        },
+        {
             id: 16,
             name: "Transfer Data",
             reportDivId: "reportDiv_16",
@@ -540,6 +563,25 @@
         var idSuffix = reportDef.id !== "TODO" ? "_" + reportDef.id : "";
         var key = field.key;
         var boolValue = !!value;
+        // Some ClinSpark reports expose Yes/No values as native selects instead
+        // of radio buttons or checkboxes (Laboratory Data uses this layout).
+        var select = field.selectId ? reportDiv.querySelector("select#" + field.selectId) : null;
+        if (!select) select = reportDiv.querySelector("select[name='" + key + idSuffix + "']") || reportDiv.querySelector("select[name='" + key + "']");
+        if (select) {
+            var selectValue = boolValue ? "true" : "false";
+            var hasValue = false;
+            for (var si = 0; si < select.options.length; si++) {
+                if (select.options[si].value === selectValue) { hasValue = true; break; }
+            }
+            if (!hasValue) {
+                log("DTS: boolean select value '" + selectValue + "' not available for field '" + key + "'");
+                return false;
+            }
+            select.value = selectValue;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+            try { if (window.jQuery && select.id) window.jQuery("#" + select.id).trigger("change"); } catch(e) {}
+            return true;
+        }
         // Try Yes/No radio buttons with name variations.
         var radioNames = [key + idSuffix, key];
         for (var ni = 0; ni < radioNames.length; ni++) {
@@ -865,6 +907,13 @@
                         boolWrap.appendChild(makeBoolRadio("Yes", true));
                         boolWrap.appendChild(makeBoolRadio("No", false));
                         wrap.appendChild(boolWrap);
+                    }
+
+                    if (field.helpText) {
+                        var help = document.createElement("div");
+                        help.textContent = field.helpText;
+                        help.style.cssText = "font-size:11px;color:" + (glass ? "rgba(255,255,255,0.5)" : "#888") + ";line-height:1.35;";
+                        wrap.appendChild(help);
                     }
 
                     configArea.appendChild(wrap);
@@ -1687,9 +1736,58 @@
     var SVC_POPUP_REF = null;
     var SVC_PROGRESS_POPUP_REF = null;
     var SVC_CANCELLED = false;
-    var SVC_BG_IFRAME = null;
-    var SVC_BG_IFRAME_DOC = null;
-    var SVC_ITEM_CACHE = {}; // keyed by formName -> [{value, text}]
+    var SVC_SESSION_ID = 0;
+    var SVC_BG_WORKERS = [];
+    var SVC_BG_POOL_SIZE = 2;
+    var SVC_ITEM_CACHE = {}; // keyed by full target/source context
+    var SVC_BG_QUEUE = [];
+    var SVC_BG_QUEUE_ORDER = 0;
+
+    function svcRunOnBgQueue(task, priority) {
+        var sessionId = SVC_SESSION_ID;
+        var entry = { task: task, priority: priority || 0, order: SVC_BG_QUEUE_ORDER++, sessionId: sessionId, state: "queued" };
+        var queuedPromise = new Promise(function(resolve, reject) {
+            entry.resolve = resolve;
+            entry.reject = reject;
+        });
+        queuedPromise._svcQueueEntry = entry;
+        SVC_BG_QUEUE.push(entry);
+        SVC_BG_QUEUE.sort(function(a, b) { return b.priority - a.priority || a.order - b.order; });
+        svcPumpBgQueue();
+        return queuedPromise;
+    }
+
+    function svcPromoteBgQueueTask(queuedPromise, priority) {
+        var entry = queuedPromise && queuedPromise._svcQueueEntry;
+        if (!entry || SVC_BG_QUEUE.indexOf(entry) === -1) return;
+        entry.priority = Math.max(entry.priority, priority || 0);
+        SVC_BG_QUEUE.sort(function(a, b) { return b.priority - a.priority || a.order - b.order; });
+    }
+
+    function svcPumpBgQueue() {
+        if (!SVC_BG_WORKERS.length || !SVC_BG_QUEUE.length) return;
+        for (var wi = 0; wi < SVC_BG_WORKERS.length; wi++) {
+            var worker = SVC_BG_WORKERS[wi];
+            if (worker.busy || !worker.ready) continue;
+            var entry = SVC_BG_QUEUE.shift();
+            if (!entry) break;
+            entry.state = "running";
+            worker.busy = true;
+            worker.currentEntry = entry;
+            Promise.resolve().then((function(entry, worker) {
+                return function() {
+                    if (SVC_CANCELLED || entry.sessionId !== SVC_SESSION_ID) return false;
+                    return entry.task(worker);
+                };
+            })(entry, worker)).then(entry.resolve, entry.reject).then((function(worker) {
+                return function() {
+                    worker.busy = false;
+                    worker.currentEntry = null;
+                    svcPumpBgQueue();
+                };
+            })(worker));
+        }
+    }
     var SVC_TARGET_URLS = [
         "https://cenexel.clinspark.com/secure/crfdesign/activityplans/show/",
         "https://cenexeltest.clinspark.com/secure/crfdesign/activityplans/show/"
@@ -1705,47 +1803,61 @@
     }
 
 
-    // Open a background iframe pointing to the current Activity Plan page
+    // Create isolated iframe workers. A worker owns its document and modal for a whole task.
     function svcOpenBgIframe() {
-        if (SVC_BG_IFRAME && SVC_BG_IFRAME.parentNode) return;
-        SVC_BG_IFRAME = document.createElement("iframe");
-        SVC_BG_IFRAME.id = "svc_bg_iframe";
-        SVC_BG_IFRAME.src = location.href;
-        SVC_BG_IFRAME.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none;opacity:0;pointer-events:none;";
-        document.body.appendChild(SVC_BG_IFRAME);
-        log("SVC: opened background iframe");
+        svcCloseBgIframe();
+        for (var i = 0; i < SVC_BG_POOL_SIZE; i++) {
+            var iframe = document.createElement("iframe");
+            iframe.id = "svc_bg_iframe_" + i;
+            iframe.src = location.href;
+            iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none;opacity:0;pointer-events:none;";
+            var worker = { id: i, iframe: iframe, doc: null, activeContext: null, busy: false, currentEntry: null, ready: false };
+            SVC_BG_WORKERS.push(worker);
+            document.body.appendChild(iframe);
+        }
+        log("SVC: opened " + SVC_BG_WORKERS.length + " isolated background workers");
     }
 
-    async function svcWaitForBgIframeReady() {
+    async function svcWaitForBgIframeReady(worker) {
         var start = Date.now();
         while (Date.now() - start < 20000) {
             try {
-                var doc = SVC_BG_IFRAME.contentDocument || SVC_BG_IFRAME.contentWindow.document;
+                var doc = worker.iframe.contentDocument || worker.iframe.contentWindow.document;
                 if (doc && doc.readyState === "complete" && doc.getElementById("saTableBody")) {
-                    SVC_BG_IFRAME_DOC = doc;
-                    log("SVC: background iframe ready");
+                    worker.doc = doc;
+                    worker.ready = true;
+                    log("SVC: background iframe worker " + worker.id + " ready");
                     return true;
                 }
             } catch (e) {}
             await sleep(300);
         }
-        log("SVC: background iframe timed out");
+        log("SVC: background iframe worker " + worker.id + " timed out");
         return false;
     }
 
     function svcCloseBgIframe() {
-        if (SVC_BG_IFRAME) {
-            try { if (SVC_BG_IFRAME.parentNode) SVC_BG_IFRAME.parentNode.removeChild(SVC_BG_IFRAME); } catch (e) {}
-            SVC_BG_IFRAME = null;
-            SVC_BG_IFRAME_DOC = null;
-            log("SVC: closed background iframe");
+        while (SVC_BG_QUEUE.length) {
+            var pendingEntry = SVC_BG_QUEUE.shift();
+            pendingEntry.state = "cancelled";
+            pendingEntry.resolve(false);
+        }
+        if (SVC_BG_WORKERS.length) {
+            for (var i = 0; i < SVC_BG_WORKERS.length; i++) {
+                var worker = SVC_BG_WORKERS[i];
+                try { if (worker.iframe && worker.iframe.parentNode) worker.iframe.parentNode.removeChild(worker.iframe); } catch (e) {}
+                worker.doc = null;
+                worker.activeContext = null;
+            }
+            SVC_BG_WORKERS = [];
+            log("SVC: closed background iframe worker pool");
         }
     }
 
     // Find a row in the background iframe's saTableBody
-    function svcFindRowInBgIframe(segmentText, eventText, formText) {
-        if (!SVC_BG_IFRAME_DOC) return null;
-        var tbody = SVC_BG_IFRAME_DOC.getElementById("saTableBody");
+    function svcFindRowInBgIframe(worker, segmentText, eventText, formText) {
+        if (!worker || !worker.doc) return null;
+        var tbody = worker.doc.getElementById("saTableBody");
         if (!tbody) return null;
         var trs = tbody.querySelectorAll("tr");
         for (var i = 0; i < trs.length; i++) {
@@ -1762,16 +1874,15 @@
     }
 
     // Wait for a modal in the bg iframe
-    async function svcWaitForBgModal(timeoutMs) {
+    async function svcWaitForBgModal(worker, timeoutMs) {
         var start = Date.now();
         var max = timeoutMs || 10000;
         while (Date.now() - start < max) {
             try {
-                var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+                var modal = worker.doc.getElementById("ajaxModal");
                 if (modal && modal.classList.contains("in")) {
                     var body = modal.querySelector("#modalbody, .modal-body");
-                    if (body) {
-                        await sleep(500);
+                    if (body && (body.querySelector("select, input, button") || (body.textContent || "").trim())) {
                         return modal;
                     }
                 }
@@ -1781,12 +1892,12 @@
         return null;
     }
 
-    async function svcWaitForBgModalClose(timeoutMs) {
+    async function svcWaitForBgModalClose(worker, timeoutMs) {
         var start = Date.now();
         var max = timeoutMs || 10000;
         while (Date.now() - start < max) {
             try {
-                var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+                var modal = worker.doc.getElementById("ajaxModal");
                 if (!modal || !modal.classList.contains("in")) return true;
             } catch (e) {}
             await sleep(300);
@@ -1794,76 +1905,120 @@
         return false;
     }
 
+    // Dispatch exactly one native change event in the iframe realm.
+    function svcDispatchBgSelectChange(worker, selectId, selectElement) {
+        try {
+            var changeEvent = new worker.iframe.contentWindow.Event("change", { bubbles: true });
+            selectElement.dispatchEvent(changeEvent);
+            return true;
+        } catch (e) {
+            log("SVC: could not dispatch iframe change for " + selectId + " - " + String(e));
+            return false;
+        }
+    }
+
     // Set a select2 value inside the bg iframe by text match
-    async function svcSetBgSelect2ByText(selectId, targetText) {
-        var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+    async function svcSetBgSelect2ByText(worker, selectId, targetText) {
+        var sel = worker.doc.getElementById(selectId);
         if (!sel) {
             log("SVC: bg iframe select " + selectId + " not found");
             return false;
         }
         var normalizedTarget = normalizeVisibilityText(targetText);
         var opts = sel.querySelectorAll("option");
-        var matchValue = null;
-        // Exact normalized match
+        var exactMatches = [];
         for (var i = 0; i < opts.length; i++) {
             var optNorm = normalizeVisibilityText(opts[i].textContent);
-            if (optNorm === normalizedTarget) {
-                matchValue = opts[i].value;
-                break;
-            }
+            if (optNorm === normalizedTarget && (opts[i].value || "").trim()) exactMatches.push(opts[i].value);
         }
-        // Fuzzy fallback: substring containment
+        var matchValue = exactMatches.length === 1 ? exactMatches[0] : null;
+        if (exactMatches.length > 1) {
+            log("SVC: ambiguous exact match for '" + targetText + "' in " + selectId);
+            return false;
+        }
+        // Fuzzy fallback is allowed only when exactly one option matches.
         if (!matchValue) {
+            var fuzzyMatches = [];
             for (var j = 0; j < opts.length; j++) {
                 var optNorm2 = normalizeVisibilityText(opts[j].textContent);
-                if (optNorm2.indexOf(normalizedTarget) !== -1 || normalizedTarget.indexOf(optNorm2) !== -1) {
-                    matchValue = opts[j].value;
-                    break;
-                }
+                if ((opts[j].value || "").trim() && (optNorm2.indexOf(normalizedTarget) !== -1 || normalizedTarget.indexOf(optNorm2) !== -1)) fuzzyMatches.push(opts[j].value);
             }
+            if (fuzzyMatches.length === 1) matchValue = fuzzyMatches[0];
         }
         if (!matchValue) {
             log("SVC: bg iframe could not match '" + targetText + "' in " + selectId);
             return false;
         }
         sel.value = matchValue;
-        sel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin = SVC_BG_IFRAME.contentWindow;
-            if (bgWin.jQuery && bgWin.jQuery.fn.select2) {
-                bgWin.jQuery("#" + selectId).trigger("change");
-            }
-        } catch (e) {}
-        await sleep(500);
+        svcDispatchBgSelectChange(worker, selectId, sel);
         log("SVC: bg iframe selected '" + targetText + "' in " + selectId);
         return true;
     }
 
     // Wait for a bg iframe select to get options populated
-    async function svcWaitForBgSelectOptions(selectId, timeoutMs) {
+    function svcGetBgAjaxCount(worker) {
+        try {
+            var win = worker && worker.iframe && worker.iframe.contentWindow;
+            var jq = win && (win.jQuery || win.$);
+            return jq && typeof jq.active === "number" ? jq.active : null;
+        } catch (e) { return null; }
+    }
+
+    async function svcWaitForBgSelectOptions(worker, selectId, timeoutMs, changedFromSignature, requireMutation, ajaxBaseline, requireAjaxIdle) {
         var start = Date.now();
-        var max = timeoutMs || 5000;
+        var max = timeoutMs || 10000;
+        var lastSignature = null;
+        var stableCount = 0;
+        var mutationCount = 0;
+        var sawAjax = false;
+        var observer = null;
+        try {
+            var observedSelect = worker && worker.doc && worker.doc.getElementById(selectId);
+            var Observer = worker && worker.iframe && worker.iframe.contentWindow.MutationObserver;
+            if (observedSelect && Observer) {
+                observer = new Observer(function(records) { mutationCount += records.length || 1; });
+                observer.observe(observedSelect, { childList: true, subtree: true });
+            }
+        } catch (e) {}
         while (Date.now() - start < max) {
             try {
-                var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+                var sel = worker.doc.getElementById(selectId);
                 if (sel) {
                     var opts = sel.querySelectorAll("option");
-                    if (opts.length > 1) {
-                        await sleep(200);
+                    var signature = Array.prototype.map.call(opts, function(opt) {
+                        return (opt.value || "") + "\u001f" + (opt.textContent || "").trim();
+                    }).join("\u001e");
+                    var validCount = 0;
+                    for (var i = 0; i < opts.length; i++) if ((opts[i].value || "").trim()) validCount++;
+                    var hasBaseline = changedFromSignature !== undefined && changedFromSignature !== null;
+                    var ajaxCount = svcGetBgAjaxCount(worker);
+                    if (ajaxBaseline !== undefined && ajaxBaseline !== null && ajaxCount !== null && ajaxCount > ajaxBaseline) sawAjax = true;
+                    var ajaxSettled = ajaxBaseline === undefined || ajaxBaseline === null || ajaxCount === null ||
+                        (sawAjax ? ajaxCount <= ajaxBaseline : (!requireAjaxIdle || ajaxCount === 0));
+                    // A mutation alone is not proof that the dependent request finished:
+                    // the site often clears options first, then fills them asynchronously.
+                    var changed = !hasBaseline || signature !== changedFromSignature || (requireMutation && mutationCount > 0) || (sawAjax && ajaxSettled);
+                    var hasStableData = validCount > 0;
+                    if (hasStableData && ajaxSettled && signature === lastSignature && changed) stableCount++;
+                    else stableCount = 0;
+                    lastSignature = signature;
+                    if (hasStableData && ajaxSettled && changed && stableCount >= 3) {
+                        if (observer) observer.disconnect();
                         return true;
                     }
                 }
             } catch (e) {}
-            await sleep(200);
+            await sleep(100);
         }
+        if (observer) observer.disconnect();
         return false;
     }
 
     // Collect option list from a bg iframe select
-    function svcCollectBgSelectOptions(selectId) {
+    function svcCollectBgSelectOptions(worker, selectId) {
         var results = [];
         try {
-            var sel = SVC_BG_IFRAME_DOC.getElementById(selectId);
+            var sel = worker.doc.getElementById(selectId);
             if (!sel) return results;
             var opts = sel.querySelectorAll("option");
             for (var i = 0; i < opts.length; i++) {
@@ -1878,8 +2033,8 @@
     }
 
     // Open the visibility modal in the bg iframe for a given row
-    async function svcOpenVisibilityModalInBg(segmentText, eventText, formText) {
-        var row = svcFindRowInBgIframe(segmentText, eventText, formText);
+    async function svcOpenVisibilityModalInBg(worker, segmentText, eventText, formText) {
+        var row = svcFindRowInBgIframe(worker, segmentText, eventText, formText);
         if (!row) {
             log("SVC: bg iframe row not found for " + segmentText + " | " + eventText + " | " + formText);
             return false;
@@ -1891,7 +2046,7 @@
             return false;
         }
         visLink.click();
-        var modal = await svcWaitForBgModal(10000);
+        var modal = await svcWaitForBgModal(worker, 10000);
         if (!modal) {
             log("SVC: bg iframe visibility modal did not open");
             return false;
@@ -1901,9 +2056,13 @@
     }
 
     // Select first activity plan option, then select the scheduled activity matching studyEvent + formName
-    async function svcSelectActivityAndSA(studyEvent, formName) {
+    async function svcSelectActivityAndSA(worker, studyEvent, formName) {
+        if (!(await svcWaitForBgSelectOptions(worker, "visibleActivityPlan", 15000))) {
+            log("SVC: visibleActivityPlan did not populate");
+            return false;
+        }
         // Select first available activity plan
-        var apSel = SVC_BG_IFRAME_DOC.getElementById("visibleActivityPlan");
+        var apSel = worker.doc.getElementById("visibleActivityPlan");
         if (!apSel) {
             log("SVC: visibleActivityPlan not found");
             return false;
@@ -1918,17 +2077,13 @@
             log("SVC: no activity plan options available");
             return false;
         }
+        var oldSASelect = worker.doc.getElementById("visibleScheduledActivity");
+        var oldSASignature = oldSASelect ? Array.prototype.map.call(oldSASelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
         apSel.value = firstAPValue;
-        apSel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin = SVC_BG_IFRAME.contentWindow;
-            if (bgWin.jQuery && bgWin.jQuery.fn.select2) bgWin.jQuery("#visibleActivityPlan").trigger("change");
-        } catch (e) {}
+        svcDispatchBgSelectChange(worker, "visibleActivityPlan", apSel);
         log("SVC: selected first activity plan value=" + firstAPValue);
-        await sleep(1000);
-
         // Wait for scheduledActivity to populate
-        var saReady = await svcWaitForBgSelectOptions("visibleScheduledActivity", 5000);
+        var saReady = await svcWaitForBgSelectOptions(worker, "visibleScheduledActivity", 15000, oldSASignature);
         if (!saReady) {
             log("SVC: visibleScheduledActivity did not populate");
             return false;
@@ -1936,73 +2091,110 @@
 
         // Match by studyEvent + formName combo
         var targetCombo = normalizeVisibilityText(studyEvent + " " + formName);
-        var saSel = SVC_BG_IFRAME_DOC.getElementById("visibleScheduledActivity");
+        var saSel = worker.doc.getElementById("visibleScheduledActivity");
         var saOpts = saSel ? saSel.querySelectorAll("option") : [];
-        var saMatch = null;
+        var saMatches = [];
         for (var j = 0; j < saOpts.length; j++) {
             var optNorm = normalizeVisibilityText(saOpts[j].textContent);
-            if (optNorm.indexOf(targetCombo) !== -1) {
-                saMatch = saOpts[j].value;
-                break;
-            }
+            if (saOpts[j].value && optNorm.indexOf(targetCombo) !== -1) saMatches.push(saOpts[j].value);
         }
-        // Fallback: try matching formName alone
+        if (saMatches.length > 1) {
+            log("SVC: ambiguous scheduledActivity match for " + studyEvent + " / " + formName);
+            return false;
+        }
+        var saMatch = saMatches.length === 1 ? saMatches[0] : null;
+        // Fallback to form name only when it identifies exactly one option.
         if (!saMatch) {
             var targetForm = normalizeVisibilityText(formName);
+            var formMatches = [];
             for (var k = 0; k < saOpts.length; k++) {
                 var optNorm2 = normalizeVisibilityText(saOpts[k].textContent);
-                if (optNorm2.indexOf(targetForm) !== -1) {
-                    saMatch = saOpts[k].value;
-                    break;
-                }
+                if (saOpts[k].value && optNorm2.indexOf(targetForm) !== -1) formMatches.push(saOpts[k].value);
             }
+            if (formMatches.length === 1) saMatch = formMatches[0];
         }
         if (!saMatch) {
             log("SVC: could not match scheduledActivity for " + studyEvent + " / " + formName);
             return false;
         }
+        var oldItemSelect = worker.doc.getElementById("visibleItemRef");
+        var oldItemSignature = oldItemSelect ? Array.prototype.map.call(oldItemSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
         saSel.value = saMatch;
-        saSel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-            var bgWin2 = SVC_BG_IFRAME.contentWindow;
-            if (bgWin2.jQuery && bgWin2.jQuery.fn.select2) bgWin2.jQuery("#visibleScheduledActivity").trigger("change");
-        } catch (e) {}
+        svcDispatchBgSelectChange(worker, "visibleScheduledActivity", saSel);
         log("SVC: selected scheduledActivity value=" + saMatch);
-        await sleep(1000);
-
         // Wait for item ref to populate
-        await svcWaitForBgSelectOptions("visibleItemRef", 5000);
-        return true;
+        return await svcWaitForBgSelectOptions(worker, "visibleItemRef", 15000, oldItemSignature);
     }
 
     // Collect items from the bg iframe after SA is selected
-    function svcCollectItems() {
-        return svcCollectBgSelectOptions("visibleItemRef");
+    function svcCollectItems(worker) {
+        return svcCollectBgSelectOptions(worker, "visibleItemRef");
     }
 
     // Select an item in the bg iframe and collect its values
-    async function svcSelectItemAndCollectValues(itemText) {
-        var matched = await svcSetBgSelect2ByText("visibleItemRef", itemText);
+    async function svcSelectItemAndCollectValues(worker, itemText) {
+        var valueSelect = worker && worker.doc && worker.doc.getElementById("visibleCodeListItem");
+        var oldValueSignature = valueSelect ? Array.prototype.map.call(valueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
+        var matched = await svcSetBgSelect2ByText(worker, "visibleItemRef", itemText);
         if (!matched) return [];
-        await sleep(500);
-        await svcWaitForBgSelectOptions("visibleCodeListItem", 5000);
-        return svcCollectBgSelectOptions("visibleCodeListItem");
+        if (!(await svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 15000, oldValueSignature))) return [];
+        return svcCollectBgSelectOptions(worker, "visibleCodeListItem");
+    }
+
+    async function svcSelectItemByValueAndCollectValues(worker, itemValue) {
+        var itemSelect = worker && worker.doc && worker.doc.getElementById("visibleItemRef");
+        var valueSelect = worker && worker.doc && worker.doc.getElementById("visibleCodeListItem");
+        if (!itemSelect || !valueSelect) return { ok: false, values: [] };
+        var desiredValue = String(itemValue || "");
+        var exists = false;
+        for (var i = 0; i < itemSelect.options.length; i++) {
+            if (String(itemSelect.options[i].value) === desiredValue) { exists = true; break; }
+        }
+        if (!exists) {
+            log("SVC: item option value not found in iframe: " + desiredValue);
+            return { ok: false, values: [] };
+        }
+        if (String(itemSelect.value) === desiredValue) {
+            var activeBefore = svcGetBgAjaxCount(worker);
+            var alreadyReady = await svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 10000, null, false, activeBefore, true);
+            var existingValues = alreadyReady ? svcCollectBgSelectOptions(worker, "visibleCodeListItem") : [];
+            return { ok: alreadyReady && existingValues.length > 0, values: existingValues, reason: alreadyReady ? "Item Value list was empty." : "Item Value request did not settle." };
+        }
+        var oldSignature = Array.prototype.map.call(valueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e");
+        var ajaxBaseline = svcGetBgAjaxCount(worker);
+        var readyPromise = svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 12000, oldSignature, true, ajaxBaseline, true);
+        itemSelect.value = desiredValue;
+        svcDispatchBgSelectChange(worker, "visibleItemRef", itemSelect);
+        var ready = await readyPromise;
+        if (!ready) {
+            log("SVC: Item Value load timed out; retrying item change once itemId=" + desiredValue);
+            var retryValueSelect = worker.doc.getElementById("visibleCodeListItem");
+            var retrySignature = retryValueSelect ? Array.prototype.map.call(retryValueSelect.options, function(opt) { return (opt.value || "") + "\u001f" + (opt.textContent || "").trim(); }).join("\u001e") : "";
+            var retryAjaxBaseline = svcGetBgAjaxCount(worker);
+            var retryPromise = svcWaitForBgSelectOptions(worker, "visibleCodeListItem", 6000, retrySignature, true, retryAjaxBaseline, true);
+            svcDispatchBgSelectChange(worker, "visibleItemRef", itemSelect);
+            ready = await retryPromise;
+        }
+        var values = ready ? svcCollectBgSelectOptions(worker, "visibleCodeListItem") : [];
+        log("SVC: item values loaded=" + ready + " count=" + values.length + " itemId=" + desiredValue);
+        return { ok: ready && values.length > 0, values: values, reason: ready ? "Item Value list was empty." : "Item Value options did not stabilize after retry." };
     }
 
     // Close the modal in the bg iframe
-    async function svcCloseBgModal() {
+    async function svcCloseBgModal(worker) {
         try {
-            var modal = SVC_BG_IFRAME_DOC.getElementById("ajaxModal");
+            var modal = worker.doc.getElementById("ajaxModal");
             if (modal) {
                 var closeBtn = modal.querySelector("button[data-dismiss='modal'], .close, .btn-default");
                 if (closeBtn) closeBtn.click();
                 else {
                     var esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true });
-                    SVC_BG_IFRAME_DOC.dispatchEvent(esc);
+                    worker.doc.dispatchEvent(esc);
                 }
             }
         } catch (e) {}
-        await svcWaitForBgModalClose(5000);
+        await svcWaitForBgModalClose(worker, 5000);
+        worker.activeContext = null;
     }
 
     // Build the SVC selection GUI
@@ -2207,14 +2399,26 @@
         }
 
         function updateConfirmState() {
-            if (getFilledHiddenDropboxCount() > 0) {
+            var allMappingsReady = true;
+            for (var key in dropboxMappings) {
+                if (!dropboxMappings.hasOwnProperty(key)) continue;
+                var target = saItems[parseInt(key)];
+                if (target && target.visibilityMustBeSet) {
+                    var currentMapping = dropboxMappings[key];
+                    var selectedCache = currentMapping._itemValuesById && currentMapping._itemValuesById[String(currentMapping._prefillItemId || "")];
+                    if (currentMapping._loadState !== "ready" || currentMapping._valuesLoading || (currentMapping._prefillItemId && selectedCache && selectedCache.state !== "ready")) allMappingsReady = false;
+                }
+            }
+            if (getFilledHiddenDropboxCount() > 0 && allMappingsReady) {
                 confirmBtn.disabled = false;
                 confirmBtn.style.opacity = "1";
                 confirmBtn.style.cursor = "pointer";
+                confirmBtn.title = "Apply the configured visibility conditions";
             } else {
                 confirmBtn.disabled = true;
                 confirmBtn.style.opacity = "0.5";
                 confirmBtn.style.cursor = "not-allowed";
+                confirmBtn.title = allMappingsReady ? "Map at least one form" : "Wait for all mapped visibility fields to finish loading, or retry failed mappings";
             }
         }
 
@@ -2346,6 +2550,9 @@
                         if (isDropEnabled) {
                             rowBg = mapping ? "#1e2e1e" : "#2a2235";
                             rowBorder = mapping ? "#3a6a3a" : "#554";
+                            if (mapping && mapping._loadState === "ready" && !mapping._valuesLoading) rowBorder = "#28b8a0";
+                            else if (mapping && mapping._loadState === "error") rowBorder = "#d45b5b";
+                            else if (mapping && (mapping._valuesLoading || mapping._loadState === "queued" || mapping._loadState === "loading")) rowBorder = "#c89a42";
                         }
 
                         var formRow = document.createElement("div");
@@ -2406,7 +2613,8 @@
                             dropbox.appendChild(disabledLabel);
                         } else if (mapping) {
                             var tag = document.createElement("span");
-                            tag.textContent = mapping.form;
+                            var svcStateLabel = mapping._loadState === "queued" ? " · Queued" : mapping._loadState === "loading" ? " · Loading…" : mapping._loadState === "ready" ? " · Ready" : mapping._loadState === "error" ? " · Retry" : "";
+                            tag.textContent = mapping.form + svcStateLabel;
                             tag.title = mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
                             tag.style.cssText = "display:inline-block;padding:1px 4px;background:#3a3a5a;border-radius:3px;font-size:9px;color:#ccc;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;flex:1;min-width:0;";
                             tag.addEventListener("click", (function(gIdx) {
@@ -2414,9 +2622,8 @@
                                     e.stopPropagation();
                                     selectedDropboxIdx = gIdx;
                                     log("SVC: dropbox form clicked idx=" + gIdx);
-                                    renderPrimaryPanel();
-                                    renderSegNavPanel();
                                     loadFormAttributesForDropbox(gIdx);
+                                    renderSegNavPanel();
                                 };
                             })(globalIdx));
                             // X remove button - appended to dropbox directly so it's always visible
@@ -2497,8 +2704,9 @@
                                         sourceIdx: parseInt(srcIdx),
                                         prefillReason: "Add visibility condition"
                                     };
+                                    selectedDropboxIdx = gIdx;
                                     log("SVC: mapped form " + srcItem.form + " to dropbox idx=" + gIdx);
-                                    renderPrimaryPanel();
+                                    loadFormAttributesForDropbox(gIdx);
                                     renderSegNavPanel();
                                     updateConfirmState();
                                 };
@@ -2539,7 +2747,7 @@
         attrSection.style.cssText = "flex:1;display:flex;flex-direction:column;gap:8px;padding-bottom:8px;";
 
         var attrPlaceholder = document.createElement("div");
-        attrPlaceholder.textContent = "Click a form inside a dropbox to configure its visibility condition";
+        attrPlaceholder.textContent = "Drop a source form to load its visibility fields automatically, or select a mapped form to edit it";
         attrPlaceholder.style.cssText = "color:#666;font-size:12px;text-align:center;padding:20px;";
 
         // Item dropdown
@@ -2549,23 +2757,18 @@
         var itemSelect = document.createElement("select");
         itemSelect.style.cssText = "padding:6px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;width:100%;font-size:12px;";
         itemSelect.addEventListener("change", async function() {
-            var selectedText = this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
+            var selectedText = this.selectedIndex > 0 && this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
             if (!selectedText) return;
+            var selectedValue = this.options[this.selectedIndex] ? this.options[this.selectedIndex].value : "";
             log("SVC: item selected: " + selectedText);
-            // Persist selection back to mapping
-            if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
-                dropboxMappings[String(selectedDropboxIdx)].prefillItem = selectedText;
-                dropboxMappings[String(selectedDropboxIdx)].prefillItemValue = null;
+            var valueLoadIdx = selectedDropboxIdx;
+            var valueLoadMapping = valueLoadIdx !== null ? dropboxMappings[String(valueLoadIdx)] : null;
+            if (valueLoadMapping) {
+                valueLoadMapping.prefillItem = selectedText;
+                valueLoadMapping._prefillItemId = selectedValue;
+                valueLoadMapping.prefillItemValue = null;
             }
-            // Collect item values via bg iframe
-            currentItemValues = await svcSelectItemAndCollectValues(selectedText);
-            // Cache item values on the mapping so they persist across dropbox switches
-            if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
-                dropboxMappings[String(selectedDropboxIdx)]._cachedItemValues = currentItemValues.slice();
-            }
-            renderItemValueDropdown();
-            renderPrimaryPanel();
-            renderSegNavPanel();
+            if (valueLoadMapping) await svcLoadMappingItemValues(valueLoadIdx, valueLoadMapping, selectedValue, selectedText, false);
         });
 
         // Item Value dropdown
@@ -2575,7 +2778,7 @@
         var itemValSelect = document.createElement("select");
         itemValSelect.style.cssText = "padding:6px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;width:100%;font-size:12px;";
         itemValSelect.addEventListener("change", function() {
-            var selectedText = this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
+            var selectedText = this.selectedIndex > 0 && this.options[this.selectedIndex] ? this.options[this.selectedIndex].text : "";
             if (selectedDropboxIdx !== null && dropboxMappings[String(selectedDropboxIdx)]) {
                 dropboxMappings[String(selectedDropboxIdx)].prefillItemValue = selectedText || null;
                 log("SVC: item value persisted: " + selectedText);
@@ -2601,7 +2804,7 @@
         });
 
 
-        function renderItemDropdown(items, prefillItem) {
+        function renderItemDropdown(items, prefillItem, prefillItemId) {
             itemSelect.innerHTML = "";
             var defaultOpt = document.createElement("option");
             defaultOpt.value = "";
@@ -2613,7 +2816,12 @@
                 opt.textContent = items[i].text;
                 itemSelect.appendChild(opt);
             }
-            if (prefillItem) {
+            if (prefillItemId) {
+                for (var vi = 0; vi < itemSelect.options.length; vi++) {
+                    if (String(itemSelect.options[vi].value) === String(prefillItemId)) { itemSelect.selectedIndex = vi; break; }
+                }
+            }
+            if (itemSelect.selectedIndex === 0 && prefillItem) {
                 for (var j = 0; j < itemSelect.options.length; j++) {
                     if (normalizeVisibilityText(itemSelect.options[j].text) === normalizeVisibilityText(prefillItem)) {
                         itemSelect.selectedIndex = j;
@@ -2645,7 +2853,258 @@
             }
         }
 
-        async function loadFormAttributesForDropbox(gIdx, forceRefresh) {
+        function svcLoadMappingItemValues(gIdx, mapping, itemId, itemText, forceRefresh, queuePriority) {
+            var idKey = String(itemId || "");
+            if (!mapping || !idKey) return Promise.resolve(false);
+            var priority = typeof queuePriority === "number" ? queuePriority : (selectedDropboxIdx === gIdx ? 40 : 5);
+            var backgroundPrefetch = priority <= 0;
+            mapping._itemValuesById = mapping._itemValuesById || {};
+            mapping._itemValuePromisesById = mapping._itemValuePromisesById || {};
+            var cached = mapping._itemValuesById[idKey];
+            if (!forceRefresh && cached && cached.state === "ready") {
+                if (selectedDropboxIdx === gIdx) {
+                    currentItemValues = cached.values.slice();
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                return Promise.resolve(true);
+            }
+            if (!forceRefresh && mapping._itemValuePromisesById[idKey]) {
+                if (selectedDropboxIdx === gIdx) svcPromoteBgQueueTask(mapping._itemValuePromisesById[idKey], priority);
+                if (selectedDropboxIdx === gIdx) {
+                    currentItemValues = [];
+                    renderSelectedDropboxConfig(gIdx);
+                    updateConfirmState();
+                }
+                return mapping._itemValuePromisesById[idKey];
+            }
+            mapping._itemValuesById[idKey] = { state: "loading", values: cached && cached.values ? cached.values : [] };
+            mapping._valuesLoading = true;
+            if (!backgroundPrefetch || selectedDropboxIdx === gIdx) {
+                renderPrimaryPanel();
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                updateConfirmState();
+            }
+            var task = svcRunOnBgQueue(async function(worker) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return { ok: false, values: [], reason: "This mapping is no longer active." };
+                log("SVC: loading item values for mapping idx=" + gIdx + " item='" + itemText + "'");
+                if (!(await svcEnsureBgMappingContext(worker, gIdx, mapping))) return { ok: false, values: [], reason: "Could not open the background visibility form. Retry the mapping." };
+                return await svcSelectItemByValueAndCollectValues(worker, idKey);
+            }, priority);
+            mapping._itemValuePromisesById[idKey] = task;
+            var resultPromise = task.then(function(result) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                var ok = !!(result && result.ok);
+                var values = result && Array.isArray(result.values) ? result.values : [];
+                mapping._itemValuesById[idKey] = { state: ok ? "ready" : "error", values: values.slice(), error: ok ? "" : String(result && result.reason || "The background request returned no usable Item Values.") };
+                if (ok && !mapping.prefillItemValue && String(mapping._prefillItemId) === idKey && values.length === 1) mapping.prefillItemValue = values[0].text;
+                return ok;
+            }).catch(function(err) {
+                var errorText = String(err && err.message || err || "The background request failed.");
+                if (dropboxMappings[String(gIdx)] === mapping) mapping._itemValuesById[idKey] = { state: "error", values: [], error: errorText };
+                log("SVC: item values failed for " + itemText + " - " + errorText);
+                return false;
+            }).then(function(ok) {
+                if (mapping._itemValuePromisesById) delete mapping._itemValuePromisesById[idKey];
+                mapping._valuesLoading = !!(mapping._itemValuePromisesById && Object.keys(mapping._itemValuePromisesById).length);
+                if (!backgroundPrefetch || selectedDropboxIdx === gIdx) renderPrimaryPanel();
+                if (dropboxMappings[String(gIdx)] === mapping && selectedDropboxIdx === gIdx) {
+                    var selectedCache = mapping._itemValuesById[idKey];
+                    currentItemValues = String(mapping._prefillItemId) === idKey && selectedCache && selectedCache.state === "ready" ? selectedCache.values.slice() : [];
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                if (!backgroundPrefetch || selectedDropboxIdx === gIdx) updateConfirmState();
+                return ok;
+            });
+            resultPromise._svcQueueEntry = task._svcQueueEntry;
+            mapping._itemValuePromisesById[idKey] = resultPromise;
+            return resultPromise;
+        }
+
+        function svcPrefetchMappingItemValues(gIdx, mapping) {
+            if (!mapping || dropboxMappings[String(gIdx)] !== mapping || mapping._itemValuesPrefetchStarted) return;
+            var items = Array.isArray(mapping._cachedItems) ? mapping._cachedItems : [];
+            if (!items.length) return;
+            mapping._itemValuesPrefetchStarted = true;
+            var seen = {};
+            var scheduled = 0;
+            for (var i = 0; i < items.length; i++) {
+                var itemId = String(items[i] && items[i].value || "");
+                if (!itemId || seen[itemId]) continue;
+                seen[itemId] = true;
+                var cached = mapping._itemValuesById && mapping._itemValuesById[itemId];
+                if (cached && cached.state === "ready") continue;
+                svcLoadMappingItemValues(gIdx, mapping, itemId, items[i].text || itemId, false, 0);
+                scheduled++;
+            }
+            log("SVC: prefetch queued " + scheduled + " Item Value lists for mapping idx=" + gIdx);
+        }
+
+        async function svcEnsureBgMappingContext(worker, gIdx, mapping) {
+            var target = saItems[gIdx];
+            if (!worker || !worker.ready || !target || !mapping) return false;
+            var contextKey = JSON.stringify([target.segment, target.studyEvent, target.form, target.saRowIndex, mapping.segment, mapping.studyEvent, mapping.form, mapping.sourceIdx].map(function(v) { return normalizeVisibilityText(String(v == null ? "" : v)); }));
+            var modal = worker.doc && worker.doc.getElementById("ajaxModal");
+            if (worker.activeContext === contextKey && modal && modal.classList.contains("in")) return true;
+            await svcCloseBgModal(worker);
+            var opened = await svcOpenVisibilityModalInBg(worker, target.segment, target.studyEvent, target.form);
+            if (!opened || !(await svcSelectActivityAndSA(worker, mapping.studyEvent, mapping.form))) return false;
+            worker.activeContext = contextKey;
+            return true;
+        }
+
+        function renderSelectedDropboxConfig(gIdx) {
+            var mapping = dropboxMappings[String(gIdx)];
+            var target = saItems[gIdx];
+            attrSection.innerHTML = "";
+            if (!mapping || !target) {
+                attrSection.appendChild(attrPlaceholder);
+                return;
+            }
+            if (mapping._loadState === "queued" || mapping._loadState === "loading") {
+                var status = document.createElement("div");
+                status.style.cssText = "padding:16px;color:#b9d9ff;font-size:12px;text-align:center;line-height:1.5;";
+                status.textContent = (mapping._loadState === "queued" ? "Queued" : "Loading") + " visibility fields for " + target.form + " from " + mapping.form + "…";
+                attrSection.appendChild(status);
+                return;
+            }
+            if (mapping._loadState === "error" && !(mapping._cachedItems && mapping._cachedItems.length)) {
+                var error = document.createElement("div");
+                error.style.cssText = "padding:12px;color:#ffb4a8;font-size:12px;text-align:center;";
+                error.textContent = "Could not load visibility fields: " + (mapping._loadError || "the background request did not return usable fields.");
+                var retry = document.createElement("button");
+                retry.textContent = "Retry loading";
+                retry.style.cssText = "padding:6px 12px;margin:0 auto;border:1px solid #6b82ab;border-radius:4px;background:#26364d;color:#fff;cursor:pointer;";
+                retry.onclick = function() { loadFormAttributesForDropbox(gIdx, true); };
+                attrSection.appendChild(error);
+                attrSection.appendChild(retry);
+                return;
+            }
+            currentItems = mapping._cachedItems || [];
+            var selectedItemId = mapping._prefillItemId || "";
+            if (!selectedItemId && mapping.prefillItem) {
+                var itemMatches = currentItems.filter(function(item) { return normalizeVisibilityText(item.text) === normalizeVisibilityText(mapping.prefillItem); });
+                if (itemMatches.length === 1) selectedItemId = itemMatches[0].value;
+            }
+            if (selectedItemId && !mapping._prefillItemId) mapping._prefillItemId = selectedItemId;
+            var selectedValueCache = mapping._itemValuesById && mapping._itemValuesById[String(selectedItemId)];
+            currentItemValues = selectedValueCache && selectedValueCache.state === "ready" ? selectedValueCache.values.slice() : [];
+            if (!selectedValueCache && mapping._cachedItemValuesLoaded) currentItemValues = mapping._cachedItemValues || [];
+            if (!currentItems.length) {
+                attrSection.appendChild(attrPlaceholder);
+                return;
+            }
+            var info = document.createElement("div");
+            info.style.cssText = "padding:6px 8px;margin-bottom:4px;border:1px solid #333;border-radius:4px;background:#1e1e2e;";
+            var targetLine = document.createElement("div");
+            targetLine.style.cssText = "font-size:10px;color:#8a8aaa;margin-bottom:2px;";
+            targetLine.textContent = "Target: " + target.segment + " - " + target.studyEvent + " - " + target.form;
+            var sourceLine = document.createElement("div");
+            sourceLine.style.cssText = "font-size:10px;color:#9a9aba;";
+            sourceLine.textContent = "Source: " + mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
+            info.appendChild(targetLine);
+            info.appendChild(sourceLine);
+            attrSection.appendChild(info);
+            attrSection.appendChild(itemLbl);
+            renderItemDropdown(currentItems, mapping.prefillItem || null, selectedItemId);
+            attrSection.appendChild(itemSelect);
+            attrSection.appendChild(itemValLbl);
+            renderItemValueDropdown(mapping.prefillItemValue || null);
+            itemValSelect.disabled = !!(selectedValueCache && selectedValueCache.state === "loading");
+            attrSection.appendChild(itemValSelect);
+            if (selectedValueCache && selectedValueCache.state === "loading") {
+                var valueLoading = document.createElement("div");
+                valueLoading.style.cssText = "font-size:11px;color:#9bbbd8;padding:4px 0;";
+                valueLoading.textContent = "Loading values for " + (mapping.prefillItem || "the selected item") + "…";
+                attrSection.appendChild(valueLoading);
+            } else if (selectedValueCache && selectedValueCache.state === "error") {
+                var valueError = document.createElement("div");
+                valueError.style.cssText = "font-size:11px;color:#ffb4a8;padding:4px 0;";
+                valueError.textContent = (selectedValueCache.error || "Values did not load.") + " Your selected item is saved; retry without losing it.";
+                var valueRetry = document.createElement("button");
+                valueRetry.textContent = "Retry item values";
+                valueRetry.style.cssText = "padding:5px 10px;border:1px solid #6b82ab;border-radius:4px;background:#26364d;color:#fff;cursor:pointer;align-self:flex-start;";
+                valueRetry.onclick = function() { svcLoadMappingItemValues(gIdx, mapping, selectedItemId, mapping.prefillItem, true); };
+                attrSection.appendChild(valueError);
+                attrSection.appendChild(valueRetry);
+            }
+            attrSection.appendChild(reasonLbl);
+            reasonInput.value = mapping.prefillReason || "Add visibility condition";
+            attrSection.appendChild(reasonInput);
+        }
+
+        function loadFormAttributesForDropbox(gIdx, forceRefresh) {
+            var mapping = dropboxMappings[String(gIdx)];
+            if (!mapping) return Promise.resolve();
+            if (!forceRefresh && mapping._loadState === "ready" && mapping._cachedItems && mapping._cachedItems.length) {
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                svcPrefetchMappingItemValues(gIdx, mapping);
+                var readyItemId = String(mapping._prefillItemId || "");
+                var readyValueState = readyItemId && mapping._itemValuesById && mapping._itemValuesById[readyItemId];
+                if (readyItemId && (!readyValueState || readyValueState.state === "error")) {
+                    svcLoadMappingItemValues(gIdx, mapping, readyItemId, mapping.prefillItem || "", false);
+                }
+                return Promise.resolve(true);
+            }
+            if (mapping._loadPromise && !forceRefresh) {
+                if (selectedDropboxIdx === gIdx) svcPromoteBgQueueTask(mapping._loadPromise, 60);
+                if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+                return mapping._loadPromise;
+            }
+            mapping._loadState = "queued";
+            mapping._loadError = null;
+            var loadSessionId = SVC_SESSION_ID;
+            var task = svcRunOnBgQueue(function(worker) {
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                return Promise.resolve(loadFormAttributesForDropboxQueued(worker, gIdx, forceRefresh)).then(async function(result) {
+                    if (result || SVC_CANCELLED || loadSessionId !== SVC_SESSION_ID || dropboxMappings[String(gIdx)] !== mapping || !mapping._loadError || /target activity-plan row/i.test(mapping._loadError)) return result;
+                    log("SVC: worker " + worker.id + " retrying transient mapping load idx=" + gIdx + " reason=" + mapping._loadError);
+                    mapping._loadError = "Temporary load issue; retrying once…";
+                    await svcCloseBgModal(worker);
+                    return await loadFormAttributesForDropboxQueued(worker, gIdx, true);
+                });
+            }, selectedDropboxIdx === gIdx ? 50 : 1);
+            mapping._loadPromise = task;
+            renderPrimaryPanel();
+            if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
+            return task.then(function(result) {
+                if (dropboxMappings[String(gIdx)] === mapping) {
+                    mapping._loadState = result ? "ready" : "error";
+                    if (!result && !mapping._loadError) mapping._loadError = "request returned no Item fields.";
+                }
+                if (!result && selectedDropboxIdx === gIdx && dropboxMappings[String(gIdx)] === mapping) {
+                    renderSelectedDropboxConfig(gIdx);
+                }
+                return result;
+            }).catch(function(err) {
+                if (dropboxMappings[String(gIdx)] === mapping) {
+                    mapping._loadState = "error";
+                    mapping._loadError = String(err && err.message || err || "unexpected background error");
+                }
+                log("SVC: queued visibility load failed idx=" + gIdx + " - " + String(err));
+                return false;
+            }).then(function(result) {
+                if (dropboxMappings[String(gIdx)] === mapping) mapping._loadPromise = null;
+                renderPrimaryPanel();
+                if (selectedDropboxIdx === gIdx) {
+                    renderSelectedDropboxConfig(gIdx);
+                    var itemId = String(mapping._prefillItemId || "");
+                    var valueState = itemId && mapping._itemValuesById && mapping._itemValuesById[itemId];
+                    if (result && itemId && (!valueState || valueState.state === "error")) {
+                        // Queue the dependent request only after the item-list task leaves the
+                        // single-modal queue. This also covers returning to a form mid-load.
+                        svcLoadMappingItemValues(gIdx, mapping, itemId, mapping.prefillItem || "", false);
+                    }
+                }
+                if (result && dropboxMappings[String(gIdx)] === mapping) svcPrefetchMappingItemValues(gIdx, mapping);
+                return result;
+            });
+        }
+
+        async function loadFormAttributesForDropboxQueued(worker, gIdx, forceRefresh) {
+            var activeMapping = dropboxMappings[String(gIdx)];
+            if (activeMapping) activeMapping._loadState = "loading";
+            renderPrimaryPanel();
+            if (selectedDropboxIdx === gIdx) renderSelectedDropboxConfig(gIdx);
             var loadSeq = svcAttrLoadSeq + 1;
             svcAttrLoadSeq = loadSeq;
             var mapping = dropboxMappings[String(gIdx)];
@@ -2657,6 +3116,7 @@
             // Source = the form that was dragged into the dropbox (mapping)
             var targetItem = saItems[gIdx];
             if (!targetItem) {
+                mapping._loadError = "target activity-plan row was not found.";
                 log("SVC: target saItem not found for gIdx=" + gIdx);
                 renderConfigPanel();
                 return;
@@ -2665,8 +3125,9 @@
             if (forceRefresh) {
                 delete mapping._cachedItems;
                 delete mapping._cachedItemValues;
-                currentItems = [];
-                currentItemValues = [];
+                delete mapping._cachedItemValuesLoaded;
+                mapping._itemValuesById = {};
+                mapping._itemValuesPrefetchStarted = false;
             }
 
             var prefill = mapping.prefillItem || null;
@@ -2678,65 +3139,14 @@
 
             // Determine if this mapping already has cached items from a previous load
             var hasCachedItems = !!(mapping._cachedItems && mapping._cachedItems.length > 0);
-            var hasCachedItemValues = !!(mapping._cachedItemValues && mapping._cachedItemValues.length > 0);
 
             if (hasCachedItems) {
                 // Restore from per-mapping cache — no bg iframe needed
-                currentItems = mapping._cachedItems;
-                currentItemValues = hasCachedItemValues ? mapping._cachedItemValues : [];
-                log("SVC: restored cached items for idx=" + gIdx + " (" + currentItems.length + " items, " + currentItemValues.length + " values)");
+                log("SVC: restored cached items for idx=" + gIdx + " (" + mapping._cachedItems.length + " items)");
             } else {
-                // Full load via bg iframe
-                attrSection.innerHTML = "";
-                var loadingWrap = document.createElement("div");
-                loadingWrap.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:10px;color:#d8ecff;font-size:12px;text-align:center;padding:14px;border:1px solid #2f4f73;border-radius:6px;background:#151f2b;";
-                var spinner = document.createElement("div");
-                spinner.style.cssText = "width:24px;height:24px;border:3px solid #2f4f73;border-top-color:#7cc7ff;border-radius:50%;box-sizing:border-box;";
-                var loadingMsg = document.createElement("div");
-                loadingMsg.style.cssText = "font-weight:600;line-height:1.35;max-width:100%;word-break:break-word;";
-                var loadingDetail = document.createElement("div");
-                loadingDetail.style.cssText = "color:#9bbbd8;font-size:11px;line-height:1.3;";
-                var loadingStartedAt = Date.now();
-                var loadingFrame = 0;
-                var loadingBaseText = "Loading visibility for " + targetItem.form + " (source: " + mapping.form + ")";
-                function updateVisibilityLoadingAnimation() {
-                    loadingFrame = loadingFrame + 1;
-                    spinner.style.transform = "rotate(" + String(loadingFrame * 30) + "deg)";
-                    var dots = new Array((loadingFrame % 4) + 1).join(".");
-                    var elapsed = Math.max(1, Math.floor((Date.now() - loadingStartedAt) / 1000));
-                    loadingMsg.textContent = loadingBaseText + dots;
-                    loadingDetail.textContent = "Still working - " + String(elapsed) + "s elapsed. Use Refresh if this appears stuck.";
-                }
-                updateVisibilityLoadingAnimation();
-                var loadingAnimTimer = setInterval(function() {
-                    if (!loadingWrap.isConnected || loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) {
-                        clearInterval(loadingAnimTimer);
-                        return;
-                    }
-                    updateVisibilityLoadingAnimation();
-                }, 350);
-                var refreshLoadBtn = document.createElement("button");
-                refreshLoadBtn.textContent = "Refresh";
-                refreshLoadBtn.title = "Retry loading visibility for this mapped form";
-                refreshLoadBtn.style.cssText = "padding:6px 12px;border-radius:4px;border:1px solid #4a6fa5;background:#26364d;color:#d8ecff;font-size:11px;font-weight:600;cursor:pointer;";
-                refreshLoadBtn.addEventListener("mouseenter", function() { this.style.background = "#314b70"; });
-                refreshLoadBtn.addEventListener("mouseleave", function() { this.style.background = "#26364d"; });
-                refreshLoadBtn.addEventListener("click", function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (!dropboxMappings[String(gIdx)]) return;
-                    selectedDropboxIdx = gIdx;
-                    log("SVC: refresh requested for visibility load idx=" + gIdx);
-                    loadFormAttributesForDropbox(gIdx, true);
-                });
-                loadingWrap.appendChild(spinner);
-                loadingWrap.appendChild(loadingMsg);
-                loadingWrap.appendChild(loadingDetail);
-                loadingWrap.appendChild(refreshLoadBtn);
-                attrSection.appendChild(loadingWrap);
-
+                // Background work never writes into the single shared config panel.
                 // Cache key combines target + source since items depend on which source SA is selected
-                var cacheKey = targetItem.form + "||" + mapping.form;
+                var cacheKey = JSON.stringify([targetItem.segment, targetItem.studyEvent, targetItem.form, targetItem.saRowIndex, mapping.segment, mapping.studyEvent, mapping.form, mapping.sourceIdx].map(function(v) { return normalizeVisibilityText(String(v == null ? "" : v)); }));
                 if (forceRefresh) {
                     delete SVC_ITEM_CACHE[cacheKey];
                 }
@@ -2748,65 +3158,54 @@
                     log("SVC: using global cached items for " + cacheKey + " (" + items.length + " items)");
                 } else {
                     // Use bg iframe - open visibility modal for the TARGET row
-                    await svcCloseBgModal();
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    await sleep(300);
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    var opened = await svcOpenVisibilityModalInBg(targetItem.segment, targetItem.studyEvent, targetItem.form);
-                    if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                    if (opened) {
-                        // Fill modal dropdowns with the SOURCE form's info
-                        var saOk = await svcSelectActivityAndSA(mapping.studyEvent, mapping.form);
-                        if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                        if (saOk) {
-                            items = svcCollectItems();
-                            SVC_ITEM_CACHE[cacheKey] = items;
-                            log("SVC: collected " + items.length + " items for " + cacheKey);
-                        }
+                    if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                    var contextReady = await svcEnsureBgMappingContext(worker, gIdx, mapping);
+                    if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                    if (!contextReady) {
+                        mapping._loadError = "could not open the visibility modal or match its scheduled activity.";
+                        return false;
+                    }
+                    if (contextReady) {
+                        items = svcCollectItems(worker);
+                        SVC_ITEM_CACHE[cacheKey] = items;
+                        log("SVC: collected " + items.length + " items for " + cacheKey);
                     }
                 }
 
-                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                currentItems = items;
-                currentItemValues = [];
+                if (dropboxMappings[String(gIdx)] !== mapping) return false;
+                var jobItems = items;
+                if (!jobItems.length) {
+                    mapping._loadError = "the visibility modal returned no Item fields.";
+                    log("SVC: no visibility items loaded for idx=" + gIdx);
+                    return false;
+                }
                 // Store on the mapping so switching back won't need bg iframe again
-                mapping._cachedItems = items.slice();
+                mapping._cachedItems = jobItems.slice();
             }
 
-            // Render attribute controls
-            attrSection.innerHTML = "";
-
-            // Show target and source info above Item label
-            var segStudyInfo = document.createElement("div");
-            segStudyInfo.style.cssText = "padding:6px 8px;margin-bottom:4px;border:1px solid #333;border-radius:4px;background:#1e1e2e;";
-            var targetInfoLine = document.createElement("div");
-            targetInfoLine.style.cssText = "font-size:10px;color:#8a8aaa;margin-bottom:2px;";
-            targetInfoLine.textContent = "Target: " + targetItem.segment + " - " + targetItem.studyEvent + " - " + targetItem.form;
-            var sourceInfoLine = document.createElement("div");
-            sourceInfoLine.style.cssText = "font-size:10px;color:#9a9aba;";
-            sourceInfoLine.textContent = "Source: " + mapping.segment + " - " + mapping.studyEvent + " - " + mapping.form;
-            segStudyInfo.appendChild(targetInfoLine);
-            segStudyInfo.appendChild(sourceInfoLine);
-            attrSection.appendChild(segStudyInfo);
-
-            attrSection.appendChild(itemLbl);
-            renderItemDropdown(currentItems, prefill);
-            attrSection.appendChild(itemSelect);
-            attrSection.appendChild(itemValLbl);
-            renderItemValueDropdown(prefillVal);
-            attrSection.appendChild(itemValSelect);
-            attrSection.appendChild(reasonLbl);
-            reasonInput.value = prefillReason;
-            attrSection.appendChild(reasonInput);
-
-            // If prefill item is set but we did a full bg iframe load (no cached values yet), trigger item value loading
-            if (!hasCachedItems && prefill && itemSelect.selectedIndex > 0) {
-                currentItemValues = await svcSelectItemAndCollectValues(prefill);
-                if (loadSeq !== svcAttrLoadSeq || selectedDropboxIdx !== gIdx) return;
-                // Cache the loaded item values on the mapping
-                mapping._cachedItemValues = currentItemValues.slice();
-                renderItemValueDropdown(prefillVal);
+            // Single-item selection is safe even if this mapping is no longer active.
+            var jobItems = mapping._cachedItems || [];
+            if (!jobItems.length) {
+                mapping._loadError = "the visibility modal returned no Item fields.";
+                return false;
             }
+            if (!prefill && jobItems.length === 1) {
+                prefill = jobItems[0].text;
+                mapping.prefillItem = prefill;
+                mapping._prefillItemId = jobItems[0].value;
+            } else if (!mapping._prefillItemId && prefill) {
+                var matchingItems = jobItems.filter(function(item) { return normalizeVisibilityText(item.text) === normalizeVisibilityText(prefill); });
+                if (matchingItems.length === 1) mapping._prefillItemId = matchingItems[0].value;
+            }
+            if (selectedDropboxIdx !== gIdx) return true;
+            // Render attribute controls for the current selection only.
+            renderSelectedDropboxConfig(gIdx);
+            var selectedItemId = String(mapping._prefillItemId || itemSelect.value || "");
+            var selectedValueCache = mapping._itemValuesById && mapping._itemValuesById[selectedItemId];
+            // Dependent value loading is started by loadFormAttributesForDropbox after
+            // this queue task completes. Never run it inside this queue task: it uses the
+            // same serialized modal queue and would otherwise deadlock or race the modal.
+            return true;
         }
 
         function renderConfigPanel() {
@@ -3077,10 +3476,12 @@
                 refConfigs[re.item.form] = {
                     attachedForm: m.form,
                     prefillItem: m.prefillItem,
+                    _prefillItemId: m._prefillItemId || "",
                     prefillItemValue: m.prefillItemValue,
                     prefillReason: m.prefillReason,
                     _cachedItems: m._cachedItems ? m._cachedItems.slice() : null,
-                    _cachedItemValues: m._cachedItemValues ? m._cachedItemValues.slice() : null
+                    _cachedItemValues: m._cachedItemValues ? m._cachedItemValues.slice() : null,
+                    _itemValuesById: JSON.parse(JSON.stringify(m._itemValuesById || {}))
                 };
             }
 
@@ -3281,10 +3682,12 @@
                         form: w.config.attachedForm,
                         sourceIdx: sourceIdx,
                         prefillItem: w.config.prefillItem,
+                        _prefillItemId: w.config._prefillItemId || "",
                         prefillItemValue: w.config.prefillItemValue,
                         prefillReason: w.config.prefillReason,
                         _cachedItems: w.config._cachedItems ? w.config._cachedItems.slice() : null,
-                        _cachedItemValues: w.config._cachedItemValues ? w.config._cachedItemValues.slice() : null
+                        _cachedItemValues: w.config._cachedItemValues ? w.config._cachedItemValues.slice() : null,
+                        _itemValuesById: JSON.parse(JSON.stringify(w.config._itemValuesById || {}))
                     };
 
                     w.status = "populated";
@@ -3327,14 +3730,12 @@
             getItemForIdx: function(gIdx) {
                 var m = dropboxMappings[String(gIdx)];
                 if (!m) return null;
-                if (m.prefillItem) return m.prefillItem;
-                return itemSelect.options[itemSelect.selectedIndex] ? itemSelect.options[itemSelect.selectedIndex].text : null;
+                return m.prefillItem || null;
             },
             getItemValueForIdx: function(gIdx) {
                 var m = dropboxMappings[String(gIdx)];
                 if (!m) return null;
-                if (m.prefillItemValue) return m.prefillItemValue;
-                return itemValSelect.options[itemValSelect.selectedIndex] ? itemValSelect.options[itemValSelect.selectedIndex].text : null;
+                return m.prefillItemValue || null;
             }
         };
     }
@@ -3709,6 +4110,7 @@
     // Main entry point
     async function runSetVisibilityCondition() {
         SVC_CANCELLED = false;
+        SVC_SESSION_ID++;
         SVC_ITEM_CACHE = {};
         log("SVC: runSetVisibilityCondition started");
 
@@ -3730,7 +4132,15 @@
 
         // Open background iframe
         svcOpenBgIframe();
-        var bgReady = await svcWaitForBgIframeReady();
+        var bgWorkers = SVC_BG_WORKERS.slice();
+        var workerReadiness = await Promise.all(bgWorkers.map(function(worker) { return svcWaitForBgIframeReady(worker); }));
+        for (var bwi = 0; bwi < bgWorkers.length; bwi++) {
+            if (!workerReadiness[bwi]) {
+                try { if (bgWorkers[bwi].iframe.parentNode) bgWorkers[bwi].iframe.parentNode.removeChild(bgWorkers[bwi].iframe); } catch (e) {}
+                SVC_BG_WORKERS = SVC_BG_WORKERS.filter(function(worker) { return worker !== bgWorkers[bwi]; });
+            }
+        }
+        var bgReady = SVC_BG_WORKERS.some(function(worker) { return worker.ready; });
         if (!bgReady) {
             collecting.close();
             createPopup({
@@ -3741,6 +4151,8 @@
             });
             return;
         }
+        svcPumpBgQueue();
+        log("SVC: background worker pool ready count=" + SVC_BG_WORKERS.length);
 
         collecting.close();
 
@@ -7005,10 +7417,8 @@
 
             // Read status cell innerHTML once, reuse for archive + visibility checks
             var statusHtml = (cellCount > statusCellIndex) ? cells[statusCellIndex].innerHTML : "";
-            if (statusHtml.indexOf("fa-archive") !== -1) {
-                skippedArchived++;
-                continue;
-            }
+            var isArchived = statusHtml.indexOf("fa-archive") !== -1;
+            if (isArchived) skippedArchived++;
 
             // Inline timepoint/example-time extraction and parsing
             var timepointRaw = "";
@@ -7070,7 +7480,9 @@
                 visibilityAlreadySet: visibilityAlreadySet,
                 autoPopulated: true,
                 editHref: editLinkMap[i] || "",
-                saRowIndex: i
+                saRowIndex: i,
+                archived: isArchived,
+                scheduledActivityId: bplGetScheduledActivityIdFromRow(rows[i], editLinkMap[i] || "")
             });
         }
         log("BPL: enhanced scan complete - " + result.saTableItems.length + " items collected, " + skippedArchived + " archived skipped, " + skippedDuplicate + " duplicates skipped");
@@ -7508,6 +7920,8 @@
                 if (autoData) {
                     autoData.editHref = saItem.editHref || autoData.editHref || "";
                     autoData.saRowIndex = saItem.saRowIndex;
+                    autoData.archived = !!saItem.archived;
+                    autoData.scheduledActivityId = saItem.scheduledActivityId || autoData.scheduledActivityId || "";
                     autoData.timepointRaw = saItem.timepointRaw || autoData.timepointRaw || "";
                     autoData.timepointCleaned = saItem.timepointCleaned || autoData.timepointCleaned || "";
                     autoData.timepointDisplay = saItem.timepointDisplay || autoData.timepointDisplay || "";
@@ -7576,7 +7990,8 @@
                 value: matchedFormVal || saItem.form,
                 text: matchedFormText,
                 index: newIndex,
-                autoPopulated: true
+                autoPopulated: true,
+                archived: !!saItem.archived
             });
             mergedSegmentFormMap[matchedSegVal] = existingForms;
             var tpDays = 0, tpHours = 0, tpMinutes = 0, tpSeconds = 0;
@@ -7618,6 +8033,8 @@
                 modified: false,
                 editHref: saItem.editHref || "",
                 saRowIndex: saItem.saRowIndex,
+                archived: !!saItem.archived,
+                scheduledActivityId: saItem.scheduledActivityId || "",
                 originalValues: {
                     days: tpDays,
                     hours: tpHours,
@@ -7793,7 +8210,7 @@
                         studyEvents: []
                     };
                 }
-                if (fEntry.archiveRequested) {
+                if (fEntry.archived || fd.archived || fEntry.archiveRequested) {
                     continue;
                 }
                 var isExistingForm = fEntry.autoPopulated || fd.autoPopulated;
@@ -7847,6 +8264,7 @@
                 var fEntry = fList[fi];
                 var fk = sv + "|" + fEntry.value + "|" + fEntry.index;
                 var fd = formDataStore[fk];
+                if (fEntry.archived || (fd && fd.archived)) continue;
                 if (!fd) {
                     continue;
                 }
@@ -9242,6 +9660,13 @@
                 return;
             }
             var isAutoPopulatedForm = data.autoPopulated || false;
+            if (data.archived) {
+                var archivedNotice = document.createElement("div");
+                archivedNotice.style.cssText = "padding:10px;background:#3a2817;border:1px solid #d98222;border-radius:4px;color:#ffc477;font-size:12px;line-height:1.45;";
+                archivedNotice.textContent = "Archived forms are read-only. They can be reordered or marked for deletion, but their schedule and time settings cannot be edited.";
+                timeBody.appendChild(archivedNotice);
+                return;
+            }
             var isModifiedAutoForm = isAutoPopulatedForm && data.modified;
             if (isAutoPopulatedForm) {
                 var autoBanner = document.createElement("div");
@@ -9672,6 +10097,7 @@
                         for (var ci = 0; ci < forms.length; ci++) {
                             var fk = getFormDataKey(segVal, forms[ci].value, forms[ci].index);
                             var d = formDataStore[fk] || getDefaultFormData();
+                            if (forms[ci].archived || d.archived) continue;
                             copiedAllForms.push({
                                 formValue: forms[ci].value,
                                 formText: forms[ci].text,
@@ -9688,6 +10114,7 @@
                                 preReference: d.preReference || false
                             });
                         }
+                        if (!copiedAllForms.length) { showCopyToast("No copyable forms in this segment", e); return; }
                         log("BPL: copied all " + copiedAllForms.length + " forms from segment " + segVal);
                         showCopyToast("Copied " + copiedAllForms.length + " form" + (copiedAllForms.length !== 1 ? "s" : "") + "!", e);
                     };
@@ -10090,6 +10517,8 @@
                         var fData2 = formDataStore[fKey] || getDefaultFormData();
                         var fEvents = fData2.studyEvents || [];
                         var isAutoPopulated = fEntry.autoPopulated || fData2.autoPopulated || false;
+                        var isArchivedForm = !!(fEntry.archived || fData2.archived);
+                        if (isArchivedForm && bplHideArchived) continue;
                         if (isAutoPopulated && bplHideExisting) {
                             continue;
                         }
@@ -10105,7 +10534,10 @@
                         var isModifiedAuto = isAutoPopulated && fData2.modified;
                         var rowBorderColor = "#444";
                         var rowBg = "#2a2a2a";
-                        if (isAutoPopulated) {
+                        if (isArchivedForm) {
+                            rowBorderColor = "#d98222";
+                            rowBg = "#302417";
+                        } else if (isAutoPopulated) {
                             if (isModifiedAuto) {
                                 rowBorderColor = "#2d8a2d";
                                 rowBg = "#1a2a1a";
@@ -10132,6 +10564,10 @@
                         if (fEntry.archiveRequested) {
                             rowBorderColor = "#b45cff";
                             rowBg = "#352044";
+                        }
+                        if (isArchivedForm) {
+                            rowBorderColor = fEntry.archiveRequested ? "#b45cff" : "#d98222";
+                            rowBg = fEntry.archiveRequested ? "#352044" : (isSelected ? "#4a351e" : "#302417");
                         }
                         var autoPopIndicatorStyle = "";
                         if (isAutoPopulated) {
@@ -10423,8 +10859,9 @@
                         }
                         var copyFormBtn = document.createElement("button");
                         copyFormBtn.textContent = "\u{1F4CB}";
-                        copyFormBtn.title = "Copy this form instance";
-                        copyFormBtn.style.cssText = "padding:2px 5px;border-radius:3px;border:1px solid #555;background:#333;color:#fff;font-size:10px;cursor:pointer;flex-shrink:0;";
+                        copyFormBtn.title = isArchivedForm ? "Archived forms cannot be copied" : "Copy this form instance";
+                        copyFormBtn.disabled = isArchivedForm;
+                        copyFormBtn.style.cssText = "padding:2px 5px;border-radius:3px;border:1px solid " + (isArchivedForm ? "#444" : "#555") + ";background:" + (isArchivedForm ? "#242424" : "#333") + ";color:" + (isArchivedForm ? "#666" : "#fff") + ";font-size:10px;cursor:" + (isArchivedForm ? "not-allowed" : "pointer") + ";flex-shrink:0;";
                         copyFormBtn.addEventListener("click", (function(sv, fv, ft, fk) {
                             return function(e) {
                                 e.stopPropagation();
@@ -10471,10 +10908,17 @@
                         inlineTimeWrap.style.cssText = "width:86px;min-width:86px;max-width:86px;display:block;flex:0 0 86px;";
                         var inlineTimeInput = document.createElement("input");
                         inlineTimeInput.type = "text";
+                        if (isArchivedForm) inlineTimeInput.disabled = true;
                         inlineTimeInput.placeholder = "HH:MM";
                         inlineTimeInput.setAttribute("aria-label", "Apply Time Calculation for " + fEntry.text);
                         inlineTimeInput.title = "Enter minutes or HH:MM, then press Enter or leave the field to apply.";
                         inlineTimeInput.style.cssText = "width:100%;height:24px;padding:2px 6px;border-radius:4px;border:1px solid #555;background:#191919;color:#fff;font-size:11px;box-sizing:border-box;outline:none;";
+                        if (isArchivedForm) {
+                            inlineTimeInput.style.setProperty("background", "#191919", "important");
+                            inlineTimeInput.style.setProperty("color", "#fff", "important");
+                            inlineTimeInput.style.setProperty("-webkit-text-fill-color", "#fff", "important");
+                            inlineTimeInput.style.setProperty("opacity", "1", "important");
+                        }
                         inlineTimeInput.addEventListener("click", function(e) { e.stopPropagation(); });
                         inlineTimeInput.addEventListener("mousedown", function(e) { e.stopPropagation(); });
                         var applyInlineTimeValue = (function(fk, input) {
@@ -10635,6 +11079,14 @@
             renderCenterPanel(centerSearch.value);
         });
         legendRow.appendChild(collapseAllBtn);
+
+        var bplHideArchived = true;
+        var hideArchivedBtn = document.createElement("button");
+        hideArchivedBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #d98222;background:#302417;color:#ffc477;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;";
+        function updateHideArchivedButton() { hideArchivedBtn.textContent = bplHideArchived ? "Unhide Archived" : "Hide Archived"; hideArchivedBtn.title = bplHideArchived ? "Show archived forms" : "Hide archived forms"; }
+        hideArchivedBtn.addEventListener("click", function() { bplHideArchived = !bplHideArchived; try { localStorage.setItem("bplHideArchived", bplHideArchived ? "true" : "false"); } catch (e) {} updateHideArchivedButton(); renderCenterPanel(centerSearch.value); });
+        updateHideArchivedButton();
+        legendRow.appendChild(hideArchivedBtn);
 
         var hideExistingBtn = document.createElement("button");
         hideExistingBtn.style.cssText = "padding:5px 12px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#aaa;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;";
@@ -10879,6 +11331,8 @@
                         var existingData = formDataStore[alreadyExistsKey];
                         existingData.editHref = saItem.editHref || existingData.editHref || "";
                         existingData.saRowIndex = saItem.saRowIndex;
+                        existingData.archived = !!saItem.archived;
+                        existingData.scheduledActivityId = saItem.scheduledActivityId || existingData.scheduledActivityId || "";
                         existingData.timepointRaw = saItem.timepointRaw || existingData.timepointRaw || "";
                         existingData.timepointCleaned = saItem.timepointCleaned || existingData.timepointCleaned || "";
                         existingData.timepointDisplay = saItem.timepointDisplay || existingData.timepointDisplay || "";
@@ -10929,7 +11383,8 @@
                     value: matchedFormVal || saItem.form,
                     text: resolvedFormText,
                     index: newIndex,
-                    autoPopulated: true
+                    autoPopulated: true,
+                    archived: !!saItem.archived
                 });
                 segmentFormMap[matchedSegVal] = existingForms;
 
@@ -10971,6 +11426,8 @@
                     modified: false,
                     editHref: saItem.editHref || "",
                     saRowIndex: saItem.saRowIndex,
+                    archived: !!saItem.archived,
+                    scheduledActivityId: saItem.scheduledActivityId || "",
                     originalValues: {
                         days: tpDays,
                         hours: tpHours,
@@ -11278,7 +11735,8 @@
             var archiveItems = bplCollectArchiveItems(segments, segmentFormMap, formDataStore, segmentCheckboxStates);
             var archiveReason = (archiveReasonInput.value || "").trim();
             log("BPL: confirm clicked, " + mappedItems.length + " new items to add, " + updateItems.length + " items to update, " + archiveItems.length + " existing items to archive");
-            if (archiveItems.length > 0 && !archiveReason) {
+            var hasActiveArchiveItems = archiveItems.some(function(item) { return !item.archived; });
+            if (hasActiveArchiveItems && !archiveReason) {
                 confirmErrorDiv.style.display = "block";
                 confirmErrorDiv.textContent = "Archive reason is required. Enter it in the 'Archive reason' field beside Auto Paste All before confirming.";
                 archiveReasonHint.textContent = "Enter a reason here before Confirm";
@@ -11710,6 +12168,14 @@
         return match ? match[1] : null;
     }
 
+    function bplGetScheduledActivityIdFromRow(row, editHref) {
+        var id = bplGetScheduledActivityId(editHref);
+        if (id || !row) return id;
+        var deleteLink = row.querySelector("a[onclick*='deleteScheduledActivity(']");
+        var match = deleteLink ? String(deleteLink.getAttribute("onclick") || "").match(/deleteScheduledActivity\s*\(\s*['\"]?(\d+)/) : null;
+        return match ? match[1] : null;
+    }
+
     function bplGetArchivePriority(item) {
         if (item && item.visibilityAlreadySet) return 0;
         if (item && !item.refActivity) return 1;
@@ -11740,10 +12206,10 @@
                 var key = bplGetFormDataKey(seg.value, entry.value, entry.index);
                 var data = formDataStore[key] || {};
                 if (!entry.archiveRequested || !(entry.autoPopulated || data.autoPopulated)) continue;
-                var id = bplGetScheduledActivityId(data.editHref || entry.editHref);
-                if (!id || data.archived) continue;
+                var id = data.scheduledActivityId || bplGetScheduledActivityId(data.editHref || entry.editHref);
+                if (!id) continue;
                 var originalRefActivity = data.originalValues && data.originalValues.refActivity !== undefined ? !!data.originalValues.refActivity : !!data.refActivity;
-                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:false, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, originalRefActivity:originalRefActivity, saRowIndex:data.saRowIndex });
+                result.push({ id:id, formKey:key, segment:seg.text, studyEvent:(data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text : ""), form:entry.text, label:seg.text + " - " + (data.studyEvents && data.studyEvents[0] ? data.studyEvents[0].text + " - " : "") + entry.text, archived:!!data.archived, visibilityAlreadySet:!!data.visibilityAlreadySet, refActivity:!!data.refActivity, originalRefActivity:originalRefActivity, saRowIndex:data.saRowIndex });
             }
         }
         return bplSortArchiveItems(result);
@@ -11796,7 +12262,8 @@
     }
 
     async function bplExecuteArchiveItemsNow(items, reason, keepPendingCleanup) {
-        if (!items || !items.length || !reason) return [];
+        if (!items || !items.length) return [];
+        reason = reason || "Remove already archived PLAP form";
         for (var ri = 0; ri < items.length; ri++) items[ri].archiveReason = reason;
         if (BPL_PROGRESS_POPUP_REF) { try { BPL_PROGRESS_POPUP_REF.close(); } catch (e) {} BPL_PROGRESS_POPUP_REF = null; }
         BPL_CANCELLED = false;
@@ -11870,7 +12337,7 @@
         if (BPL_POPUP_REF) { try { BPL_POPUP_REF.close(); } catch (e) {} BPL_POPUP_REF = null; }
         BPL_CANCELLED = false;
         BPL_PENDING_ARCHIVE_ITEMS = archiveItems || [];
-        BPL_PENDING_ARCHIVE_REASON = reason || "";
+        BPL_PENDING_ARCHIVE_REASON = reason || ((archiveItems || []).length ? "Remove already archived PLAP form" : "");
         BPL_ARCHIVE_DEFERRED = mappedItems.length > 0;
         if (updateItems.length > 0 && mappedItems.length > 0) startBPLUpdateThenAddProcess(updateItems, mappedItems);
         else if (updateItems.length > 0) startBPLUpdateProcess(updateItems);
@@ -17556,7 +18023,7 @@
         }
     }
 
-    async function aprClickRemovalActionForRow(row, id) {
+    async function aprClickRemovalActionForRow(row, id, archivedOnly) {
         var toggleBtn = row.querySelector("button.dropdown-toggle");
         if (toggleBtn) {
             toggleBtn.click();
@@ -17568,6 +18035,7 @@
             aprLog("clicked delete UI for id " + id);
             return { action: "delete", clicked: true };
         }
+        if (archivedOnly) return { action: "none", clicked: false };
         var archiveLink = row.querySelector("a[href*='archivescheduledactivity/" + id + "']");
         if (aprIsArchiveActionLink(archiveLink)) {
             var archiveHref = archiveLink.getAttribute("href") || "";
@@ -17781,28 +18249,27 @@
                     continue;
                 }
 
-                if (item.archived) {
-                    aprLog("skipping already archived item id " + item.id);
+                var row = aprFindRowByScheduledActivityId(item.id);
+                if (!row) {
+                    aprLog("row not found for id " + item.id + " - may already be deleted");
+                    pItem.status = item.archived ? "Skipped" : "Deleted";
+                    progressContent.updateItem(idx, item.archived ? "Skipped" : "Deleted");
+                    if (!item.archived) deletedCount++;
+                    continue;
+                }
+
+                if (item.archived && row.innerHTML.indexOf("fa-archive") === -1) {
+                    aprLog("archived-item safety check failed for id " + item.id + "; refusing deletion");
                     pItem.status = "Skipped";
                     progressContent.updateItem(idx, "Skipped");
                     continue;
                 }
-
-                var row = aprFindRowByScheduledActivityId(item.id);
-                if (!row) {
-                    aprLog("row not found for id " + item.id + " - may already be deleted");
-                    pItem.status = "Deleted";
-                    progressContent.updateItem(idx, "Deleted");
-                    deletedCount++;
-                    continue;
-                }
-
-                var actionResult = await aprClickRemovalActionForRow(row, item.id);
+                var actionResult = await aprClickRemovalActionForRow(row, item.id, !!item.archived);
                 if (!actionResult.clicked) {
                     aprLog("failed to find delete or archive action for id " + item.id);
-                    pItem.status = "Failed";
-                    progressContent.updateItem(idx, "Failed");
-                    failedCount++;
+                    pItem.status = item.archived ? "Skipped" : "Failed";
+                    progressContent.updateItem(idx, item.archived ? "Skipped" : "Failed");
+                    if (!item.archived) failedCount++;
                     continue;
                 }
 
@@ -19210,11 +19677,11 @@
         var selectedTarget = null;
 
         var container = document.createElement("div");
-        container.style.cssText = "display:flex;flex-direction:column;height:100%;min-height:500px;gap:16px;";
+        container.style.cssText = "display:flex;flex-direction:column;height:100%;min-height:0;gap:12px;box-sizing:border-box;";
 
         // Header row with search bars
         var headerRow = document.createElement("div");
-        headerRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:16px;";
+        headerRow.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;flex:0 0 auto;";
 
         var sourceSearchContainer = document.createElement("div");
         sourceSearchContainer.style.cssText = "display:flex;flex-direction:column;gap:8px;";
@@ -19246,19 +19713,62 @@
 
         // Panels row
         var panelsRow = document.createElement("div");
-        panelsRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:16px;flex:1;overflow:hidden;";
+        panelsRow.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;flex:0 0 auto;align-items:start;overflow:visible;min-width:0;";
 
         var sourcePanel = document.createElement("div");
-        sourcePanel.style.cssText = "border:2px solid #ff6b6b;border-radius:8px;background:#1a1a1a;overflow-y:auto;padding:8px;";
+        sourcePanel.style.cssText = "width:100%;height:48vh;min-height:160px;max-height:calc(100vh - 300px);resize:vertical;box-sizing:border-box;border:2px solid #ff6b6b;border-radius:8px;background:#1a1a1a;overflow:auto;padding:8px;";
         sourcePanel.id = "archiveUpdateSourcePanel";
 
         var targetPanel = document.createElement("div");
-        targetPanel.style.cssText = "border:2px solid #51cf66;border-radius:8px;background:#1a1a1a;overflow-y:auto;padding:8px;";
+        targetPanel.style.cssText = "width:100%;height:48vh;min-height:160px;max-height:calc(100vh - 300px);resize:vertical;box-sizing:border-box;border:2px solid #51cf66;border-radius:8px;background:#1a1a1a;overflow:auto;padding:8px;";
         targetPanel.id = "archiveUpdateTargetPanel";
 
         panelsRow.appendChild(sourcePanel);
         panelsRow.appendChild(targetPanel);
         container.appendChild(panelsRow);
+
+        function restoreArchiveUpdatePanelHeight(panel, storageKey) {
+            try {
+                var savedHeight = parseFloat(localStorage.getItem(storageKey));
+                if (!isFinite(savedHeight) || savedHeight < 1) return;
+                var maxHeight = Math.max(160, window.innerHeight - 300);
+                panel.style.height = Math.round(Math.max(160, Math.min(savedHeight, maxHeight))) + "px";
+            } catch (e) {}
+        }
+        restoreArchiveUpdatePanelHeight(sourcePanel, "archiveUpdateForms.sourcePanelHeight.v1");
+        restoreArchiveUpdatePanelHeight(targetPanel, "archiveUpdateForms.targetPanelHeight.v1");
+
+        var panelSizeObserver = null;
+        var panelSizeSaveTimer = null;
+        var ignorePanelSizeUntil = Date.now() + 500;
+        function saveArchiveUpdatePanelHeights() {
+            try {
+                var sourceHeight = sourcePanel.getBoundingClientRect().height;
+                var targetHeight = targetPanel.getBoundingClientRect().height;
+                if (sourceHeight >= 160) localStorage.setItem("archiveUpdateForms.sourcePanelHeight.v1", String(Math.round(sourceHeight)));
+                if (targetHeight >= 160) localStorage.setItem("archiveUpdateForms.targetPanelHeight.v1", String(Math.round(targetHeight)));
+            } catch (e) {}
+        }
+        function onArchiveUpdateViewportResize() {
+            ignorePanelSizeUntil = Date.now() + 500;
+        }
+        window.addEventListener("resize", onArchiveUpdateViewportResize);
+        window.addEventListener("mouseup", saveArchiveUpdatePanelHeights);
+        if (typeof ResizeObserver !== "undefined") {
+            panelSizeObserver = new ResizeObserver(function() {
+                if (Date.now() < ignorePanelSizeUntil) return;
+                if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
+                panelSizeSaveTimer = setTimeout(saveArchiveUpdatePanelHeights, 250);
+            });
+            panelSizeObserver.observe(sourcePanel);
+            panelSizeObserver.observe(targetPanel);
+        }
+        container.cleanup = function() {
+            if (panelSizeObserver) panelSizeObserver.disconnect();
+            if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
+            window.removeEventListener("resize", onArchiveUpdateViewportResize);
+            window.removeEventListener("mouseup", saveArchiveUpdatePanelHeights);
+        };
 
         // Error message area
         var errorDiv = document.createElement("div");
@@ -21093,11 +21603,13 @@
         ARCHIVE_UPDATE_FORMS_POPUP_REF = createPopup({
             title: "Archive/Update Forms - Select Forms",
             content: guiContent,
-            width: "900px",
-            maxWidth: "95%",
-            height: "70%",
-            maxHeight: "700px",
+            width: "100vw",
+            maxWidth: "100vw",
+            height: "100vh",
+            maxHeight: "100vh",
+            draggable: false,
             onClose: function() {
+                if (guiContent.cleanup) guiContent.cleanup();
                 ARCHIVE_UPDATE_FORMS_POPUP_REF = null;
             }
         });
@@ -21112,6 +21624,7 @@
             log("Archive/Update Forms: confirmed - source=" + selection.source + " target=" + selection.target + " archiveReason='" + selection.archiveReason + "' visibilityReason='" + selection.visibilityReason + "'");
 
             // Close selection popup (but don't cancel)
+            if (guiContent.cleanup) guiContent.cleanup();
             if (ARCHIVE_UPDATE_FORMS_POPUP_REF) {
                 // Remove the onClose handler to prevent it from running
                 var popupEl = ARCHIVE_UPDATE_FORMS_POPUP_REF.element;
@@ -22144,6 +22657,7 @@
             if (!getVisibleBarcodeModal()) return true;
             await sleep(150);
         }
+        if (observer) observer.disconnect();
         return false;
     }
 
@@ -24501,6 +25015,11 @@
         try {
             var saved = localStorage.getItem(STORAGE_PANEL_HOTKEY);
             if (saved) {
+                // F4 was an unwanted default for some users; migrate it to the intended F2 default.
+                if (saved.toUpperCase() === "F4") {
+                    localStorage.setItem(STORAGE_PANEL_HOTKEY, "F2");
+                    return "F2";
+                }
                 return saved;
             }
         } catch (err) {
@@ -25352,7 +25871,7 @@
         var sections = [];
         sections.push({ id: "start", title: "Getting Started", kind: "cards", items: [
             { label: "Menus", desc: "Features are grouped into dropdown menus on the panel. Click a menu to open it, then click a button to run that feature. The menu closes by itself; Esc or a click elsewhere also closes it. If a menu has nothing to show, it says why when opened." },
-            { label: "Show or hide the panel", desc: "Press " + hotkey + " or click the round lightning button to hide or show the panel. The \u2715 in the panel header also hides it. The lightning button always sits just outside the panel." },
+            { label: "Show or hide the panel", desc: "Press " + hotkey + " to hide or show the panel. Configure the shortcut in Settings." },
             { label: "Dock and resize", desc: "The \u2194 / \u2195 button in the panel header switches between the right-side dock and the bottom dock. Drag the panel's inner edge to resize it; the size is remembered." },
             { label: "Customize (\u2699 Settings)", desc: "Reorder the menus or hide ones you don't use, show, hide, or reorder buttons inside each menu, choose menu and button colors (or use Randomize for instant pastels), save loadouts, switch theme, and change the panel hotkey. Changes apply after Save & Refresh." },
             { label: "Status and logs", desc: "The status line shows what the automator is doing right now, and the log below it records each step. Use Hide Logs and Clear Logs in the Misc. menu to manage it." },
@@ -28301,7 +28820,8 @@
         if (!item.itemLink) return item;
         try {
             var doc = await fpFetchDocument(item.itemLink);
-            item.prompt = fpFindProperty(doc, "Prompt") || fpFindProperty(doc, "Question") || fpFindProperty(doc, "Text") || fpFindProperty(doc, "Description") || "";
+            item.prompt = fpFindProperty(doc, "Prompt") || "";
+            item.name = fpFindProperty(doc, "Name") || item.name || "";
             item.dataType = fpFindProperty(doc, "Data Type") || fallbackDataType || item.dataType || "";
             item.helpTextHtml = fpFindPropertyHtml(doc, "Help Text");
             item.helpText = fpCleanText(item.helpTextHtml);
@@ -28796,7 +29316,7 @@
                 var tdText = document.createElement("td");
                 tdText.className = "itemText";
                 tdText.style.color = "inherit";
-                tdText.textContent = item.prompt || item.name;
+                tdText.textContent = item.prompt || item.name || "";
                 if (item.helpTextHtml || item.helpText) {
                     var help = document.createElement("div");
                     help.className = "itemHelpText";
@@ -29102,21 +29622,20 @@
     //==========================
 
     // Methods Library Configuration
-    var METHODS_INDEX_URL = "https://raw.githubusercontent.com/vctruong100/Automator/refs/heads/main/index.json";
-    var METHODS_CACHE_KEY = "activityPlanState.methodsLibrary.cache";
-    var METHODS_CACHE_EXPIRY_MS = 1000 * 60 * 60; // 1 hour
-    var METHODS_PRELOAD_BODIES = false;
+    var METHODS_API_REQUEST_TYPE = "ACT_METHOD_LIBRARY_FETCH";
+    var METHODS_CACHE_KEY = "activityPlanState.methodsLibrary.cache.v2";
+    var METHODS_CACHE_EXPIRY_MS = 1000 * 60 * 60; // One hour; refresh still checks the server first.
     var METHODS_BODY_CACHE = {};
     var METHODS_LIBRARY_MODAL_REF = null;
     var STORAGE_METHODS_FAVORITES = "activityPlanState.methodsLibrary.favorites";
     var STORAGE_METHODS_RECENTS = "activityPlanState.methodsLibrary.recents";
-    var STORAGE_METHODS_PINS = "activityPlanState.methodsLibrary.pins";
     var STORAGE_METHODS_LAST_SEARCH = "activityPlanState.methodsLibrary.lastSearch";
     var STORAGE_METHODS_LAST_METHOD = "activityPlanState.methodsLibrary.lastMethod";
     var STORAGE_METHODS_SORT_ORDER = "activityPlanState.methodsLibrary.sortOrder";
+    var STORAGE_METHODS_CATEGORY = "activityPlanState.methodsLibrary.category";
     var STORAGE_METHODS_MODAL_FULLSCREEN = "activityPlanState.methodsLibrary.modalFullscreen";
     var MAX_RECENTS = 10;
-    var MAX_PINS = 5;
+    var METHODS_MEMORY_FAVORITES = null;
     var BOOTSTRAP_FOCUS_NS = "focusin.bs.modal";
 
     function disableBootstrapModalFocusTrap() {
@@ -29225,137 +29744,88 @@
         }
     }
 
+    function requestMethodsFromExtensionWorker() {
+        return new Promise(function(resolve, reject) {
+            if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+                reject(new Error("The extension background worker is unavailable."));
+                return;
+            }
+            chrome.runtime.sendMessage({ type: METHODS_API_REQUEST_TYPE }, function(response) {
+                var runtimeError = chrome.runtime.lastError;
+                if (runtimeError) { reject(new Error(runtimeError.message || "The extension request failed.")); return; }
+                if (!response || response.success !== true || !Array.isArray(response.items)) {
+                    reject(new Error(response && response.error ? response.error : "The Method Library service returned an invalid response."));
+                    return;
+                }
+                resolve(response.items);
+            });
+        });
+    }
+
     async function fetchMethodsIndex(forceRefresh) {
-        if (!forceRefresh) {
-            var cached = getMethodsCache();
-            if (cached) {
-                log("Methods Library: using cached index (" + cached.length + " methods)");
-                return { success: true, data: cached };
-            }
-        }
-        log("Methods Library: fetching index from " + METHODS_INDEX_URL);
+        var cached = getMethodsCache();
         try {
-            var response = await fetch(METHODS_INDEX_URL, { cache: forceRefresh ? "no-store" : "default" });
-            if (!response.ok) {
-                return { success: false, error: "HTTP " + response.status + ": " + response.statusText };
-            }
-            var data = await response.json();
-            if (!Array.isArray(data)) {
-                return { success: false, error: "Invalid index format (expected array)" };
+            var received = await requestMethodsFromExtensionWorker();
+            if (received.length > 10000) throw new Error("The Method Library response exceeded the extension safety limit.");
+            var data = [];
+            for (var i = 0; i < received.length; i++) {
+                var item = received[i];
+                if (!item || typeof item.name !== "string" || item.name.length > 200 ||
+                    (item.category !== "method" && item.category !== "edit_check") ||
+                    typeof item.expression !== "string" || item.expression.length > 500000) {
+                    throw new Error("The Method Library response contains an invalid entry.");
+                }
+                data.push({ name: item.name, category: item.category, expression: item.expression });
             }
             setMethodsCache(data);
-            log("Methods Library: fetched " + data.length + " methods");
+            log("Methods Library: received " + data.length + " read-only entries from ACT");
             return { success: true, data: data };
         } catch (e) {
-            log("Methods Library: fetch error - " + String(e));
-            return { success: false, error: String(e) };
+            var message = String(e && e.message ? e.message : e);
+            log("Methods Library: ACT server request failed - " + message);
+            if (cached) return { success: true, data: cached, stale: true, error: message };
+            return { success: false, error: "ACT Method Library is unavailable. " + message };
         }
     }
 
-    async function fetchMethodBody(url) {
-        if (METHODS_BODY_CACHE[url]) {
-            return { success: true, body: METHODS_BODY_CACHE[url] };
-        }
-
-        // Convert relative or GitHub blob URLs to raw.githubusercontent.com format
-        var fetchUrl = url;
-        if (url.indexOf("github.com") !== -1 && url.indexOf("raw.githubusercontent.com") === -1) {
-            // Convert github.com/user/repo/blob/branch/path to raw.githubusercontent.com/user/repo/branch/path
-            fetchUrl = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/");
-        } else if (url.indexOf("http") !== 0) {
-            // Handle relative paths - prepend the base GitHub raw URL
-            var baseUrl = "https://raw.githubusercontent.com/vctruong100/Automator/main/";
-            fetchUrl = baseUrl + url.replace(/^\/+/, "");
-        }
-
-        try {
-            var response = await fetch(fetchUrl);
-            if (!response.ok) {
-                return { success: false, error: "HTTP " + response.status + " for " + fetchUrl };
-            }
-            var text = await response.text();
-            METHODS_BODY_CACHE[url] = text;
-            return { success: true, body: text };
-        } catch (e) {
-            return { success: false, error: String(e) };
-        }
+    function methodKey(method) {
+        return String(method.category || "") + "\u0000" + String(method.name || "");
     }
 
-    function scoreMethod(method, query, searchBody, bodyText) {
+    function scoreMethod(method, query, searchBody) {
         if (!query || query.trim().length === 0) return 100;
         var q = query.toLowerCase().trim();
+        var name = (method.name || "").toLowerCase();
         var score = 0;
-        var title = (method.title || "").toLowerCase();
-        var id = (method.id || "").toLowerCase();
-        var tags = (method.tags || []).map(function(t) { return t.toLowerCase(); });
-
-        if (title.indexOf(q) !== -1) {
+        if (name.indexOf(q) !== -1) {
             score += 50;
-            if (title.indexOf(q) === 0) score += 20;
+            if (name.indexOf(q) === 0) score += 20;
         }
-        if (id.indexOf(q) !== -1) {
-            score += 30;
-            if (id === q) score += 20;
-        }
-        for (var i = 0; i < tags.length; i++) {
-            if (tags[i].indexOf(q) !== -1) {
-                score += 20;
-                break;
-            }
-        }
-        if (searchBody && bodyText) {
-            var body = bodyText.toLowerCase();
-            if (body.indexOf(q) !== -1) {
-                score += 10;
-            }
-        }
+        if (searchBody && (method.expression || "").toLowerCase().indexOf(q) !== -1) score += 10;
         return score;
     }
 
-    function filterAndSortMethods(methods, query, searchBody, bodiesMap, sortOrder, favorites, pins) {
+    function filterAndSortMethods(methods, query, searchBody, sortOrder, favorites) {
         var results = [];
         for (var i = 0; i < methods.length; i++) {
-            var m = methods[i];
-            var bodyText = bodiesMap[m.url] || "";
-            var score = scoreMethod(m, query, searchBody, bodyText);
+            var method = methods[i];
+            var score = scoreMethod(method, query, searchBody);
             if (query && query.trim().length > 0 && score === 0) continue;
-            results.push({ method: m, score: score });
+            results.push({ method: method, score: score, index: i });
         }
-
         results.sort(function(a, b) {
-            // Pinned items always come first
-            var isPinA = pins.indexOf(a.method.id) !== -1;
-            var isPinB = pins.indexOf(b.method.id) !== -1;
-            if (isPinA && !isPinB) return -1;
-            if (!isPinA && isPinB) return 1;
-
-            // Then sort by selected order
+            var favoriteA = favorites.indexOf(methodKey(a.method)) !== -1;
+            var favoriteB = favorites.indexOf(methodKey(b.method)) !== -1;
+            if (favoriteA !== favoriteB) return favoriteA ? -1 : 1;
+            if (sortOrder === "updated") return a.index - b.index;
             if (sortOrder === "title") {
-                var titleA = (a.method.title || "").toLowerCase();
-                var titleB = (b.method.title || "").toLowerCase();
-                if (titleA < titleB) return -1;
-                if (titleA > titleB) return 1;
-                return 0;
-            } else if (sortOrder === "updated") {
-                var dateA = a.method.updated || "";
-                var dateB = b.method.updated || "";
-                if (dateB < dateA) return -1;
-                if (dateB > dateA) return 1;
-                return 0;
-            } else {
-                // Relevance (default)
-                if (b.score !== a.score) return b.score - a.score;
-                var titleA = (a.method.title || "").toLowerCase();
-                var titleB = (b.method.title || "").toLowerCase();
-                if (titleA < titleB) return -1;
-                if (titleA > titleB) return 1;
-                return 0;
+                return (a.method.name || "").localeCompare(b.method.name || "", undefined, { sensitivity: "base" });
             }
+            if (b.score !== a.score) return b.score - a.score;
+            return (a.method.name || "").localeCompare(b.method.name || "", undefined, { sensitivity: "base" });
         });
-        return results.map(function(r) { return r.method; });
+        return results.map(function(entry) { return entry.method; });
     }
-
-    var STORAGE_METHODS_MODAL_SIZE = "activityPlanState.methodsLibrary.modalSize";
 
     function getSavedModalSize() {
         try {
@@ -29499,6 +29969,74 @@
         headerBtns.style.alignItems = "center";
         headerBtns.style.gap = "4px";
 
+        var modalIsFullscreen = false;
+        var modalNormalStyles = null;
+        var fullscreenBtn = document.createElement("button");
+        fullscreenBtn.type = "button";
+        fullscreenBtn.textContent = "\u26F6";
+        fullscreenBtn.title = "Toggle Full Screen";
+        fullscreenBtn.setAttribute("aria-label", "Toggle Method Library full screen");
+        fullscreenBtn.style.background = "transparent";
+        fullscreenBtn.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
+        fullscreenBtn.style.border = "none";
+        fullscreenBtn.style.fontSize = "17px";
+        fullscreenBtn.style.cursor = "pointer";
+        fullscreenBtn.style.padding = "4px 8px";
+        fullscreenBtn.style.borderRadius = "4px";
+        fullscreenBtn.onmouseenter = function() { fullscreenBtn.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#333"; };
+        fullscreenBtn.onmouseleave = function() { fullscreenBtn.style.background = "transparent"; };
+
+        function setModalFullscreen(enabled) {
+            enabled = Boolean(enabled);
+            if (enabled === modalIsFullscreen) return;
+            if (enabled) {
+                modalNormalStyles = {
+                    top: modal.style.top, left: modal.style.left, transform: modal.style.transform,
+                    width: modal.style.width, height: modal.style.height, maxWidth: modal.style.maxWidth,
+                    maxHeight: modal.style.maxHeight, minWidth: modal.style.minWidth, minHeight: modal.style.minHeight,
+                    borderRadius: modal.style.borderRadius, resize: modal.style.resize
+                };
+                modalIsFullscreen = true;
+                applyModalFullscreenSize();
+            } else {
+                modalIsFullscreen = false;
+                if (modalNormalStyles) {
+                    Object.keys(modalNormalStyles).forEach(function(key) { modal.style[key] = modalNormalStyles[key]; });
+                }
+                modalNormalStyles = null;
+            }
+            try { localStorage.setItem(STORAGE_METHODS_MODAL_FULLSCREEN, String(modalIsFullscreen)); } catch (e) {}
+            fullscreenBtn.textContent = modalIsFullscreen ? "\u2716\u26F6" : "\u26F6";
+            fullscreenBtn.title = modalIsFullscreen ? "Exit Full Screen" : "Toggle Full Screen";
+            fullscreenBtn.setAttribute("aria-label", modalIsFullscreen ? "Exit Method Library full screen" : "Toggle Method Library full screen");
+        }
+
+        function applyModalFullscreenSize() {
+            if (!modalIsFullscreen) return;
+            modal.style.top = "0";
+            modal.style.left = "0";
+            modal.style.transform = "none";
+            modal.style.width = Math.max(1, window.innerWidth) + "px";
+            modal.style.height = Math.max(1, window.innerHeight) + "px";
+            modal.style.maxWidth = "100vw";
+            modal.style.maxHeight = "100vh";
+            modal.style.minWidth = "0";
+            modal.style.minHeight = "0";
+            modal.style.borderRadius = "0";
+            modal.style.resize = "none";
+        }
+
+        fullscreenBtn.addEventListener("mousedown", function(event) { event.stopPropagation(); });
+        fullscreenBtn.addEventListener("click", function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            setModalFullscreen(!modalIsFullscreen);
+        });
+        var savedFullscreen = false;
+        try { savedFullscreen = localStorage.getItem(STORAGE_METHODS_MODAL_FULLSCREEN) === "true"; } catch (e) {}
+        if (savedFullscreen) setModalFullscreen(true);
+        window.addEventListener("resize", applyModalFullscreenSize);
+
         var closeBtn = document.createElement("button");
         closeBtn.textContent = "✕";
         closeBtn.setAttribute("aria-label", "Close");
@@ -29511,6 +30049,7 @@
         closeBtn.style.borderRadius = "4px";
         closeBtn.onmouseenter = function() { closeBtn.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#333"; };
         closeBtn.onmouseleave = function() { closeBtn.style.background = "transparent"; };
+        headerBtns.appendChild(fullscreenBtn);
         headerBtns.appendChild(closeBtn);
         header.appendChild(headerBtns);
         modal.appendChild(header);
@@ -29541,6 +30080,24 @@
         searchInput.onblur = function() { searchInput.style.borderColor = glass ? THEME_SURFACE_BORDER : "#444"; };
         toolbar.appendChild(searchInput);
 
+        var categorySelect = document.createElement("select");
+        categorySelect.setAttribute("aria-label", "Filter by method type");
+        categorySelect.style.padding = "8px 12px";
+        categorySelect.style.background = glass ? THEME_SURFACE_BG : "#2a2a2a";
+        categorySelect.style.border = glass ? ("1px solid " + THEME_SURFACE_BORDER) : "1px solid #444";
+        categorySelect.style.borderRadius = "6px";
+        categorySelect.style.color = glass ? THEME_TEXT_PRIMARY : "#fff";
+        categorySelect.style.fontSize = "14px";
+        categorySelect.style.cursor = "pointer";
+        if (glass) categorySelect.className = "ie-select";
+        [["all", "All types"], ["method", "Methods"], ["edit_check", "Edit Checks"]].forEach(function(entry) {
+            var option = document.createElement("option");
+            option.value = entry[0];
+            option.textContent = entry[1];
+            categorySelect.appendChild(option);
+        });
+        toolbar.appendChild(categorySelect);
+
         var sortSelect = document.createElement("select");
         sortSelect.setAttribute("aria-label", "Sort order");
         sortSelect.style.padding = "8px 12px";
@@ -29554,7 +30111,7 @@
 
         var sortOpts = [
             { value: "relevance", text: "Sort: Relevance" },
-            { value: "title", text: "Sort: Title" },
+            { value: "title", text: "Sort: Name" },
             { value: "updated", text: "Sort: Updated" }
         ];
         for (var i = 0; i < sortOpts.length; i++) {
@@ -29576,7 +30133,7 @@
         searchBodyCheckbox.type = "checkbox";
         searchBodyCheckbox.setAttribute("aria-label", "Search in body content");
         searchBodyLabel.appendChild(searchBodyCheckbox);
-        searchBodyLabel.appendChild(document.createTextNode("Search body"));
+        searchBodyLabel.appendChild(document.createTextNode("Search expressions"));
         toolbar.appendChild(searchBodyLabel);
 
         var favoritesLabel = document.createElement("label");
@@ -29704,7 +30261,7 @@
         }
 
         function renderList(methods) {
-            listPane.innerHTML = "";
+            listPane.textContent = "";
             if (methods.length === 0) {
                 var empty = document.createElement("div");
                 empty.style.padding = "20px";
@@ -29714,17 +30271,15 @@
                 listPane.appendChild(empty);
                 return;
             }
-
             var favorites = getFavorites();
             var recents = getRecents();
-            var pins = getPins();
-
             for (var i = 0; i < methods.length; i++) {
-                (function(m, idx) {
+                (function(method) {
+                    var key = methodKey(method);
                     var item = document.createElement("div");
                     item.setAttribute("role", "option");
                     item.setAttribute("aria-selected", "false");
-                    item.setAttribute("data-method-id", m.id);
+                    item.setAttribute("data-method-key", key);
                     item.tabIndex = 0;
                     item.style.padding = "10px 14px";
                     item.style.borderBottom = glass ? ("1px solid " + THEME_SURFACE_BORDER) : "1px solid #2a2a2a";
@@ -29732,236 +30287,121 @@
                     item.style.transition = "background 0.1s";
                     item.style.position = "relative";
 
-                    var itemId = document.createElement("div");
-                    itemId.style.fontSize = "11px";
-                    itemId.style.color = glass ? THEME_ACCENT : "#5b43c7";
-                    itemId.style.marginBottom = "2px";
-                    itemId.textContent = m.id || "";
-                    item.appendChild(itemId);
+                    var category = document.createElement("div");
+                    category.textContent = method.category === "edit_check" ? "Edit Check" : "Method";
+                    category.style.fontSize = "10px";
+                    category.style.color = glass ? THEME_ACCENT : "#9b8af5";
+                    category.style.marginBottom = "3px";
+                    item.appendChild(category);
 
-                    var itemTitle = document.createElement("div");
-                    itemTitle.style.fontWeight = "500";
-                    itemTitle.style.fontSize = "13px";
-                    itemTitle.textContent = m.title || "(Untitled)";
-                    item.appendChild(itemTitle);
+                    var title = document.createElement("div");
+                    title.style.fontWeight = "500";
+                    title.style.fontSize = "13px";
+                    title.textContent = method.name || "(Untitled)";
+                    item.appendChild(title);
 
                     var badges = document.createElement("div");
                     badges.style.display = "flex";
-                    badges.style.gap = "4px";
+                    badges.style.gap = "6px";
                     badges.style.marginTop = "4px";
                     badges.style.fontSize = "10px";
-
-                    var isFav = favorites.indexOf(m.id) !== -1;
-                    var isRecent = recents.indexOf(m.id) !== -1;
-                    var isPinned = pins.indexOf(m.id) !== -1;
-
-                    if (isPinned) {
-                        var pinBadge = document.createElement("span");
-                        pinBadge.textContent = "📌 Pinned";
-                        pinBadge.style.color = "#f39c12";
-                        badges.appendChild(pinBadge);
-                    }
-                    if (isFav) {
-                        var favBadge = document.createElement("span");
-                        favBadge.textContent = "★ Favorite";
-                        favBadge.style.color = "#ffd700";
-                        badges.appendChild(favBadge);
-                    }
-                    if (isRecent && !isPinned) {
-                        var recentBadge = document.createElement("span");
-                        recentBadge.textContent = "🕒 Recent";
-                        recentBadge.style.color = "#888";
-                        badges.appendChild(recentBadge);
-                    }
-                    if (badges.children.length > 0) {
-                        item.appendChild(badges);
-                    }
+                    var isFavorite = favorites.indexOf(key) !== -1;
+                    var isRecent = recents.indexOf(key) !== -1;
+                    if (isFavorite) { var favoriteBadge = document.createElement("span"); favoriteBadge.textContent = "Favorite"; favoriteBadge.style.color = "#f4d36c"; badges.appendChild(favoriteBadge); }
+                    if (isRecent && !isFavorite) { var recentBadge = document.createElement("span"); recentBadge.textContent = "Recent"; recentBadge.style.color = "#888"; badges.appendChild(recentBadge); }
+                    if (badges.children.length) item.appendChild(badges);
 
                     var actions = document.createElement("div");
-                    actions.style.position = "absolute";
-                    actions.style.top = "8px";
-                    actions.style.right = "8px";
-                    actions.style.display = "none";
-                    actions.style.gap = "4px";
-
-                    var favBtn = document.createElement("button");
-                    favBtn.textContent = isFav ? "★" : "☆";
-                    favBtn.title = isFav ? "Remove from favorites" : "Add to favorites";
-                    favBtn.style.background = "transparent";
-                    favBtn.style.border = "none";
-                    favBtn.style.color = isFav ? "#ffd700" : "#888";
-                    favBtn.style.fontSize = "16px";
-                    favBtn.style.cursor = "pointer";
-                    favBtn.style.padding = "2px 6px";
-                    favBtn.onclick = function(e) {
-                        e.stopPropagation();
-                        toggleFavorite(m.id);
+                    actions.style.position = "absolute"; actions.style.top = "8px"; actions.style.right = "8px"; actions.style.display = "none"; actions.style.gap = "4px"; actions.style.zIndex = "2";
+                    var favoriteButton = document.createElement("button");
+                    favoriteButton.textContent = isFavorite ? "★" : "☆";
+                    favoriteButton.title = isFavorite ? "Remove from favorites" : "Add to favorites";
+                    favoriteButton.setAttribute("aria-label", favoriteButton.title);
+                    favoriteButton.setAttribute("aria-pressed", isFavorite ? "true" : "false");
+                    favoriteButton.style.cssText = "background:transparent;border:0;color:" + (isFavorite ? "#ffd700" : "#888") + ";font-size:16px;cursor:pointer;padding:2px 6px;";
+                    favoriteButton.type = "button";
+                    favoriteButton.addEventListener("click", function(event) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        var result = toggleFavorite(key);
                         doSearch();
-                    };
-                    actions.appendChild(favBtn);
-
-                    var pinBtn = document.createElement("button");
-                    pinBtn.textContent = isPinned ? "📌" : "📍";
-                    pinBtn.title = isPinned ? "Unpin" : "Pin to top";
-                    pinBtn.style.background = "transparent";
-                    pinBtn.style.border = "none";
-                    pinBtn.style.color = isPinned ? "#f39c12" : "#888";
-                    pinBtn.style.fontSize = "14px";
-                    pinBtn.style.cursor = "pointer";
-                    pinBtn.style.padding = "2px 6px";
-                    pinBtn.onclick = function(e) {
-                        e.stopPropagation();
-                        var result = togglePin(m.id);
-                        if (!result.success) {
-                            updateStatus(result.message, true);
-                            setTimeout(function() { doSearch(); }, 2000);
-                        } else {
-                            doSearch();
-                        }
-                    };
-                    actions.appendChild(pinBtn);
-
+                        updateStatus(result.favorited ? (result.persisted ? "Favorite moved to the top of this list." : "Favorite moved to the top for this session; browser storage is unavailable.") : (result.persisted ? "Favorite removed." : "Favorite removed for this session; browser storage is unavailable."), !result.persisted);
+                    });
+                    actions.appendChild(favoriteButton);
                     item.appendChild(actions);
-
-                    item.onmouseenter = function() {
-                        if (selectedMethod !== m) item.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#252525";
-                        actions.style.display = "flex";
-                    };
-                    item.onmouseleave = function() {
-                        if (selectedMethod !== m) {
-                            item.style.background = "transparent";
-                        }
-                        actions.style.display = "none";
-                    };
-
-                    item.onclick = function() { selectMethod(m, item); };
-                    item.onkeydown = function(e) {
-                        if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            selectMethod(m, item);
-                        }
-                    };
-
+                    item.onmouseenter = function() { if (selectedMethod !== method) item.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#252525"; actions.style.display = "flex"; };
+                    item.onmouseleave = function() { if (selectedMethod !== method) item.style.background = "transparent"; actions.style.display = "none"; };
+                    item.onclick = function() { selectMethod(method, item); };
+                    item.onkeydown = function(event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectMethod(method, item); } };
                     listPane.appendChild(item);
-                })(methods[i], i);
+                })(methods[i]);
             }
         }
 
-        async function selectMethod(m, itemEl) {
-            selectedMethod = m;
-            currentBodyText = "";
-            addRecent(m.id);
-            saveLastMethod(m.id);
-
+        function selectMethod(method, itemElement) {
+            selectedMethod = method;
+            currentBodyText = method.expression || "";
+            var key = methodKey(method);
+            addRecent(key);
+            saveLastMethod(key);
             var items = listPane.querySelectorAll("[role='option']");
-            for (var i = 0; i < items.length; i++) {
-                items[i].setAttribute("aria-selected", "false");
-                items[i].style.background = "transparent";
+            for (var i = 0; i < items.length; i++) { items[i].setAttribute("aria-selected", "false"); items[i].style.background = "transparent"; }
+            if (itemElement) {
+                itemElement.setAttribute("aria-selected", "true");
+                itemElement.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#2a2a2a";
+                itemElement.scrollIntoView({ block: "nearest", behavior: "smooth" });
             }
-
-            if (itemEl) {
-                itemEl.setAttribute("aria-selected", "true");
-                itemEl.style.background = glass ? THEME_SURFACE_BG_HEAVY : "#2a2a2a";
-                itemEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-            }
-
-            previewTitle.textContent = (m.id || "") + " — " + (m.title || "(Untitled)");
-
-            var metaParts = [];
-            if (m.tags && m.tags.length > 0) {
-                metaParts.push("Tags: " + m.tags.join(", "));
-            }
-            if (m.updated) {
-                metaParts.push("Updated: " + m.updated);
-            }
-            previewMeta.textContent = metaParts.join(" • ");
-            previewBody.textContent = "Loading...";
-
-            if (m.url) {
-                var result = await fetchMethodBody(m.url);
-                if (result.success) {
-                    currentBodyText = result.body;
-                    previewBody.textContent = result.body;
-                } else {
-                    previewBody.textContent = "Error loading method: " + result.error;
-                }
-            } else {
-                previewBody.textContent = "(No URL specified)";
-            }
+            previewTitle.textContent = method.name || "(Untitled)";
+            previewMeta.textContent = method.category === "edit_check" ? "Edit Check" : "Method";
+            previewBody.textContent = currentBodyText || "(No formal expression)";
         }
 
         function doSearch() {
             var query = searchInput.value;
-            var searchBody = searchBodyCheckbox.checked;
+            var searchExpression = searchBodyCheckbox.checked;
             var sortOrder = sortSelect.value;
+            var selectedCategory = categorySelect.value;
             var showOnlyFavorites = favoritesCheckbox.checked;
-
             saveLastSearch(query);
             saveSortOrder(sortOrder);
-
+            try { localStorage.setItem(STORAGE_METHODS_CATEGORY, selectedCategory); } catch (e) {}
             var favorites = getFavorites();
-            var pins = getPins();
-            var methodsToFilter = allMethods;
-
-            if (showOnlyFavorites) {
-                methodsToFilter = allMethods.filter(function(m) {
-                    return favorites.indexOf(m.id) !== -1;
-                });
-            }
-
-            var filtered = filterAndSortMethods(methodsToFilter, query, searchBody, METHODS_BODY_CACHE, sortOrder, favorites, pins);
+            var methodsToFilter = allMethods.filter(function(method) { return selectedCategory === "all" || method.category === selectedCategory; });
+            if (showOnlyFavorites) methodsToFilter = methodsToFilter.filter(function(method) { return favorites.indexOf(methodKey(method)) !== -1; });
+            var filtered = filterAndSortMethods(methodsToFilter, query, searchExpression, sortOrder, favorites);
             renderList(filtered);
-            updateStatus(filtered.length + " of " + allMethods.length + " methods");
+            updateStatus(filtered.length + " of " + methodsToFilter.length + " matching " + (selectedCategory === "all" ? "items" : selectedCategory === "method" ? "methods" : "edit checks"));
         }
 
         async function loadIndex(forceRefresh) {
-            updateStatus("Loading methods index...");
+            updateStatus("Connecting to ACT Method Library...");
             var result = await fetchMethodsIndex(forceRefresh);
-            if (!result.success) {
-                updateStatus("Error: " + result.error, true);
-                renderList([]);
-                return;
-            }
-
+            if (!result.success) { updateStatus(result.error, true); renderList([]); return; }
             allMethods = result.data;
-
-            if (METHODS_PRELOAD_BODIES) {
-                updateStatus("Preloading method bodies...");
-                for (var i = 0; i < allMethods.length; i++) {
-                    if (allMethods[i].url) {
-                        await fetchMethodBody(allMethods[i].url);
-                    }
-                }
-            }
-
             searchInput.value = getLastSearch();
-            sortSelect.value = getSortOrder();
-
-            searchInput.disabled = false;
-            searchInput.readOnly = false;
-            searchInput.style.pointerEvents = 'auto';
-            searchInput.tabIndex = 0;
-
-            setTimeout(function() {
-                var bootstrapBackdrops = document.querySelectorAll('.modal-backdrop');
-                for (var i = 0; i < bootstrapBackdrops.length; i++) {
-                    bootstrapBackdrops[i].style.display = 'none';
-                }
-                searchInput.focus();
-                searchInput.select();
-                searchInput.click();
-            }, 150);
-
+            var savedSort = getSortOrder();
+            sortSelect.value = ["relevance", "title", "updated"].indexOf(savedSort) !== -1 ? savedSort : "relevance";
+            try {
+                var savedCategory = localStorage.getItem(STORAGE_METHODS_CATEGORY) || "all";
+                categorySelect.value = ["all", "method", "edit_check"].indexOf(savedCategory) !== -1 ? savedCategory : "all";
+            } catch (e) { categorySelect.value = "all"; }
+            searchInput.disabled = false; searchInput.readOnly = false; searchInput.style.pointerEvents = "auto"; searchInput.tabIndex = 0;
             doSearch();
+            if (result.stale) updateStatus("ACT server unavailable; showing the last synchronized copy. " + result.error, true);
+            setTimeout(function() {
+                var backdrops = document.querySelectorAll(".modal-backdrop");
+                for (var i = 0; i < backdrops.length; i++) backdrops[i].style.display = "none";
+                searchInput.focus(); searchInput.select();
+            }, 150);
         }
 
         searchInput.oninput = doSearch;
         searchBodyCheckbox.onchange = doSearch;
+        categorySelect.onchange = doSearch;
         sortSelect.onchange = doSearch;
         favoritesCheckbox.onchange = doSearch;
 
         refreshBtn.onclick = function() {
-            METHODS_BODY_CACHE = {};
             loadIndex(true);
         };
 
@@ -29986,6 +30426,7 @@
             modal.remove();
             METHODS_LIBRARY_MODAL_REF = null;
             document.removeEventListener("keydown", keyHandler);
+            window.removeEventListener("resize", applyModalFullscreenSize);
 
             // >>> NEW: restore neutralized modal and focus trap, then show backdrops again
             restoreAjaxModal();
@@ -30010,8 +30451,8 @@
             if (e.key === "Enter" && document.activeElement === searchInput) {
                 var firstItem = listPane.querySelector("[role='option']");
                 if (firstItem) {
-                    var methodId = firstItem.getAttribute("data-method-id");
-                    var method = allMethods.find(function(m) { return m.id === methodId; });
+                    var selectedKey = firstItem.getAttribute("data-method-key");
+                    var method = allMethods.find(function(entry) { return methodKey(entry) === selectedKey; });
                     if (method) {
                         selectMethod(method, firstItem);
                     }
@@ -30049,8 +30490,8 @@
                 }
 
                 var nextItem = items[nextIndex];
-                var methodId = nextItem.getAttribute("data-method-id");
-                var method = allMethods.find(function(m) { return m.id === methodId; });
+                var selectedKey = nextItem.getAttribute("data-method-key");
+                var method = allMethods.find(function(entry) { return methodKey(entry) === selectedKey; });
                 if (method) {
                     selectMethod(method, nextItem);
                 }
@@ -30081,7 +30522,7 @@
         var dragStartX = 0, dragStartY = 0, modalStartX = 0, modalStartY = 0;
 
         header.onmousedown = function(e) {
-            if (e.target === closeBtn) {
+            if (headerBtns.contains(e.target)) {
                 return;
             }
             isDragging = true;
@@ -30149,19 +30590,26 @@
     }
 
     function getFavorites() {
+        if (METHODS_MEMORY_FAVORITES !== null) return METHODS_MEMORY_FAVORITES.slice();
         try {
             var raw = localStorage.getItem(STORAGE_METHODS_FAVORITES);
             if (!raw) return [];
-            return JSON.parse(raw);
+            var parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed.filter(function(value) { return typeof value === "string"; }) : [];
         } catch (e) {
             return [];
         }
     }
 
     function saveFavorites(favs) {
+        METHODS_MEMORY_FAVORITES = favs.slice();
         try {
             localStorage.setItem(STORAGE_METHODS_FAVORITES, JSON.stringify(favs));
-        } catch (e) {}
+            return true;
+        } catch (e) {
+            log("Methods Library: browser storage unavailable; keeping favorites for this page session only - " + String(e));
+            return false;
+        }
     }
 
     function toggleFavorite(methodId) {
@@ -30172,8 +30620,8 @@
         } else {
             favs.push(methodId);
         }
-        saveFavorites(favs);
-        return favs;
+        var persisted = saveFavorites(favs);
+        return { favorites: favs, favorited: idx === -1, persisted: persisted };
     }
 
     function getRecents() {
@@ -30199,37 +30647,6 @@
         try {
             localStorage.setItem(STORAGE_METHODS_RECENTS, JSON.stringify(recents));
         } catch (e) {}
-    }
-
-    function getPins() {
-        try {
-            var raw = localStorage.getItem(STORAGE_METHODS_PINS);
-            if (!raw) return [];
-            return JSON.parse(raw);
-        } catch (e) {
-            return [];
-        }
-    }
-
-    function savePins(pins) {
-        try {
-            localStorage.setItem(STORAGE_METHODS_PINS, JSON.stringify(pins));
-        } catch (e) {}
-    }
-
-    function togglePin(methodId) {
-        var pins = getPins();
-        var idx = pins.indexOf(methodId);
-        if (idx !== -1) {
-            pins.splice(idx, 1);
-        } else {
-            if (pins.length >= MAX_PINS) {
-                return { success: false, message: "Maximum " + MAX_PINS + " pins allowed" };
-            }
-            pins.push(methodId);
-        }
-        savePins(pins);
-        return { success: true, pins: pins };
     }
 
     function getLastSearch() {
@@ -30262,7 +30679,8 @@
 
     function getSortOrder() {
         try {
-            return localStorage.getItem(STORAGE_METHODS_SORT_ORDER) || "relevance";
+            var order = localStorage.getItem(STORAGE_METHODS_SORT_ORDER) || "relevance";
+            return ["title", "updated"].indexOf(order) !== -1 ? order : "relevance";
         } catch (e) {
             return "relevance";
         }
@@ -30302,6 +30720,20 @@
 
     function mfeNormalizeText(text) {
         return String(text || "").replace(/\s+/g, " ").trim();
+    }
+
+    function mfeExpressionContainsQuery(expression, query) {
+        var parts = String(query || "").trim().split(/\s+/);
+        if (!parts.length || !parts[0]) return false;
+        var escapedParts = parts.map(function(part) {
+            return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        });
+        try {
+            // Treat query whitespace as flexible so phrases can span code lines or indentation.
+            return new RegExp(escapedParts.join("\\s+"), "i").test(String(expression || ""));
+        } catch (e) {
+            return false;
+        }
     }
 
     function mfeGetMethodIdFromHref(href) {
@@ -30766,7 +31198,8 @@
         var search = document.createElement("input");
         search.className = "mfe-search";
         search.type = "text";
-        search.placeholder = "Search methods...";
+        search.placeholder = "Search methods or #expression...";
+        search.setAttribute("aria-label", "Search methods by name, ID, or formal expression");
         var methodList = document.createElement("div");
         methodList.className = "mfe-method-list";
         listPane.appendChild(search);
@@ -31677,6 +32110,7 @@
                     try { fallbackTextarea.setSelectionRange(selectionStart, selectionEnd, selectionDirection); } catch (ignore) {}
                 }
             }
+            return true;
         }
 
         function scheduleFallbackHighlightRefresh() {
@@ -31725,12 +32159,28 @@
         }
 
         function renderMethods() {
-            var q = (search.value || "").toLowerCase().trim();
+            var rawQuery = (search.value || "").trim();
+            var expressionSearch = rawQuery.charAt(0) === "#";
+            var expressionQuery = expressionSearch ? rawQuery.slice(1).trim() : "";
+            var q = rawQuery.toLowerCase();
             methodList.innerHTML = "";
+            if (expressionSearch && !expressionQuery) {
+                var hint = document.createElement("div");
+                hint.style.cssText = "padding:12px 10px;color:#94a3b8;font-size:12px;";
+                hint.textContent = "Type a keyword after # to search formal expressions";
+                methodList.appendChild(hint);
+                return;
+            }
             for (var i = 0; i < methods.length; i++) {
                 var method = methods[i];
                 var hay = (method.name + " " + method.id).toLowerCase();
-                if (q && hay.indexOf(q) === -1) continue;
+                if (expressionSearch) {
+                    var expressionMatches = mfeExpressionContainsQuery(method.editedExpression, expressionQuery) ||
+                        mfeExpressionContainsQuery(method.originalExpression, expressionQuery);
+                    if (!expressionMatches) continue;
+                } else if (q && hay.indexOf(q) === -1) {
+                    continue;
+                }
                 var item = document.createElement("div");
                 item.className = "mfe-method";
                 if (selected && selected.id === method.id) item.className += " mfe-selected";
@@ -31750,6 +32200,12 @@
                 item.appendChild(meta);
                 (function(m) { item.onclick = function() { selectMethod(m); }; })(method);
                 methodList.appendChild(item);
+            }
+            if (!methodList.children.length) {
+                var empty = document.createElement("div");
+                empty.style.cssText = "padding:12px 10px;color:#94a3b8;font-size:12px;";
+                empty.textContent = "No matching methods";
+                methodList.appendChild(empty);
             }
         }
 
@@ -36847,110 +37303,13 @@
         updatePanelLauncherVisibility();
     }
 
-    function getOrCreatePanelLauncher() {
-        if (!document.body) {
-            return null;
-        }
-        var existing = document.getElementById(PANEL_LAUNCHER_ID);
-        if (existing) {
-            return existing;
-        }
-
-        var launcher = document.createElement("button");
-        launcher.id = PANEL_LAUNCHER_ID;
-        launcher.type = "button";
-        launcher.title = "Toggle ClinSpark Automator panel";
-        launcher.setAttribute("aria-label", "Toggle ClinSpark Automator panel");
-        launcher.setAttribute("data-aps-panel-launcher", "1");
-        launcher.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="28" height="28" focusable="false"><path fill="#38bdf8" d="M13 2L4 14h7l-1 8 10-13h-7l0-7z"></path></svg>';
-        launcher.style.position = "fixed";
-        launcher.style.right = "18px";
-        launcher.style.bottom = "18px";
-        launcher.style.width = "48px";
-        launcher.style.height = "48px";
-        launcher.style.borderRadius = "14px";
-        launcher.style.border = "1px solid rgba(56,189,248,0.55)";
-        launcher.style.background = "linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%)";
-        launcher.style.color = "#ffffff";
-        launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
-        launcher.style.cursor = "pointer";
-        launcher.style.display = "flex";
-        launcher.style.alignItems = "center";
-        launcher.style.justifyContent = "center";
-        launcher.style.fontFamily = "Arial, Helvetica, sans-serif";
-        launcher.style.fontSize = "14px";
-        launcher.style.fontWeight = "800";
-        launcher.style.letterSpacing = "0";
-        launcher.style.lineHeight = "1";
-        launcher.style.padding = "0";
-        launcher.style.zIndex = String(PANEL_Z_INDEX + 5);
-        launcher.style.transition = "transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease";
-        launcher.style.userSelect = "none";
-        launcher.style.WebkitUserSelect = "none";
-        launcher.style.outline = "none";
-
-        function lift() {
-            launcher.style.transform = "translateY(-2px)";
-            launcher.style.boxShadow = "0 18px 38px rgba(15, 23, 42, 0.38)";
-        }
-        function settle() {
-            launcher.style.transform = "translateY(0)";
-            launcher.style.boxShadow = "0 14px 32px rgba(15, 23, 42, 0.32)";
-        }
-        launcher.addEventListener("mouseenter", lift);
-        launcher.addEventListener("mouseleave", settle);
-        launcher.addEventListener("focus", lift);
-        launcher.addEventListener("blur", settle);
-        launcher.addEventListener("click", function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            var panel = document.getElementById(PANEL_ID);
-            var shouldHide = panel && !getPanelHidden();
-            if (shouldHide) {
-                setPanelHidden(true);
-                applyPanelHiddenState(panel);
-                log("Panel launcher: panel hidden");
-            } else {
-                setPanelHidden(false);
-                if (panel) {
-                    applySidePanelLayout(panel, panel.querySelector("[data-aps-panel-body='1']"));
-                } else {
-                    makePanel();
-                }
-                log("Panel launcher: panel opened");
-            }
-            updatePanelLauncherVisibility();
-        });
-
-        document.body.appendChild(launcher);
-        return launcher;
-    }
-
     function updatePanelLauncherVisibility() {
-        var launcher = getOrCreatePanelLauncher();
-        if (!launcher) {
-            return;
+        // The floating launcher is retired in both Automator variants. Remove
+        // stale nodes left by an older content-script run and retain hotkey access.
+        var obsoleteLaunchers = document.querySelectorAll('[id="' + PANEL_LAUNCHER_ID + '"]');
+        for (var i = 0; i < obsoleteLaunchers.length; i++) {
+            if (obsoleteLaunchers[i].parentNode) obsoleteLaunchers[i].parentNode.removeChild(obsoleteLaunchers[i]);
         }
-        var panel = document.getElementById(PANEL_ID);
-        var hidden = getPanelHidden() || !panel;
-        var rightOffset = 18;
-        var bottomOffset = 18;
-        if (panel && !hidden) {
-            var rect = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
-            var dock = getPanelDock();
-            if (dock === "bottom" && rect) {
-                bottomOffset = Math.min(Math.max(Math.round(rect.height) + 18, 18), Math.max((window.innerHeight || 800) - 64, 18));
-            } else if (rect) {
-                rightOffset = Math.min(Math.max(Math.round(rect.width) + 18, 18), Math.max((window.innerWidth || 1280) - 64, 18));
-            }
-        }
-        launcher.style.right = String(rightOffset) + "px";
-        launcher.style.bottom = String(bottomOffset) + "px";
-        launcher.style.display = "flex";
-        launcher.style.pointerEvents = "auto";
-        launcher.style.opacity = "1";
-        launcher.title = hidden ? "Open ClinSpark Automator panel" : "Hide ClinSpark Automator panel";
-        launcher.setAttribute("aria-label", hidden ? "Open ClinSpark Automator panel" : "Hide ClinSpark Automator panel");
     }
 
     function togglePanelHiddenViaHotkey() {
@@ -56976,6 +57335,7 @@
         var maxHeight = options.maxHeight || "90%";
         var onClose = options.onClose || null;
         var hideClose = !!options.hideClose;
+        var draggable = options.draggable !== false;
 
         var popupId = "clinsparkPopup_" + Date.now();
         var existing = document.getElementById(popupId);
@@ -57033,7 +57393,7 @@
         } else {
             headerBar.style.borderRadius = THEME_RADIUS + "px " + THEME_RADIUS + "px 0 0";
         }
-        headerBar.style.cursor = "move";
+        headerBar.style.cursor = draggable ? "move" : "default";
         headerBar.style.userSelect = "none";
 
         var titleContainer = document.createElement("div");
@@ -57157,7 +57517,7 @@
         }
 
         headerBar.addEventListener("mousedown", function (e) {
-            if (e.target === closeBtn || closeBtn.contains(e.target)) {
+            if (!draggable || e.target === closeBtn || closeBtn.contains(e.target)) {
                 return;
             }
             isDragging = true;
