@@ -5,7 +5,8 @@ const METHODS_ENDPOINT = "/method-library/extension";
 const REQUEST_TYPE = "ACT_METHOD_LIBRARY_FETCH";
 const ALLOWED_SENDERS = new Set([
   "https://cenexel.clinspark.com",
-  "https://cenexeltest.clinspark.com"
+  "https://cenexeltest.clinspark.com",
+  "https://cenexel-val.clinspark.com"
 ]);
 const PAGE_SIZE = 250;
 const MAX_METHODS = 10000;

@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name        ClinSpark Automator
 // @namespace   vinh.activity.plan.state
-// @version     3.6.65
+// @version     3.6.71
 // @description Automate various tasks in ClinSpark platform
 // @match       https://cenexel.clinspark.com/*
 // @updateURL    https://raw.githubusercontent.com/vctruong100/Automator/main/ClinSpark%20Automator.js
@@ -8173,6 +8173,13 @@
         return label;
     }
 
+    function bplIsFormArchivedOrPendingArchive(formEntry, formData) {
+        return !!(
+            (formEntry && (formEntry.archived || formEntry.archiveRequested)) ||
+            (formData && (formData.archived || formData.archiveRequested))
+        );
+    }
+
     function bplValidateConfiguration(segments, segmentFormMap, formDataStore, segmentCheckboxStates) {
         var errors = [];
         var hasAnyForms = false;
@@ -8210,7 +8217,7 @@
                         studyEvents: []
                     };
                 }
-                if (fEntry.archived || fd.archived || fEntry.archiveRequested) {
+                if (bplIsFormArchivedOrPendingArchive(fEntry, fd)) {
                     continue;
                 }
                 var isExistingForm = fEntry.autoPopulated || fd.autoPopulated;
@@ -8264,7 +8271,7 @@
                 var fEntry = fList[fi];
                 var fk = sv + "|" + fEntry.value + "|" + fEntry.index;
                 var fd = formDataStore[fk];
-                if (fEntry.archived || (fd && fd.archived)) continue;
+                if (bplIsFormArchivedOrPendingArchive(fEntry, fd)) continue;
                 if (!fd) {
                     continue;
                 }
@@ -8896,6 +8903,9 @@
                     continue;
                 }
                 var rfData = formDataStore[rfKey];
+                if (bplIsFormArchivedOrPendingArchive(segForms[ri], rfData)) {
+                    continue;
+                }
                 if (rfData && rfData.refActivity && rfData.exampleTime && rfData.exampleTime !== "N/A") {
                     log("BPL: using reference activity row example time for segment " + segVal + ": " + rfData.exampleTime);
                     return rfData.exampleTime;
@@ -9689,6 +9699,9 @@
                         continue;
                     }
                     var rfData = formDataStore[rfKey];
+                    if (bplIsFormArchivedOrPendingArchive(segForms[rfi], rfData)) {
+                        continue;
+                    }
                     if (rfData && rfData.refActivity) {
                         segmentHasOtherRefActivity = true;
                         log("Days " + rfData.days + ", Hours " + rfData.hours + ", Minutes " + rfData.minutes + ", Seconds: " + rfData.seconds);
@@ -17888,6 +17901,17 @@
         };
     }
 
+    function aprGetScheduledActivityIdFromAction(link) {
+        if (!link) return null;
+        var href = link.getAttribute("href") || "";
+        var match = href.match(/(?:\/update\/scheduledactivity\/|\/archivescheduledactivity\/)(\d+)(?!\d)/);
+        if (!match) {
+            var onclick = link.getAttribute("onclick") || "";
+            match = onclick.match(/deleteScheduledActivity\s*\(\s*['"]?(\d+)(?!\d)/);
+        }
+        return match ? match[1] : null;
+    }
+
     function aprFindRowByScheduledActivityId(id) {
         if (!id) {
             return null;
@@ -17896,34 +17920,16 @@
         if (!tbody) {
             return null;
         }
-        var editSelector = "a[href*='/update/scheduledactivity/" + id + "']";
-        var editLink = tbody.querySelector(editSelector);
-        if (!editLink) {
-            var deleteSelector = "a[onclick*='deleteScheduledActivity(" + id + ")']";
-            var deleteLink = tbody.querySelector(deleteSelector);
-            if (deleteLink) {
-                var row = deleteLink.parentNode;
-                while (row && row.tagName !== "TR") {
-                    row = row.parentNode;
+        var rows = tbody.querySelectorAll("tr");
+        for (var ri = 0; ri < rows.length; ri++) {
+            var links = rows[ri].querySelectorAll("a[href], a[onclick]");
+            for (var li = 0; li < links.length; li++) {
+                if (aprGetScheduledActivityIdFromAction(links[li]) === String(id)) {
+                    return rows[ri];
                 }
-                return row;
             }
-            var archiveSelector = "a[href*='archivescheduledactivity/" + id + "']";
-            var archiveLink = tbody.querySelector(archiveSelector);
-            if (archiveLink) {
-                row = archiveLink.parentNode;
-                while (row && row.tagName !== "TR") {
-                    row = row.parentNode;
-                }
-                return row;
-            }
-            return null;
         }
-        var row = editLink.parentNode;
-        while (row && row.tagName !== "TR") {
-            row = row.parentNode;
-        }
-        return row;
+        return null;
     }
 
     function aprIsDisabledActionLink(link) {
@@ -18029,14 +18035,28 @@
             toggleBtn.click();
             await sleep(200);
         }
-        var deleteLink = row.querySelector("a[onclick*='deleteScheduledActivity(" + id + ")']");
+        var deleteLinks = row.querySelectorAll("a[onclick*='deleteScheduledActivity(']");
+        var deleteLink = null;
+        for (var di = 0; di < deleteLinks.length; di++) {
+            if (aprGetScheduledActivityIdFromAction(deleteLinks[di]) === String(id)) {
+                deleteLink = deleteLinks[di];
+                break;
+            }
+        }
         if (deleteLink && !aprIsDisabledActionLink(deleteLink)) {
             deleteLink.click();
             aprLog("clicked delete UI for id " + id);
             return { action: "delete", clicked: true };
         }
         if (archivedOnly) return { action: "none", clicked: false };
-        var archiveLink = row.querySelector("a[href*='archivescheduledactivity/" + id + "']");
+        var archiveLinks = row.querySelectorAll("a[href*='archivescheduledactivity/']");
+        var archiveLink = null;
+        for (var ai = 0; ai < archiveLinks.length; ai++) {
+            if (aprGetScheduledActivityIdFromAction(archiveLinks[ai]) === String(id)) {
+                archiveLink = archiveLinks[ai];
+                break;
+            }
+        }
         if (aprIsArchiveActionLink(archiveLink)) {
             var archiveHref = archiveLink.getAttribute("href") || "";
             aprLog("prepared safe archive request for id " + id);
@@ -19601,6 +19621,14 @@
             var formKey = formValue || normalizeText(formText);
             var rowKey = (segmentValue || normalizeText(segmentText)) + "|" +
                 (eventValue || normalizeText(eventText)) + "|" + formKey;
+            var editHref = "";
+            var editLinkEl = tr.querySelector('a[href*="/update/scheduledactivity/"]');
+            if (!editLinkEl) {
+                editLinkEl = tr.querySelector('a[href*="editscheduledactivity"]');
+            }
+            if (editLinkEl) {
+                editHref = editLinkEl.getAttribute("href") || "";
+            }
 
             rows.push({
                 rowElement: tr,
@@ -19616,7 +19644,8 @@
                 archiveLink: archiveLink,
                 editLink: editLink,
                 visibilityLink: visibilityLink,
-                isArchived: isArchived
+                isArchived: isArchived,
+                editHref: editHref
             });
         }
         return rows;
@@ -20178,13 +20207,13 @@
         // Pre-Window
         var preWindowEl = document.getElementById("preWindow");
         if (preWindowEl) {
-            props.preWindow = preWindowEl.value || "";
+            props.preWindow = preWindowEl.value == null ? "" : String(preWindowEl.value).trim();
         }
 
         // Post-Window
         var postWindowEl = document.getElementById("postWindow");
         if (postWindowEl) {
-            props.postWindow = postWindowEl.value || "";
+            props.postWindow = postWindowEl.value == null ? "" : String(postWindowEl.value).trim();
         }
 
         // Reference Activity
@@ -20298,6 +20327,29 @@
         return visibility;
     }
 
+    function setArchiveUpdateWindowFields(props) {
+        var windowFields = [
+            { id: "preWindow", value: props.preWindow, label: "Pre-Window" },
+            { id: "postWindow", value: props.postWindow, label: "Post-Window" }
+        ];
+        for (var wi = 0; wi < windowFields.length; wi++) {
+            var windowField = windowFields[wi];
+            var windowEl = document.getElementById(windowField.id);
+            if (!windowEl || windowEl.disabled) continue;
+            var windowValue = windowField.value == null ? "" : String(windowField.value).trim();
+            if (windowValue === "" && windowEl.removeAttribute) {
+                windowEl.removeAttribute("value");
+            } else if (windowEl.setAttribute) {
+                windowEl.setAttribute("value", windowValue);
+            }
+            windowEl.defaultValue = windowValue;
+            windowEl.value = windowValue;
+            windowEl.dispatchEvent(new Event("input", { bubbles: true }));
+            windowEl.dispatchEvent(new Event("change", { bubbles: true }));
+            log("Archive/Update Forms: " + windowField.label + " set to '" + windowValue + "'");
+        }
+    }
+
     // Apply properties to Add modal
     async function applyPropertiesToAddModal(props) {
         log("Archive/Update Forms: applyPropertiesToAddModal called with props=" + JSON.stringify(props));
@@ -20342,22 +20394,6 @@
                 log("Archive/Update Forms: Mandatory checkbox unchecked");
                 await sleep(200);
             }
-        }
-
-        // Pre-Window
-        var preWindowEl = document.getElementById("preWindow");
-        if (preWindowEl && !preWindowEl.disabled) {
-            preWindowEl.value = props.preWindow || "";
-            preWindowEl.dispatchEvent(new Event("input", { bubbles: true }));
-            log("Archive/Update Forms: Pre-Window set to '" + (props.preWindow || "") + "'");
-        }
-
-        // Post-Window
-        var postWindowEl = document.getElementById("postWindow");
-        if (postWindowEl && !postWindowEl.disabled) {
-            postWindowEl.value = props.postWindow || "";
-            postWindowEl.dispatchEvent(new Event("input", { bubbles: true }));
-            log("Archive/Update Forms: Post-Window set to '" + (props.postWindow || "") + "'");
         }
 
         // Reference Activity
@@ -20471,6 +20507,10 @@
             }
             await sleep(300);
         }
+
+        // Set these last because changing form/reference options can reset window defaults.
+        setArchiveUpdateWindowFields(props);
+        await sleep(200);
     }
 
     // Wait for Select2 options to change/load
@@ -20611,10 +20651,22 @@
     }
 
     // Find row in DOM by matching criteria
-    function findRowInDOM(segmentText, eventText, formText) {
+    function findRowInDOM(segmentText, eventText, formText, editHref) {
         var tbody = document.getElementById("saTableBody");
         if (!tbody) return null;
         var trs = tbody.querySelectorAll("tr");
+        if (editHref) {
+            for (var ri = 0; ri < trs.length; ri++) {
+                var editLinks = trs[ri].querySelectorAll('a[href*="/update/scheduledactivity/"], a[href*="editscheduledactivity"]');
+                for (var li = 0; li < editLinks.length; li++) {
+                    if ((editLinks[li].getAttribute("href") || "") === editHref) {
+                        return trs[ri];
+                    }
+                }
+            }
+            log("Archive/Update Forms: exact source occurrence not found for editHref=" + editHref);
+            return null;
+        }
         for (var i = 0; i < trs.length; i++) {
             var tr = trs[i];
             var cells = tr.querySelectorAll("td");
@@ -20772,16 +20824,22 @@
         var mismatches = [];
 
         var preWindowEl = document.getElementById("preWindow");
-        if (preWindowEl && expectedProps.preWindow) {
-            if (preWindowEl.value !== expectedProps.preWindow) {
-                mismatches.push("preWindow: expected '" + expectedProps.preWindow + "' got '" + preWindowEl.value + "'");
+        if (preWindowEl) {
+            var expectedPreWindow = expectedProps.preWindow == null ? "" : String(expectedProps.preWindow).trim();
+            var actualPreWindow = preWindowEl.value == null ? "" : String(preWindowEl.value).trim();
+            var defaultPreWindow = preWindowEl.defaultValue == null ? actualPreWindow : String(preWindowEl.defaultValue).trim();
+            if (actualPreWindow !== expectedPreWindow || defaultPreWindow !== expectedPreWindow) {
+                mismatches.push("preWindow: expected '" + expectedPreWindow + "' got value '" + actualPreWindow + "' / default '" + defaultPreWindow + "'");
             }
         }
 
         var postWindowEl = document.getElementById("postWindow");
-        if (postWindowEl && expectedProps.postWindow) {
-            if (postWindowEl.value !== expectedProps.postWindow) {
-                mismatches.push("postWindow: expected '" + expectedProps.postWindow + "' got '" + postWindowEl.value + "'");
+        if (postWindowEl) {
+            var expectedPostWindow = expectedProps.postWindow == null ? "" : String(expectedProps.postWindow).trim();
+            var actualPostWindow = postWindowEl.value == null ? "" : String(postWindowEl.value).trim();
+            var defaultPostWindow = postWindowEl.defaultValue == null ? actualPostWindow : String(postWindowEl.defaultValue).trim();
+            if (actualPostWindow !== expectedPostWindow || defaultPostWindow !== expectedPostWindow) {
+                mismatches.push("postWindow: expected '" + expectedPostWindow + "' got value '" + actualPostWindow + "' / default '" + defaultPostWindow + "'");
             }
         }
 
@@ -20820,6 +20878,19 @@
         }
 
         return mismatches;
+    }
+
+    async function applyAndVerifyArchiveUpdateWindows(props) {
+        for (var attempt = 0; attempt < 2; attempt++) {
+            setArchiveUpdateWindowFields(props);
+            await sleep(150);
+            var mismatches = verifyModalProperties(props).filter(function(mismatch) {
+                return mismatch.indexOf("preWindow:") === 0 || mismatch.indexOf("postWindow:") === 0;
+            });
+            if (mismatches.length === 0) return true;
+            log("Archive/Update Forms: window values still differ after attempt " + (attempt + 1) + ": " + mismatches.join("; "));
+        }
+        return false;
     }
 
     // Main Archive/Update Forms execution
@@ -20899,7 +20970,7 @@
                 // STEP 0: Fresh DOM lookup for this occurrence
                 // ========================================
                 await sleep(800);
-                var row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText);
+                var row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText, occ.editHref);
                 if (!row) {
                     log("Archive/Update Forms: [" + (i+1) + "/" + total + "] row not found for " + occ.segmentText + " | " + occ.eventText + " | " + occ.formText + " - may already be processed");
                     progressContent.setItemStatus(i, "Skipped (not found)", "#ffc107");
@@ -20968,7 +21039,7 @@
                 if (editProps && editProps.hidden) {
                     log("Archive/Update Forms: Step 2 - collecting visibility properties");
                     await sleep(500);
-                    row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText);
+                    row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText, occ.editHref);
                     if (row) {
                         var visLink = row.querySelector('a[href*="visiblecondition"]');
                         if (!visLink) {
@@ -20997,7 +21068,7 @@
                 // STEP 3: Determine action - Archive or Update
                 // ========================================
                 await sleep(800);
-                row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText);
+                row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText, occ.editHref);
                 if (!row) {
                     log("Archive/Update Forms: Step 3 - row disappeared before action");
                     progressContent.setItemStatus(i, "Error (row gone)", "#dc3545");
@@ -21046,7 +21117,7 @@
                     log("Archive/Update Forms: PATH A - Update in-place for " + occ.rowKey);
                     progressContent.setItemStatus(i, "Updating...", "#17a2b8");
 
-                    row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText);
+                    row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText, occ.editHref);
                     if (!row) {
                         log("Archive/Update Forms: PATH A - row not found for update");
                         progressContent.setItemStatus(i, "Error (row gone)", "#dc3545");
@@ -21085,11 +21156,27 @@
                     }
                     await sleep(500);
 
+                    if (editProps && !(await applyAndVerifyArchiveUpdateWindows(editProps))) {
+                        log("Archive/Update Forms: PATH A - window values could not be restored after changing the form; skipping save");
+                        progressContent.setItemStatus(i, "Error (window values)", "#dc3545");
+                        errorCount++;
+                        await closeCurrentModal();
+                        continue;
+                    }
+
                     // Set reason for change
                     var updateReasonEl = document.getElementById("reasonForChange");
                     if (updateReasonEl) {
                         updateReasonEl.value = archiveReason || "Form updated";
                         updateReasonEl.dispatchEvent(new Event("change", { bubbles: true }));
+                    }
+
+                    if (editProps && !(await applyAndVerifyArchiveUpdateWindows(editProps))) {
+                        log("Archive/Update Forms: PATH A - final window verification failed; skipping save");
+                        progressContent.setItemStatus(i, "Error (window values)", "#dc3545");
+                        errorCount++;
+                        await closeCurrentModal();
+                        continue;
                     }
 
                     // Save
@@ -21127,7 +21214,7 @@
                         log("Archive/Update Forms: PATH B - archiving source for " + occ.rowKey);
                         progressContent.setItemStatus(i, "Archiving...", "#17a2b8");
 
-                        row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText);
+                        row = findRowInDOM(occ.segmentText, occ.eventText, occ.formText, occ.editHref);
                         if (!row) {
                             log("Archive/Update Forms: PATH B - row not found for archiving");
                             progressContent.setItemStatus(i, "Error (row gone)", "#dc3545");
@@ -21288,6 +21375,16 @@
                             var mismatches2 = verifyModalProperties(editProps);
                             if (mismatches2.length > 0) {
                                 log("Archive/Update Forms: PATH B - WARNING: still have mismatches after retry: " + mismatches2.join("; "));
+                                var windowMismatch = mismatches2.some(function(mismatch) {
+                                    return mismatch.indexOf("preWindow:") === 0 || mismatch.indexOf("postWindow:") === 0;
+                                });
+                                if (windowMismatch) {
+                                    log("Archive/Update Forms: PATH B - CRITICAL: window values did not match source; skipping save");
+                                    progressContent.setItemStatus(i, "Error (window values)", "#dc3545");
+                                    errorCount++;
+                                    await closeCurrentModal();
+                                    continue;
+                                }
                             } else {
                                 log("Archive/Update Forms: PATH B - properties verified after retry");
                             }
@@ -21309,6 +21406,20 @@
                         errorCount++;
                         await closeCurrentModal();
                         continue;
+                    }
+
+                    if (editProps) {
+                        setArchiveUpdateWindowFields(editProps);
+                        var finalWindowMismatches = verifyModalProperties(editProps).filter(function(mismatch) {
+                            return mismatch.indexOf("preWindow:") === 0 || mismatch.indexOf("postWindow:") === 0;
+                        });
+                        if (finalWindowMismatches.length > 0) {
+                            log("Archive/Update Forms: PATH B - CRITICAL: final window verification failed: " + finalWindowMismatches.join("; "));
+                            progressContent.setItemStatus(i, "Error (window values)", "#dc3545");
+                            errorCount++;
+                            await closeCurrentModal();
+                            continue;
+                        }
                     }
 
                     // Save the new scheduled activity
@@ -29174,7 +29285,17 @@
             num.maxLength = item.length || "";
             num.style.cssText = "width:90px;max-width:110px;height:28px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;background:#f9f9f9;color:#555;";
             wrap.appendChild(num);
-        } else if (dt.indexOf("boolean") !== -1 || dt.indexOf("radio") !== -1) {
+        } else if (dt.indexOf("boolean") !== -1) {
+            var booleanLabel = document.createElement("label");
+            booleanLabel.className = "checkbox-inline";
+            booleanLabel.style.fontWeight = "400";
+            var booleanInput = document.createElement("input");
+            booleanInput.type = "checkbox";
+            booleanInput.value = "true";
+            booleanInput.disabled = true;
+            booleanLabel.appendChild(booleanInput);
+            wrap.appendChild(booleanLabel);
+        } else if (dt.indexOf("radio") !== -1) {
             var yes = document.createElement("label");
             yes.style.marginRight = "12px";
             var ycb = document.createElement("input");
